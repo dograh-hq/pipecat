@@ -44,6 +44,11 @@ class TaskObserver(BaseObserver):
         self._task_manager = task_manager
         self._proxies: List[Proxy] = []
 
+    def add_observer(self, observer: BaseObserver):
+        proxy = self._create_proxy(observer)
+        self._proxies.append(proxy)
+        self._observers.append(observer)
+
     async def start(self):
         """Starts all proxy observer tasks."""
         self._proxies = self._create_proxies(self._observers)
@@ -57,15 +62,19 @@ class TaskObserver(BaseObserver):
         for proxy in self._proxies:
             await proxy.queue.put(data)
 
-    def _create_proxies(self, observers) -> List[Proxy]:
+    def _create_proxy(self, observer: BaseObserver) -> Proxy:
+        queue = asyncio.Queue()
+        task = self._task_manager.create_task(
+            self._proxy_task_handler(queue, observer),
+            f"TaskObserver::{observer.__class__.__name__}::_proxy_task_handler",
+        )
+        proxy = Proxy(queue=queue, task=task, observer=observer)
+        return proxy
+
+    def _create_proxies(self, observers: List[BaseObserver]) -> List[Proxy]:
         proxies = []
         for observer in observers:
-            queue = asyncio.Queue()
-            task = self._task_manager.create_task(
-                self._proxy_task_handler(queue, observer),
-                f"TaskObserver::{observer.__class__.__name__}::_proxy_task_handler",
-            )
-            proxy = Proxy(queue=queue, task=task, observer=observer)
+            proxy = self._create_proxy(observer)
             proxies.append(proxy)
         return proxies
 

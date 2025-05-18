@@ -9,6 +9,7 @@ import time
 import unittest
 
 from pipecat.frames.frames import EndFrame, HeartbeatFrame, StartFrame, TextFrame
+from pipecat.observers.base_observer import BaseObserver, FramePushed
 from pipecat.pipeline.parallel_pipeline import ParallelPipeline
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.task import PipelineParams, PipelineTask
@@ -94,6 +95,54 @@ class TestPipelineTask(unittest.IsolatedAsyncioTestCase):
         await task.queue_frames([TextFrame(text="Bye!"), EndFrame()])
         await task.run()
         assert task.has_finished()
+
+    async def test_task_observers(self):
+        frame_received = False
+
+        class CustomObserver(BaseObserver):
+            async def on_push_frame(self, data: FramePushed):
+                nonlocal frame_received
+
+                if isinstance(data.frame, TextFrame):
+                    frame_received = True
+
+        identity = IdentityFilter()
+        pipeline = Pipeline([identity])
+        task = PipelineTask(pipeline, observers=[CustomObserver()])
+        task.set_event_loop(asyncio.get_event_loop())
+
+        await task.queue_frames([TextFrame(text="Hello Downstream!"), EndFrame()])
+        await task.run()
+        assert frame_received
+
+    async def test_task_add_observer(self):
+        frame_received = False
+        frame_add_received = False
+
+        class CustomObserver(BaseObserver):
+            async def on_push_frame(self, data: FramePushed):
+                nonlocal frame_received
+
+                if isinstance(data.frame, TextFrame):
+                    frame_received = True
+
+        class CustomAddObserver(BaseObserver):
+            async def on_push_frame(self, data: FramePushed):
+                nonlocal frame_add_received
+
+                if isinstance(data.frame, TextFrame):
+                    frame_add_received = True
+
+        identity = IdentityFilter()
+        pipeline = Pipeline([identity])
+        task = PipelineTask(pipeline, observers=[CustomObserver()])
+        task.set_event_loop(asyncio.get_event_loop())
+        task.add_observer(CustomAddObserver())
+
+        await task.queue_frames([TextFrame(text="Hello Downstream!"), EndFrame()])
+        await task.run()
+        assert frame_received
+        assert frame_add_received
 
     async def test_task_event_handlers(self):
         upstream_received = False

@@ -205,14 +205,16 @@ class PipelineTask(BaseTask):
                     DeprecationWarning,
                 )
             observers = self._params.observers
+        self._turn_tracking_observer: Optional[TurnTrackingObserver] = None
+        self._turn_trace_observer: Optional[TurnTraceObserver] = None
         if self._enable_turn_tracking:
             self._turn_tracking_observer = TurnTrackingObserver()
-            observers = [self._turn_tracking_observer] + list(observers)
+            observers.append(self._turn_tracking_observer)
         if self._enable_turn_tracking and self._enable_tracing:
             self._turn_trace_observer = TurnTraceObserver(
                 self._turn_tracking_observer, conversation_id=self._conversation_id
             )
-            observers = [self._turn_trace_observer] + list(observers)
+            observers.append(self._turn_trace_observer)
         self._finished = False
 
         # This queue receives frames coming from the pipeline upstream.
@@ -273,12 +275,15 @@ class PipelineTask(BaseTask):
     @property
     def turn_tracking_observer(self) -> Optional[TurnTrackingObserver]:
         """Return the turn tracking observer if enabled."""
-        return getattr(self, "_turn_tracking_observer", None)
+        return self._turn_tracking_observer
 
     @property
     def turn_trace_observer(self) -> Optional[TurnTraceObserver]:
         """Return the turn trace observer if enabled."""
-        return getattr(self, "_turn_trace_observer", None)
+        return self._turn_trace_observer
+
+    def add_observer(self, observer: BaseObserver):
+        self._observer.add_observer(observer)
 
     def set_event_loop(self, loop: asyncio.AbstractEventLoop):
         self._task_manager.set_event_loop(loop)

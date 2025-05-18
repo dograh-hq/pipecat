@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added `PipelineTask.add_observer()` to allow adding observers after task
+  creation.
+
 - Added additional languages to `LmntTTSService`. Languages include: `hi`, `id`,
   `it`, `ja`, `nl`, `pl`, `ru`, `sv`, `th`, `tr`, `uk`, `vi`. 
 
