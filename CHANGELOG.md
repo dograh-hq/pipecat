@@ -64,6 +64,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `BaseTextAggregator` methods `aggregate()`, `handle_interruption()` and
+  `reset()` are now async.
+
 - `GeminiMultimodalLiveLLMService` now uses the user transcription and usage
   metrics provided by Gemini Live.
 
