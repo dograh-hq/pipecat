@@ -58,6 +58,8 @@ class LocalSmartTurnAnalyzer(BaseSmartTurn):
 
         # Move input tensors to the same device as the model
         inputs = {k: v.to(self._device) for k, v in inputs.items()}
+        
+        logger.debug("Local Smart Turn - starting prediction")
 
         # Disable gradient calculation for inference
         with torch.no_grad():
@@ -66,6 +68,8 @@ class LocalSmartTurnAnalyzer(BaseSmartTurn):
             probabilities = torch.nn.functional.softmax(logits, dim=1)
             completion_prob = probabilities[0, 1].item()  # Probability of class 1 (Complete)
             prediction = 1 if completion_prob > 0.5 else 0
+            
+        logger.debug(f"Local Smart Turn - prediction complete prediction: {prediction}")
 
         return {
             "prediction": prediction,
