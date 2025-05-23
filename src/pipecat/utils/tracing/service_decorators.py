@@ -34,6 +34,7 @@ from pipecat.utils.tracing.turn_context_provider import get_current_turn_context
 if is_tracing_available():
     from opentelemetry import context as context_api
     from opentelemetry import trace
+    from pipecat.frames.frames import LLMTextFrame
 
 T = TypeVar("T")
 R = TypeVar("R")
@@ -67,20 +68,6 @@ def _get_parent_service_context(self):
     return context_api.get_current()
 
 
-def _get_service_name(self, service_prefix: str) -> str:
-    """Generate a default span name using service type and class name.
-
-    Args:
-        self: The service instance.
-        service_prefix: The service type (e.g., 'llm', 'stt', 'tts').
-
-    Returns:
-        A default span name string like "type_classname" (e.g. llm_openaillmservice).
-    """
-    service_class_name = self.__class__.__name__.lower()
-    return f"{service_prefix}_{service_class_name}"
-
-
 def _add_token_usage_to_span(span, token_usage):
     """Add token usage metrics to a span (internal use only).
 
@@ -93,13 +80,15 @@ def _add_token_usage_to_span(span, token_usage):
 
     if isinstance(token_usage, dict):
         if "prompt_tokens" in token_usage:
-            span.set_attribute("llm.prompt_tokens", token_usage["prompt_tokens"])
+            span.set_attribute("gen_ai.usage.input_tokens", token_usage["prompt_tokens"])
         if "completion_tokens" in token_usage:
-            span.set_attribute("llm.completion_tokens", token_usage["completion_tokens"])
+            span.set_attribute("gen_ai.usage.output_tokens", token_usage["completion_tokens"])
     else:
         # Handle LLMTokenUsage object
-        span.set_attribute("llm.prompt_tokens", getattr(token_usage, "prompt_tokens", 0))
-        span.set_attribute("llm.completion_tokens", getattr(token_usage, "completion_tokens", 0))
+        span.set_attribute("gen_ai.usage.input_tokens", getattr(token_usage, "prompt_tokens", 0))
+        span.set_attribute(
+            "gen_ai.usage.output_tokens", getattr(token_usage, "completion_tokens", 0)
+        )
 
 
 def traced_tts(func: Optional[Callable] = None, *, name: Optional[str] = None) -> Callable:
@@ -134,7 +123,7 @@ def traced_tts(func: Optional[Callable] = None, *, name: Optional[str] = None) -
                 return
 
             service_class_name = self.__class__.__name__
-            span_name = name or _get_service_name(self, "tts")
+            span_name = "tts"
 
             # Get parent context
             turn_context = get_current_turn_context()
@@ -237,7 +226,7 @@ def traced_stt(func: Optional[Callable] = None, *, name: Optional[str] = None) -
                     return await f(self, transcript, is_final, language)
 
                 service_class_name = self.__class__.__name__
-                span_name = name or _get_service_name(self, "stt")
+                span_name = "stt"
 
                 # Get the turn context first, then fall back to service context
                 turn_context = get_current_turn_context()
@@ -313,7 +302,7 @@ def traced_llm(func: Optional[Callable] = None, *, name: Optional[str] = None) -
                     return await f(self, context, *args, **kwargs)
 
                 service_class_name = self.__class__.__name__
-                span_name = name or _get_service_name(self, "llm")
+                span_name = "llm"
 
                 # Get the parent context - turn context if available, otherwise service context
                 turn_context = get_current_turn_context()
@@ -341,6 +330,25 @@ def traced_llm(func: Optional[Callable] = None, *, name: Optional[str] = None) -
 
                             # Replace the method temporarily
                             self.start_llm_usage_metrics = wrapped_start_llm_usage_metrics
+
+                        # For text aggregation
+                        original_push_frame = None
+                        aggregated_text = []
+                        if hasattr(self, "push_frame"):
+                            original_push_frame = self.push_frame
+
+                            # Override the method to capture and aggregate LLMTextFrames
+                            @functools.wraps(original_push_frame)
+                            async def wrapped_push_frame(frame, direction=None):
+                                # Call the original push_frame method
+                                await original_push_frame(frame, direction)
+                                
+                                # Capture and aggregate LLMTextFrames
+                                if isinstance(frame, LLMTextFrame):
+                                    aggregated_text.append(frame.text)
+                            
+                            # Replace push_frame temporarily
+                            self.push_frame = wrapped_push_frame
 
                         try:
                             # Detect if we're using Google's service
@@ -435,6 +443,19 @@ def traced_llm(func: Optional[Callable] = None, *, name: Optional[str] = None) -
                             and original_start_llm_usage_metrics
                         ):
                             self.start_llm_usage_metrics = original_start_llm_usage_metrics
+
+                        # Restore original push_frame method and set the aggregated content
+                        if (
+                            "original_push_frame" in locals()
+                            and original_push_frame
+                        ):
+                            self.push_frame = original_push_frame
+                            # Add aggregated text to span if collected
+                            
+                            if aggregated_text:
+                                current_span.set_attribute(
+                                    "completion", "".join(aggregated_text)
+                                )
 
                         # Update TTFB metric
                         ttfb_ms = getattr(getattr(self, "_metrics", None), "ttfb_ms", None)
