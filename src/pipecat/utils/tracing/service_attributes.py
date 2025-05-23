@@ -206,7 +206,7 @@ def add_llm_span_attributes(
 
     # Add optional attributes
     if messages:
-        span.set_attribute("input", messages)
+        span.set_attribute("gen_ai.prompt_json", messages)
 
     if tools:
         span.set_attribute("tools", tools)

@@ -454,7 +454,10 @@ def traced_llm(func: Optional[Callable] = None, *, name: Optional[str] = None) -
                             
                             if aggregated_text:
                                 current_span.set_attribute(
-                                    "completion", "".join(aggregated_text)
+                                    "gen_ai.completion.0.role", "assistant"
+                                )
+                                current_span.set_attribute(
+                                    "gen_ai.completion.0.content", "".join(aggregated_text)
                                 )
 
                         # Update TTFB metric
