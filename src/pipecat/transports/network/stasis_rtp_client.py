@@ -114,7 +114,7 @@ class StasisRTPClient:
 
         @self._connection.event_handler("closed")
         async def _on_closed(_: Any):
-            await self._callbacks.on_client_disconnected(self._connection.caller_channel.id)
+            await self._callbacks.on_client_closed(self._connection.caller_channel.id)
             await self.disconnect()
 
     # ─── public helpers ──────────────────────────────────────────

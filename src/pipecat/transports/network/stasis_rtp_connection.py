@@ -184,15 +184,14 @@ class StasisRTPConnection(BaseObject):
             await self._handle_disconnect()
 
     async def _watch_channel_termination(self):
-        """Listen for ARI ChannelDestroyed events for either leg."""
-
+        """Listen for ARI StasisEnd events for either leg."""
         try:
-            async with self._ari.on_channel_event("ChannelDestroyed") as listener:
-                async for obj, _ in listener:
-                    channel = obj["channel"]
+            async with self._ari.on_channel_event("StasisEnd") as listener:
+                async for channel, _ in listener:
+                    logger.debug(f"Got StasisEnd event with channel_id: {channel.id}")
                     if channel.id in (self.caller_channel.id, getattr(self.em_channel, "id", "")):
                         logger.debug(
-                            f"Channel {channel.id} destroyed – closing StasisRTPConnection {self}"
+                            f"Channel {channel.id} destroyed closing StasisRTPConnection {self}"
                         )
                         await self._handle_disconnect()
                         break  # Exit listener

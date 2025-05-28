@@ -34,6 +34,7 @@ class StasisRTPTransportParams(TransportParams):
 class StasisRTPCallbacks(BaseModel):
     on_client_connected: Callable[[str], Awaitable[None]]
     on_client_disconnected: Callable[[str], Awaitable[None]]
+    on_client_closed: Callable[[str], Awaitable[None]]
 
 
 # ------------------------------------------------ Input Transport -------------------------
@@ -211,6 +212,7 @@ class StasisRTPTransport(BaseTransport):
         self._callbacks = StasisRTPCallbacks(
             on_client_connected=self._on_client_connected,
             on_client_disconnected=self._on_client_disconnected,
+            on_client_closed=self._on_client_closed,
         )
 
         self._client = StasisRTPClient(stasis_connection, self._callbacks)
@@ -226,6 +228,7 @@ class StasisRTPTransport(BaseTransport):
         # expose handlers
         self._register_event_handler("on_client_connected")
         self._register_event_handler("on_client_disconnected")
+        self._register_event_handler("on_client_closed")
 
     def input(self) -> StasisRTPInputTransport:
         return self._input
@@ -240,5 +243,5 @@ class StasisRTPTransport(BaseTransport):
     async def _on_client_disconnected(self, chan_id: str):
         await self._call_event_handler("on_client_disconnected", chan_id)
 
-    async def _on_session_timeout(self, chan_id: str):
-        await self._call_event_handler("on_session_timeout", chan_id)
+    async def _on_client_closed(self, chan_id: str):
+        await self._call_event_handler("on_client_closed", chan_id)
