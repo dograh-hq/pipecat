@@ -64,7 +64,7 @@ class StasisRTPConnection(BaseObject):
         # RTP addressing information (useful for users wanting to create their
         # own RTP transports).
         self.local_addr = ("0.0.0.0", port)
-        self.remote_addr = (host, port)
+        self.remote_addr = None
 
         # Internal state.
         self._closed = asyncio.Event()
@@ -159,8 +159,12 @@ class StasisRTPConnection(BaseObject):
             # Add both legs to the mixing bridge.
             await self._bridge.addChannel(channel=[self.caller_channel.id, self.em_channel.id])
 
+            ip = await self.em_channel.getChannelVar(variable="UNICASTRTP_LOCAL_ADDRESS")
+            port = await self.em_channel.getChannelVar(variable="UNICASTRTP_LOCAL_PORT")
+            self.remote_addr = (ip["value"], int(port["value"]))
+
             logger.debug(
-                f"StasisRTPConnection {self} connection resources ready (bridge {self._bridge.id})"
+                f"StasisRTPConnection {self} connection resources ready (bridge {self._bridge.id}) and remote address: {self.remote_addr}"
             )
 
             # Mark internal state.

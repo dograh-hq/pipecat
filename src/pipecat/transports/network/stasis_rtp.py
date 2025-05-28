@@ -1,9 +1,8 @@
 # transports/ari_external_media.py  (new file)
 
 import asyncio
-import socket
 import time
-from typing import AsyncIterator, Awaitable, Callable, Optional
+from typing import Awaitable, Callable, Optional
 
 from loguru import logger
 from pydantic import BaseModel
@@ -21,10 +20,10 @@ from pipecat.frames.frames import (
 )
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.serializers.base_serializer import FrameSerializer
-from pipecat.serializers.stasis_rtp import StasisRTPFrameSerializer
 from pipecat.transports.base_input import BaseInputTransport
 from pipecat.transports.base_output import BaseOutputTransport
 from pipecat.transports.base_transport import BaseTransport, TransportParams
+from pipecat.transports.network.stasis_rtp_client import StasisRTPClient
 from pipecat.transports.network.stasis_rtp_connection import StasisRTPConnection
 
 
@@ -35,127 +34,6 @@ class StasisRTPTransportParams(TransportParams):
 class StasisRTPCallbacks(BaseModel):
     on_client_connected: Callable[[str], Awaitable[None]]
     on_client_disconnected: Callable[[str], Awaitable[None]]
-
-
-class StasisRTPClient:
-    """Low-level wrapper around :class:`StasisRTPConnection` handling the raw
-    UDP socket I/O and surfacing a minimal API (receive / send / connect /
-    disconnect) mimicking :class:`SmallWebRTCClient`."""
-
-    def __init__(
-        self,
-        connection: StasisRTPConnection,
-        serializer: StasisRTPFrameSerializer,
-        callbacks: "StasisRTPCallbacks",
-    ):
-        self._connection = connection
-        self._serializer = serializer
-        self._callbacks = callbacks
-
-        self._socket: Optional[socket.socket] = None
-        self._closing = False
-
-        # Register listeners on the connection object.
-        @self._connection.event_handler("connected")
-        async def _on_connected(_):
-            await self._setup_socket()
-            await self._callbacks.on_client_connected(self._connection.caller_channel.id)
-
-        @self._connection.event_handler("disconnected")
-        async def _on_disconnected(_):
-            await self._callbacks.on_client_disconnected(self._connection.caller_channel.id)
-            await self.disconnect()
-
-        @self._connection.event_handler("closed")
-        async def _on_closed(_):
-            await self._callbacks.on_client_disconnected(self._connection.caller_channel.id)
-            await self.disconnect()
-
-    # ------------------------------------------------------------------
-    # Public helpers
-    # ------------------------------------------------------------------
-
-    async def setup(self, _: StartFrame):
-        """Kept for API compatibility nothing to configure here."""
-        pass
-
-    async def connect(self):
-        if self._connection.is_connected():
-            return
-        await self._connection.connect()
-
-    async def disconnect(self):
-        if self._closing:
-            return
-        self._closing = True
-        if self._socket:
-            try:
-                self._socket.close()
-            except Exception as e:
-                logger.debug(f"Exception {e} while closing the socket")
-                pass  # best effort
-
-    # ---------------------------------------------- socket helpers
-
-    async def _setup_socket(self):
-        if self._socket:
-            return
-
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.setblocking(False)
-        sock.bind(self._connection.local_addr)
-        try:
-            sock.connect(self._connection.remote_addr)
-        except Exception as exc:
-            logger.warning(f"Failed to connect UDP socket to remote {self._connection.remote_addr}: {exc}")
-
-        self._socket = sock
-
-    async def receive(self) -> AsyncIterator[bytes]:
-        """Async generator yielding raw μ-law RTP payloads (stripped header)."""
-
-        if not self._socket:
-            # Wait until socket ready
-            while not self._socket and not self._closing:
-                await asyncio.sleep(0.05)
-
-        loop = asyncio.get_running_loop()
-
-        while not self._closing:
-            try:
-                data = await loop.sock_recv(self._socket, 2048)
-                if not data:
-                    continue
-
-                # Strip 12-byte RTP header if present (very naive but works for
-                # PCMU without header extensions).
-                if len(data) > 12:
-                    payload = data[12:]
-                else:
-                    payload = data
-
-                yield payload
-            except (asyncio.CancelledError, Exception):
-                break
-
-    async def send(self, data: bytes):
-        if not self._socket or self._closing:
-            return
-
-        loop = asyncio.get_running_loop()
-        try:
-            await loop.sock_sendall(self._socket, data)
-        except Exception as exc:
-            logger.error(f"StasisRTPClient.send failed: {exc}")
-
-    # ------------------------------------------------ properties
-    @property
-    def is_connected(self) -> bool:
-        return self._connection.is_connected() and not self._closing
-
-    @property
-    def is_closing(self) -> bool:
-        return self._closing
 
 
 # ------------------------------------------------ Input Transport -------------------------
@@ -335,11 +213,15 @@ class StasisRTPTransport(BaseTransport):
             on_client_disconnected=self._on_client_disconnected,
         )
 
-        self._client = StasisRTPClient(stasis_connection, params.serializer, self._callbacks)
+        self._client = StasisRTPClient(stasis_connection, self._callbacks)
 
-        self._input = StasisRTPInputTransport(self, self._client, self._params, name=self._input_name)
+        self._input = StasisRTPInputTransport(
+            self, self._client, self._params, name=self._input_name
+        )
 
-        self._output = StasisRTPOutputTransport(self, self._client, self._params, name=self._output_name)
+        self._output = StasisRTPOutputTransport(
+            self, self._client, self._params, name=self._output_name
+        )
 
         # expose handlers
         self._register_event_handler("on_client_connected")
