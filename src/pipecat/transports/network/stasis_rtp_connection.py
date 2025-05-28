@@ -1,0 +1,230 @@
+import asyncio
+import uuid
+from typing import Optional
+
+import asyncari
+from asyncari.model import Channel
+from loguru import logger
+
+from pipecat.utils.base_object import BaseObject
+
+# NOTE: Currently we always use μ-law ("ulaw") with 20 ms frame size just like
+# `SmallWebRTCConnection`.  If in the future we want to support other codecs or
+# ptime we can expose those knobs here.
+
+
+class StasisRTPConnection(BaseObject):
+    """Represents the server-side view of a single RTP call coming from
+    Asterisk using *externalMedia*.
+
+    Lifecycle
+    =========
+    1. The **caller** (a PJSIP channel inside Asterisk) enters the Stasis
+       application we receive the *StasisStart* ARI event.
+    2. We create a dedicated UDP port and spawn an *externalMedia* channel so
+       that Asterisk starts sending/receiving raw RTP to that port.
+    3. A mixing bridge is created and both legs (caller + externalMedia) are
+       added to it.  From this moment on the call is *connected*.
+    4. When either channel is destroyed we trigger the *disconnected* / *closed*
+       events and perform cleanup.
+
+    The class purposefully mirrors the behaviour and public API of
+    :class:`SmallWebRTCConnection` so that higher-level components can treat
+    WebRTC and Stasis (RTP) calls uniformly.
+    """
+
+    _SUPPORTED_EVENTS = [
+        # Connection states.  Keep the same wording as SmallWebRTCConnection to
+        # allow code reuse.
+        "connecting",
+        "connected",
+        "disconnected",
+        "closed",
+        "failed",
+        "new",
+    ]
+
+    def __init__(
+        self,
+        ari_client: asyncari.Client,
+        caller_channel: Channel,
+        host: str,
+        port: int,
+    ) -> None:
+        super().__init__()
+
+        # External dependencies.
+        self._ari: asyncari.Client = ari_client
+
+        # Channels/bridge involved in this call.
+        self.caller_channel: Channel = caller_channel
+        self.em_channel: Optional[Channel] = None  # externalMedia leg
+        self._bridge: Optional[asyncari.model.Bridge] = None
+
+        # RTP addressing information (useful for users wanting to create their
+        # own RTP transports).
+        self.local_addr = ("0.0.0.0", port)
+        self.remote_addr = (host, port)
+
+        # Internal state.
+        self._closed = asyncio.Event()
+        self._connect_invoked: bool = False  # Mirrors SmallWebRTCConnection
+        self._is_connected: bool = False  # True once bridge created & channels bridged
+
+        # Register supported event handler names so that client code can
+        # register callbacks via `add_event_handler` / `@event_handler`.
+        for evt in self._SUPPORTED_EVENTS:
+            self._register_event_handler(evt)
+
+        # Kick-off asynchronous initialisation (bridge creation, etc.).
+        asyncio.create_task(self._setup_call(host, port))
+
+    # ---------------------------------------------------------------------
+    # Public helpers – similar surface as SmallWebRTCConnection
+    # ---------------------------------------------------------------------
+
+    async def wait_closed(self):
+        """Await until the call is fully terminated."""
+
+        await self._closed.wait()
+
+    async def disconnect(self):
+        """Instruct Asterisk to hang-up the call and perform cleanup."""
+
+        # Try to gracefully hang-up both legs; ignore failures.
+        try:
+            if self.caller_channel:
+                await self.caller_channel.hangup()
+        except Exception:
+            logger.exception("Failed to hang-up caller channel")
+
+        try:
+            if self.em_channel:
+                await self.em_channel.hangup()
+        except Exception:
+            logger.exception("Failed to hang-up externalMedia channel")
+
+        await self._handle_disconnect()
+
+    async def connect(self):
+        """Signal that the user is ready to start the call.
+
+        For API parity with `SmallWebRTCConnection` this method **must** be
+        called after the application has added its event handlers.  Only after
+        this invocation will the *connected* event be dispatched (either
+        immediately if the underlying bridge has already been formed, or later
+        once `_setup_call` completes).
+        """
+
+        self._connect_invoked = True
+
+        # If the call has already reached the *connected* state we can dispatch
+        # the event right away.
+        if self.is_connected():
+            await self._call_event_handler("connected")
+
+    # ------------------------------------------------------------------
+    # State helpers
+    # ------------------------------------------------------------------
+
+    def is_connected(self) -> bool:
+        """Return *True* once the call is established **and** `connect()` has been
+        invoked by the user (same semantics as `SmallWebRTCConnection`)."""
+
+        return self._connect_invoked and self._is_connected and not self._closed.is_set()
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    async def _setup_call(self, host: str, port: int):
+        """Create externalMedia + bridge and notify that the call is connected."""
+
+        try:
+            em_channel_id = str(uuid.uuid4())
+
+            logger.debug(f"Creating externalMedia channel {em_channel_id} on {host}:{port}")
+
+            self.em_channel = await self._ari.channels.externalMedia(
+                app=self._ari.app,
+                channelId=em_channel_id,
+                external_host=f"{host}:{port}",
+                format="ulaw",
+                direction="both",
+            )
+
+            # Create a mixing bridge and add both legs.
+            self._bridge = await self._ari.bridges.create(type="mixing")
+
+            # Add both legs to the mixing bridge.
+            await self._bridge.addChannel(channel=[self.caller_channel.id, self.em_channel.id])
+
+            logger.debug(
+                f"StasisRTPConnection {self} connection resources ready (bridge {self._bridge.id})"
+            )
+
+            # Mark internal state.
+            self._is_connected = True
+
+            # Only dispatch *connected* if the application has already invoked
+            # `connect()`.
+            if self._connect_invoked:
+                await self._call_event_handler("connected")
+
+            # Start background listener for ChannelDestroyed so that we know when the
+            # call ends.
+            asyncio.create_task(self._watch_channel_termination())
+
+        except Exception as exc:
+            logger.exception(f"Error setting up StasisRTPConnection: {exc}")
+            await self._handle_disconnect()
+
+    async def _watch_channel_termination(self):
+        """Listen for ARI ChannelDestroyed events for either leg."""
+
+        try:
+            async with self._ari.on_channel_event("ChannelDestroyed") as listener:
+                async for obj, _ in listener:
+                    channel = obj["channel"]
+                    if channel.id in (self.caller_channel.id, getattr(self.em_channel, "id", "")):
+                        logger.debug(
+                            f"Channel {channel.id} destroyed – closing StasisRTPConnection {self}"
+                        )
+                        await self._handle_disconnect()
+                        break  # Exit listener
+        except Exception as exc:
+            # Listener finished unexpectedly – make sure we clean up.
+            logger.exception(f"Channel watchdog stopped with error: {exc}")
+            await self._handle_disconnect()
+
+    async def _handle_disconnect(self):
+        """Common logic for both remote and local hang-up."""
+
+        if self._closed.is_set():
+            return
+
+        # Emit disconnected **only** if the call had actually reached the
+        # connected state.
+        if self._is_connected:
+            await self._call_event_handler("disconnected")
+
+        # Cleanup bridge if still present.
+        try:
+            if self._bridge:
+                await self._bridge.destroy()
+        except Exception:
+            logger.exception("Failed to destroy bridge during disconnect")
+
+        self._closed.set()
+
+        await self._call_event_handler("closed")
+
+    # ------------------------------------------------------------------
+    # Dunder helpers
+    # ------------------------------------------------------------------
+
+    def __repr__(self):
+        return (
+            f"<StasisRTPConnection id={self.id} caller={self.caller_channel.id} "
+            f"em={getattr(self.em_channel, 'id', None)} state={'closed' if self._closed.is_set() else 'open'}>"
+        )
