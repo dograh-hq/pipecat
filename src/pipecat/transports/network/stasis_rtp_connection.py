@@ -67,7 +67,9 @@ class StasisRTPConnection(BaseObject):
         self.remote_addr = None
 
         # Internal state.
-        self._closed = asyncio.Event()
+        self._closed = (
+            asyncio.Event()
+        )  # Means that the channels are hung up, either remotely or locally
         self._connect_invoked: bool = False  # Mirrors SmallWebRTCConnection
         self._is_connected: bool = False  # True once bridge created & channels bridged
 
@@ -90,6 +92,11 @@ class StasisRTPConnection(BaseObject):
 
     async def disconnect(self):
         """Instruct Asterisk to hang-up the call and perform cleanup."""
+        # If self._closed is set, then we have already called _handle_disconnect. We might
+        # have called _handle_disconnect upon remote hangup, and hence we should not
+        # call hangup on the channels
+        if self._closed.is_set():
+            return
 
         # Try to gracefully hang-up both legs; ignore failures.
         try:
@@ -202,14 +209,19 @@ class StasisRTPConnection(BaseObject):
 
     async def _handle_disconnect(self):
         """Common logic for both remote and local hang-up."""
-
         if self._closed.is_set():
             return
 
+        self._closed.set()
+
         # Emit disconnected **only** if the call had actually reached the
-        # connected state.
+        # connected state. This will propagate the disconnected to the
+        # RTPClent and to the Trasport, where pipeline can be ended
         if self._is_connected:
             await self._call_event_handler("disconnected")
+
+        # Set is_connected to False
+        self.is_connected = False
 
         # Cleanup bridge if still present.
         try:
@@ -217,8 +229,6 @@ class StasisRTPConnection(BaseObject):
                 await self._bridge.destroy()
         except Exception:
             logger.exception("Failed to destroy bridge during disconnect")
-
-        self._closed.set()
 
         await self._call_event_handler("closed")
 

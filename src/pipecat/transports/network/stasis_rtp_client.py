@@ -131,12 +131,20 @@ class StasisRTPClient:
         if self._closing:
             return
         self._closing = True
+
+        # Close local sockets
         for sock in (self._recv_sock, self._send_sock):
             if sock:
                 try:
                     sock.close()
                 except Exception:
                     pass
+
+        # Disconnect the underlying RTP connection to hang up the call
+        try:
+            await self._connection.disconnect()
+        except Exception as exc:
+            logger.error(f"Failed to disconnect RTP connection: {exc}")
 
     # ─── socket management ──────────────────────────────────────
 

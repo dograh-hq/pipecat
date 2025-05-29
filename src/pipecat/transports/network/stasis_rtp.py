@@ -157,6 +157,28 @@ class StasisRTPOutputTransport(BaseOutputTransport):
         pass
 
     async def write_raw_audio_frames(self, frames: bytes, destination: Optional[str] = None):
+        """
+        Writes raw audio frames to the RTP transport after they've been processed through
+        the BaseOutputTransport pipeline.
+
+        Audio Frame Processing Flow:
+        1. OutputAudioRawFrame enters BaseOutputTransport.process_frame()
+        2. process_frame() calls _handle_frame() for OutputAudioRawFrame
+        3. _handle_frame() routes frame to appropriate MediaSender.handle_audio_frame()
+        4. MediaSender.handle_audio_frame():
+           - Resamples audio if needed to match transport sample rate
+           - Buffers audio in _audio_buffer
+           - Chunks audio into _audio_chunk_size pieces (typically 10ms chunks)
+           - Puts audio chunks into _audio_queue
+        5. MediaSender._audio_task_handler() processes frames from _audio_queue:
+           - Iterates through frames via _next_frame() generator
+           - For OutputAudioRawFrame, calls transport.write_raw_audio_frames()
+           - This is where we arrive at this method
+
+        Args:
+            frames: Raw audio bytes (16-bit PCM) ready for RTP transmission
+            destination: Optional destination identifier (not used in RTP transport)
+        """
         if self._client.is_closing:
             return
 
@@ -181,6 +203,8 @@ class StasisRTPOutputTransport(BaseOutputTransport):
 
     async def _write_frame(self, frame: Frame):
         try:
+            # Typically, serialize will decide if the frame needs to be transmitted over wire.
+            # Currently, we get None for anything apart from AudioFrame.
             payload = await self._params.serializer.serialize(frame)
             if payload:
                 await self._client.send(payload)
@@ -188,6 +212,22 @@ class StasisRTPOutputTransport(BaseOutputTransport):
             logger.error(f"StasisRTPOutputTransport send error: {exc}")
 
     async def _write_audio_sleep(self):
+        """
+        Simulates real-time audio playback timing by introducing controlled delays.
+
+        This method implements a clock simulation to pace audio transmission at realistic
+        intervals. Without this pacing, audio frames would be sent as fast as possible,
+        which could overwhelm receivers or cause buffering issues.
+
+        The method:
+        1. Calculates how long to sleep based on when the next frame should be sent
+        2. Sleeps for the calculated duration (or 0 if we're already behind schedule)
+        3. Updates _next_send_time for the next audio chunk
+
+        The _send_interval is computed as: (audio_chunk_size / sample_rate) / 2
+        This creates timing that simulates how an actual audio device would output
+        audio at the proper rate (e.g., every 10ms for 10ms audio chunks).
+        """
         current_time = time.monotonic()
         sleep_duration = max(0, self._next_send_time - current_time)
         await asyncio.sleep(sleep_duration)
