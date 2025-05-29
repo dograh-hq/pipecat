@@ -100,6 +100,7 @@ class StasisRTPClient:
         self._recv_sock: Optional[socket.socket] = None
         self._send_sock: Optional[socket.socket] = None
         self._closing = False
+        self._disconnect_lock = asyncio.Lock()  # Prevent concurrent disconnection
 
         # ── wire event handlers to the connection ────────────────
         @self._connection.event_handler("connected")
@@ -128,21 +129,19 @@ class StasisRTPClient:
         await self._connection.connect()
 
     async def disconnect(self):
-        if self._closing:
-            return
-        self._closing = True
+        async with self._disconnect_lock:
+            if self._closing:
+                return
+            self._closing = True
 
-        # Close local sockets
-        for sock in (self._recv_sock, self._send_sock):
-            if sock:
-                try:
-                    sock.close()
-                except Exception:
-                    pass
+        # Close local sockets first - this will cause receive() to break
+        await self._close_sockets()
 
         # Disconnect the underlying RTP connection to hang up the call
         try:
-            await self._connection.disconnect()
+            await asyncio.wait_for(self._connection.disconnect(), timeout=5.0)
+        except asyncio.TimeoutError:
+            logger.warning("RTP connection disconnect timed out")
         except Exception as exc:
             logger.error(f"Failed to disconnect RTP connection: {exc}")
 
@@ -166,6 +165,24 @@ class StasisRTPClient:
             ss.connect(self._connection.remote_addr)
             self._send_sock = ss
 
+    async def _close_sockets(self):
+        """Safely close sockets with proper error handling."""
+        for sock_name, sock in [("recv", self._recv_sock), ("send", self._send_sock)]:
+            if sock:
+                try:
+                    # Shutdown the socket first to break any pending operations
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    # Socket might already be closed or in a bad state
+                    pass
+                try:
+                    sock.close()
+                except Exception as exc:
+                    logger.debug(f"Error closing {sock_name} socket: {exc}")
+
+        self._recv_sock = None
+        self._send_sock = None
+
     # ─── receive path ────────────────────────────────────────────
 
     async def receive(self) -> AsyncIterator[bytes]:
@@ -178,8 +195,13 @@ class StasisRTPClient:
         while not self._closing:
             try:
                 data = await loop.sock_recv(self._recv_sock, 2048)
-            except (asyncio.CancelledError, Exception):
+            except (asyncio.CancelledError, OSError, socket.error) as exc:
+                logger.warning(f"RTP receive failed (socket closed): {exc}")
                 break
+            except Exception as exc:
+                logger.debug(f"Unexpected error in receive: {exc}")
+                break
+
             payload = self._decoder.unpack(data)
             if payload is None:
                 continue  # header failed validation
@@ -197,7 +219,7 @@ class StasisRTPClient:
         Send μ-law data of arbitrary length.
         Splits/aggregates into 160-byte chunks before RTP-wrapping.
         """
-        if self._closing:
+        if self._closing or not self._send_sock:
             return
         loop = asyncio.get_running_loop()
 
@@ -208,6 +230,9 @@ class StasisRTPClient:
             packet = self._encoder.pack(chunk, mark=mark)
             try:
                 await loop.sock_sendall(self._send_sock, packet)
+            except (OSError, socket.error) as exc:
+                logger.warning(f"RTP send failed (socket closed): {exc}")
+                break
             except Exception as exc:
                 logger.error(f"RTP send failed: {exc}")
                 break
