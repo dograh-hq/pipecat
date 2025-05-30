@@ -25,6 +25,7 @@ from pipecat.transports.base_output import BaseOutputTransport
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.transports.network.stasis_rtp_client import StasisRTPClient
 from pipecat.transports.network.stasis_rtp_connection import StasisRTPConnection
+from pipecat.utils.enums import EndTaskReason
 
 
 class StasisRTPTransportParams(TransportParams):
@@ -38,6 +39,24 @@ class StasisRTPCallbacks(BaseModel):
 
 
 # ------------------------------------------------ Input Transport -------------------------
+
+"""
+Transport calls client receive to receive the audio from the socket. This happens in the self._receive_audio task.
+Then the audio frames are pushed to _audio_in_queue using push_audio_frame method. Then the _audio_task_handler processes
+the frames from the _audio_in_queue and pushes them to the VAD analyzer, turn analyzer and pushes the audio
+further downstream to tts.
+
+The BaseInputTransport pipeline is responsible for:
+- Resampling the audio to the correct sample rate
+- Applying the audio filter
+- Pushing the audio frames to the VAD analyzer
+- Pushing the audio frames to the turn analyzer
+- Pushing the audio frames to the bot interruption analyzer
+- Pushing the audio frames down the pipeline to the tts
+
+stop method is called from process_frame of the BaseInputTransport. super.stop() stops _audio_task_handler. It then
+calls _client.disconnect. Transport's callbacks are sent to the client using StasisRTPCallbacks.
+"""
 
 
 class StasisRTPInputTransport(BaseInputTransport):
@@ -77,12 +96,16 @@ class StasisRTPInputTransport(BaseInputTransport):
     async def stop(self, frame: EndFrame):
         await super().stop(frame)
         await self._stop_tasks()
-        await self._client.disconnect()
+        # _client.disconnect triggers socket close and then _connection.disconnect
+        # depending on the reason, we either hangup or continue in dialer
+        await self._client.disconnect(frame.metadata.get("reason", EndTaskReason.UNKNOWN.value))
 
     async def cancel(self, frame: CancelFrame):
         await super().cancel(frame)
         await self._stop_tasks()
-        await self._client.disconnect()
+        await self._client.disconnect(
+            frame.metadata.get("reason", EndTaskReason.SYSTEM_CANCELLED.value)
+        )
 
     async def _receive_audio(self):
         try:
@@ -249,13 +272,12 @@ class StasisRTPTransport(BaseTransport):
 
         self._params = params
 
-        self._callbacks = StasisRTPCallbacks(
+        client_callbacks = StasisRTPCallbacks(
             on_client_connected=self._on_client_connected,
             on_client_disconnected=self._on_client_disconnected,
             on_client_closed=self._on_client_closed,
         )
-
-        self._client = StasisRTPClient(stasis_connection, self._callbacks)
+        self._client = StasisRTPClient(stasis_connection, client_callbacks)
 
         self._input = StasisRTPInputTransport(
             self, self._client, self._params, name=self._input_name

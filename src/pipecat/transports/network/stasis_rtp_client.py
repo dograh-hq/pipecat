@@ -75,7 +75,7 @@ class StasisRTPClient:
 
     Public API
     ──────────
-    • await setup(start_frame)      – kept for parity (does nothing)
+    • await setup(start_frame)       kept for parity (does nothing)
     • await connect()
     • async for payload in receive():  # μ-law bytes (20 ms each)
           …
@@ -110,14 +110,9 @@ class StasisRTPClient:
             await self._callbacks.on_client_connected(self._connection.caller_channel.id)
 
         @self._connection.event_handler("disconnected")
-        async def _on_disconnected(_: Any):
+        async def _on_disconnected(_: Any, reason: str):
             await self._callbacks.on_client_disconnected(self._connection.caller_channel.id)
-            await self.disconnect()
-
-        @self._connection.event_handler("closed")
-        async def _on_closed(_: Any):
-            await self._callbacks.on_client_closed(self._connection.caller_channel.id)
-            await self.disconnect()
+            await self.disconnect(reason)
 
     # ─── public helpers ──────────────────────────────────────────
 
@@ -129,7 +124,36 @@ class StasisRTPClient:
             return
         await self._connection.connect()
 
-    async def disconnect(self):
+    async def disconnect(self, reason: str):
+        """
+        This can either be called from the transport when the transport encounters EndFrame or from
+        connection when the connection disconnect handler is called (e.g. when the call is ended by the user).
+
+        Flow when the transport encounters EndFrame:
+        - Transport calls stop()
+        - stop() calls _client.disconnect()
+        - _client.disconnect() closes the sockets and calls _connection.disconnect()
+        - _connection.disconnect() hangs up the call
+        - _connection.disconnect() calls the _handle_disconnect
+        - _handle_disconnect() invokes _connection.event_handler("disconnected")
+        - _connection.event_handler("disconnected") invokes transport's disconnected callback "on_client_disconnected"
+        - tt also calls client disconnect, but since we have set _closing to True, it will return
+        - The pipeline is listening to the "on_client_disconnected" callback and ends the pipeline and does any post processing like
+            sending disposition code on slack etc.
+
+        Flow when the _connection disconnects (e.g. when the call is ended by the user):
+        - _connection.disconnect() calls _handle_disconnect
+        - _handle_disconnect() invokes _connection.event_handler("disconnected")
+        - _connection.event_handler("disconnected") invokes transport's disconnected callback "on_client_disconnected"
+        - _client.disconnect() is called and the sockets are cleaned up
+        - The pipeline is listening to the "on_client_disconnected" callback and ends the pipeline and does any post processing like
+            sending disposition code on slack etc.
+
+        Potential race condition:
+        - If the transport calls stop() and simultaneously the _connection disconnects, we can potentially call _handle_disconnect of the
+            client twice.
+
+        """
         async with self._disconnect_lock:
             if self._closing:
                 return
@@ -140,7 +164,7 @@ class StasisRTPClient:
 
         # Disconnect the underlying RTP connection to hang up the call
         try:
-            await asyncio.wait_for(self._connection.disconnect(), timeout=5.0)
+            await asyncio.wait_for(self._connection.disconnect(reason), timeout=5.0)
         except asyncio.TimeoutError:
             logger.warning("RTP connection disconnect timed out")
         except Exception as exc:
@@ -189,7 +213,7 @@ class StasisRTPClient:
         self._recv_sock = None
         self._send_sock = None
         self._recv_sock_ready.clear()  # Reset the event for potential reconnection
-        
+
         logger.debug("Closed sockets in StasisRTPClient")
 
     # ─── receive path ────────────────────────────────────────────
@@ -206,9 +230,9 @@ class StasisRTPClient:
             await self._recv_sock_ready.wait()
         except asyncio.CancelledError:
             return
-        
+
         logger.debug("Going to receive from the socket now")
-        
+
         while not self._closing:
             try:
                 data = await loop.sock_recv(self._recv_sock, 2048)

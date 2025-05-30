@@ -7,6 +7,7 @@ from asyncari.model import Channel
 from loguru import logger
 
 from pipecat.utils.base_object import BaseObject
+from pipecat.utils.enums import EndTaskReason
 
 # NOTE: Currently we always use μ-law ("ulaw") with 20 ms frame size just like
 # `SmallWebRTCConnection`.  If in the future we want to support other codecs or
@@ -67,11 +68,12 @@ class StasisRTPConnection(BaseObject):
         self.remote_addr = None
 
         # Internal state.
-        self._closed = (
-            asyncio.Event()
-        )  # Means that the channels are hung up, either remotely or locally
+        self._closed: bool = (
+            False  # Means that the channels are hung up, either remotely or locally
+        )
         self._connect_invoked: bool = False  # Mirrors SmallWebRTCConnection
         self._is_connected: bool = False  # True once bridge created & channels bridged
+        self._disconnect_lock = asyncio.Lock()  # Prevent concurrent disconnection
 
         # Register supported event handler names so that client code can
         # register callbacks via `add_event_handler` / `@event_handler`.
@@ -85,37 +87,37 @@ class StasisRTPConnection(BaseObject):
     # Public helpers – similar surface as SmallWebRTCConnection
     # ---------------------------------------------------------------------
 
-    async def wait_closed(self):
-        """Await until the call is fully terminated."""
-
-        await self._closed.wait()
-
-    async def disconnect(self):
+    async def disconnect(self, reason: str):
         """Instruct Asterisk to hang-up the call and perform cleanup."""
         # If self._closed is set, then we have already called _handle_disconnect. We might
         # have called _handle_disconnect upon remote hangup, and hence we should not
         # call hangup on the channels
-        if self._closed.is_set():
+        if self._closed:
             return
 
-        # Try to gracefully hang-up both legs; ignore failures.
+        # Decide whether to hangup or continue in dialplan based on the reason
         try:
             if self.caller_channel:
-                # Set variable REMOTE_DISPO_CALL_VARIABLES before continuing in dialplan
-                await self.caller_channel.setChannelVar(
-                    variable="REMOTE_DISPO_CALL_VARIABLES", value="REMOTE_DISPOSITION"
-                )
-                await self.caller_channel.continueInDialplan()
+                if reason == EndTaskReason.USER_QUALIFIED.value:
+                    # User qualified - continue in dialplan
+                    logger.debug(
+                        f"User qualified, continuing in dialplan for channel {self.caller_channel.id}"
+                    )
+                    # Set variable REMOTE_DISPO_CALL_VARIABLES before continuing in dialplan
+                    await self.caller_channel.setChannelVar(
+                        variable="REMOTE_DISPO_CALL_VARIABLES", value="REMOTE_DISPOSITION"
+                    )
+                    await self.caller_channel.continueInDialplan()
+                else:
+                    # Other reasons - hangup the channel
+                    logger.debug(
+                        f"Hanging up caller channel {self.caller_channel.id} due to reason: {reason}"
+                    )
+                    await self.caller_channel.hangup()
         except Exception:
-            logger.exception("Failed to continue caller channel in dialplan")
+            logger.exception("Failed to handle caller channel based on disconnect reason")
 
-        try:
-            if self.em_channel:
-                await self.em_channel.hangup()
-        except Exception:
-            logger.exception("Failed to hang-up externalMedia channel")
-
-        await self._handle_disconnect()
+        await self._handle_disconnect(reason)
 
     async def connect(self):
         """Signal that the user is ready to start the call.
@@ -192,7 +194,7 @@ class StasisRTPConnection(BaseObject):
 
         except Exception as exc:
             logger.exception(f"Error setting up StasisRTPConnection: {exc}")
-            await self._handle_disconnect()
+            await self._handle_disconnect(EndTaskReason.SYSTEM_CONNECT_ERROR.value)
 
     async def _watch_channel_termination(self):
         """Listen for ARI StasisEnd events for either leg."""
@@ -204,37 +206,50 @@ class StasisRTPConnection(BaseObject):
                         logger.debug(
                             f"Channel {channel.id} destroyed closing StasisRTPConnection {self}"
                         )
-                        await self._handle_disconnect()
+
+                        # Determine the disconnect reason based on which channel ended
+                        if channel.id == self.caller_channel.id:
+                            disconnect_reason = EndTaskReason.USER_HANGUP.value
+                        else:
+                            # externalMedia channel ended
+                            disconnect_reason = EndTaskReason.SYSTEM_CANCELLED.value
+
+                        await self._handle_disconnect(disconnect_reason)
                         break  # Exit listener
         except Exception as exc:
             # Listener finished unexpectedly – make sure we clean up.
             logger.exception(f"Channel watchdog stopped with error: {exc}")
-            await self._handle_disconnect()
+            await self._handle_disconnect(EndTaskReason.UNKNOWN.value)
 
-    async def _handle_disconnect(self):
+    async def _handle_disconnect(self, reason: str = EndTaskReason.UNKNOWN.value):
         """Common logic for both remote and local hang-up."""
-        if self._closed.is_set():
-            return
-
-        self._closed.set()
+        async with self._disconnect_lock:
+            if self._closed:
+                return
+            self._closed = True
 
         # Emit disconnected **only** if the call had actually reached the
         # connected state. This will propagate the disconnected to the
-        # RTPClent and to the Trasport, where pipeline can be ended
+        # RTPClient and to the Transport, where pipeline can be ended
         if self._is_connected:
-            await self._call_event_handler("disconnected")
+            await self._call_event_handler("disconnected", reason)
 
-        # Set is_connected to False
-        self.is_connected = False
+        # Set _is_connected to False (fix the bug where is_connected was being set instead of _is_connected)
+        self._is_connected = False
+
+        # Hang up the externalMedia channel
+        try:
+            if self.em_channel:
+                await self.em_channel.hangup()
+        except Exception:
+            logger.warning(f"Failed to hang-up externalMedia channel: {self.em_channel.id}")
 
         # Cleanup bridge if still present.
         try:
             if self._bridge:
                 await self._bridge.destroy()
         except Exception:
-            logger.exception("Failed to destroy bridge during disconnect")
-
-        await self._call_event_handler("closed")
+            logger.warning(f"Failed to destroy bridge during disconnect: {self._bridge.id}")
 
     # ------------------------------------------------------------------
     # Dunder helpers
