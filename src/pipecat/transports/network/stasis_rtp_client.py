@@ -101,6 +101,7 @@ class StasisRTPClient:
         self._send_sock: Optional[socket.socket] = None
         self._closing = False
         self._disconnect_lock = asyncio.Lock()  # Prevent concurrent disconnection
+        self._recv_sock_ready = asyncio.Event()  # Signal when recv socket is ready
 
         # ── wire event handlers to the connection ────────────────
         @self._connection.event_handler("connected")
@@ -151,12 +152,17 @@ class StasisRTPClient:
         if self._recv_sock and self._send_sock:
             return
 
+        logger.debug(
+            f"Final addresses in _setup_sockets - local {self._connection.local_addr}, remote: {self._connection.remote_addr}"
+        )
+
         # receive socket – bind to local address provided by connection
         if not self._recv_sock:
             rs = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             rs.setblocking(False)
             rs.bind(self._connection.local_addr)
             self._recv_sock = rs
+            self._recv_sock_ready.set()  # Signal that recv socket is ready
 
         # send socket – connect to remote (Asterisk) address
         if not self._send_sock:
@@ -182,6 +188,9 @@ class StasisRTPClient:
 
         self._recv_sock = None
         self._send_sock = None
+        self._recv_sock_ready.clear()  # Reset the event for potential reconnection
+        
+        logger.debug("Closed sockets in StasisRTPClient")
 
     # ─── receive path ────────────────────────────────────────────
 
@@ -192,6 +201,14 @@ class StasisRTPClient:
         """
         loop = asyncio.get_running_loop()
 
+        # Wait for recv socket to be created
+        try:
+            await self._recv_sock_ready.wait()
+        except asyncio.CancelledError:
+            return
+        
+        logger.debug("Going to receive from the socket now")
+        
         while not self._closing:
             try:
                 data = await loop.sock_recv(self._recv_sock, 2048)

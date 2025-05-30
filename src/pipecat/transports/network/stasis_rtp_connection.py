@@ -101,9 +101,13 @@ class StasisRTPConnection(BaseObject):
         # Try to gracefully hang-up both legs; ignore failures.
         try:
             if self.caller_channel:
-                await self.caller_channel.hangup()
+                # Set variable REMOTE_DISPO_CALL_VARIABLES before continuing in dialplan
+                await self.caller_channel.setChannelVar(
+                    variable="REMOTE_DISPO_CALL_VARIABLES", value="REMOTE_DISPOSITION"
+                )
+                await self.caller_channel.continueInDialplan()
         except Exception:
-            logger.exception("Failed to hang-up caller channel")
+            logger.exception("Failed to continue caller channel in dialplan")
 
         try:
             if self.em_channel:
@@ -168,7 +172,7 @@ class StasisRTPConnection(BaseObject):
 
             ip = await self.em_channel.getChannelVar(variable="UNICASTRTP_LOCAL_ADDRESS")
             port = await self.em_channel.getChannelVar(variable="UNICASTRTP_LOCAL_PORT")
-            self.remote_addr = (ip["value"], int(port["value"]))
+            self.remote_addr = ("13.203.1.34", int(port["value"]))
 
             logger.debug(
                 f"StasisRTPConnection {self} connection resources ready (bridge {self._bridge.id}) and remote address: {self.remote_addr}"
