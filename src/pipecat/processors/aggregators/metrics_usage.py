@@ -9,6 +9,7 @@ from pipecat.frames.frames import (
     EndFrame,
     EndTaskFrame,
     Frame,
+    HeartbeatFrame,
     MetricsFrame,
     StartFrame,
 )
@@ -25,8 +26,8 @@ class UsageMetricsAggregator(FrameProcessor):
         # For TTS: aggregated_metrics is int (total characters)
         self._max_call_duration_seconds = max_call_duration_seconds
 
-        self._call_duration = 0
         self._start_time: Optional[float] = None
+        self._stop_time: Optional[float] = None
         self._llm_usage_metrics: Dict[str, LLMTokenUsage] = {}
         self._tts_usage_metrics: Dict[str, int] = defaultdict(int)
 
@@ -45,37 +46,36 @@ class UsageMetricsAggregator(FrameProcessor):
                     await self._handle_llm_usage_metrics(data)
                 elif isinstance(data, TTSUsageMetricsData):
                     await self._handle_tts_usage_metrics(data)
-
-        await self._check_call_duration()
+        elif isinstance(frame, HeartbeatFrame):
+            await self._check_call_duration()
 
         await self.push_frame(frame, direction)
 
     async def _check_call_duration(self):
         if self._start_time is not None:
             if time.time() - self._start_time > self._max_call_duration_seconds:
+                logger.debug("Max call duration exceeded. Terminating call")
+                end_task_frame = EndTaskFrame()
+                end_task_frame.metadata = {"reason": EndTaskReason.CALL_DURATION_EXCEEDED.value}
                 await self.push_frame(
-                    EndTaskFrame(metadata={"reason": EndTaskReason.CALL_DURATION_EXCEEDED.value}),
+                    end_task_frame,
                     FrameDirection.UPSTREAM,
                 )
 
     async def _start(self, _: StartFrame):
         """Start tracking call duration."""
         self._start_time = time.time()
-        logger.debug("Started call duration tracking")
+        self._stop_time = None
 
     async def _stop(self, _: EndFrame):
         """Stop tracking call duration."""
         if self._start_time is not None:
-            self._call_duration = time.time() - self._start_time
-            logger.debug(f"Call duration: {self._call_duration:.2f} seconds")
-            self._start_time = None
+            self._stop_time = time.time()
 
     async def _cancel(self, _: CancelFrame):
         """Handle call cancellation - also stop tracking duration."""
         if self._start_time is not None:
-            self._call_duration = time.time() - self._start_time
-            logger.debug(f"Call cancelled, duration: {self._call_duration:.2f} seconds")
-            self._start_time = None
+            self._stop_time = time.time()
 
     async def _handle_llm_usage_metrics(self, data: LLMUsageMetricsData):
         key = f"{data.processor}|||{data.model}"
@@ -120,8 +120,11 @@ class UsageMetricsAggregator(FrameProcessor):
         return dict(self._tts_usage_metrics)
 
     def get_call_duration(self) -> float:
-        """Get the call duration in seconds."""
-        return self._call_duration
+        """Get call duration"""
+        if self._stop_time:
+            return self._stop_time - self._start_time
+        else:
+            return time.time() - self._start_time
 
     def get_all_usage_metrics_serialized(self) -> Dict[str, Dict[str, any]]:
         """Get all aggregated usage metrics in JSON-serializable format."""
@@ -138,12 +141,12 @@ class UsageMetricsAggregator(FrameProcessor):
         return {
             "llm": serialized_llm,
             "tts": dict(self._tts_usage_metrics),
-            "call_duration_seconds": self._call_duration,
+            "call_duration_seconds": self.get_call_duration(),
         }
 
     def reset_metrics(self):
         """Reset all aggregated metrics."""
         self._llm_usage_metrics.clear()
         self._tts_usage_metrics.clear()
-        self._call_duration = 0
         self._start_time = None
+        self._stop_time = None

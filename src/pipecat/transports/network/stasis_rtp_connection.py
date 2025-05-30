@@ -144,7 +144,7 @@ class StasisRTPConnection(BaseObject):
         """Return *True* once the call is established **and** `connect()` has been
         invoked by the user (same semantics as `SmallWebRTCConnection`)."""
 
-        return self._connect_invoked and self._is_connected and not self._closed.is_set()
+        return self._connect_invoked and self._is_connected and not self._closed
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -174,7 +174,7 @@ class StasisRTPConnection(BaseObject):
 
             ip = await self.em_channel.getChannelVar(variable="UNICASTRTP_LOCAL_ADDRESS")
             port = await self.em_channel.getChannelVar(variable="UNICASTRTP_LOCAL_PORT")
-            self.remote_addr = ("13.203.1.34", int(port["value"]))
+            self.remote_addr = (ip["value"], int(port["value"]))
 
             logger.debug(
                 f"StasisRTPConnection {self} connection resources ready (bridge {self._bridge.id}) and remote address: {self.remote_addr}"
@@ -258,5 +258,5 @@ class StasisRTPConnection(BaseObject):
     def __repr__(self):
         return (
             f"<StasisRTPConnection id={self.id} caller={self.caller_channel.id} "
-            f"em={getattr(self.em_channel, 'id', None)} state={'closed' if self._closed.is_set() else 'open'}>"
+            f"em={getattr(self.em_channel, 'id', None)} state={'closed' if self._closed else 'open'}>"
         )
