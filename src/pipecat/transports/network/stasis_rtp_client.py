@@ -238,6 +238,9 @@ class StasisRTPClient:
         while not self._closing:
             try:
                 data = await loop.sock_recv(self._recv_sock, 2048)
+                # each loop gets 172 bytes UDP packet, which is 160 bytes of
+                # audio data (Asterisk sends 20ms audio chunks with 8k sample rate)
+                # and 12 bytes of RTP header
             except (asyncio.CancelledError, OSError, socket.error) as exc:
                 logger.warning(f"RTP receive failed (socket closed): {exc}")
                 break

@@ -26,8 +26,7 @@ class SmartTurnParams(BaseModel):
     stop_secs: float = STOP_SECS
     pre_speech_ms: float = PRE_SPEECH_MS
     max_duration_secs: float = MAX_DURATION_SECONDS
-    # not exposing this for now yet until the model can handle it.
-    # use_only_last_vad_segment: bool = USE_ONLY_LAST_VAD_SEGMENT
+    use_only_last_vad_segment: bool = USE_ONLY_LAST_VAD_SEGMENT
 
 
 class SmartTurnTimeoutException(Exception):
