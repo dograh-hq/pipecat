@@ -92,7 +92,7 @@ class BaseSmartTurn(BaseTurnAnalyzer):
 
     async def analyze_end_of_turn(self) -> Tuple[EndOfTurnState, Optional[MetricsData]]:
         state, result = await self._process_speech_segment(self._audio_buffer)
-        if state == EndOfTurnState.COMPLETE or USE_ONLY_LAST_VAD_SEGMENT:
+        if state == EndOfTurnState.COMPLETE or self._params.use_only_last_vad_segment:
             self._clear(state)
         logger.debug(f"End of Turn result: {state}")
         return state, result
