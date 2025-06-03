@@ -42,9 +42,9 @@ class HttpSmartTurnAnalyzer(BaseSmartTurn):
     async def _send_raw_request(self, data_bytes: bytes) -> Dict[str, Any]:
         headers = {"Content-Type": "application/octet-stream"}
         headers.update(self._headers)
-        
+
         # Add service context as header if available
-        if hasattr(self, '_service_context') and self._service_context is not None:
+        if hasattr(self, "_service_context") and self._service_context is not None:
             headers["X-Service-Context"] = str(self._service_context)
 
         try:

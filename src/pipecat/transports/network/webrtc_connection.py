@@ -380,7 +380,7 @@ class SmallWebRTCConnection(BaseObject):
         if self._data_channel and self._data_channel.readyState == "open":
             self._data_channel.send(json_message)
         else:
-            logger.debug("Data channel not ready, queuing message")
+            logger.debug(f"Data channel not ready, queuing message: {json_message}")
             self._message_queue.append(json_message)
 
     def ask_to_renegotiate(self):

@@ -309,7 +309,7 @@ class SmallWebRTCClient:
 
     async def disconnect(self):
         if self.is_connected and not self.is_closing:
-            logger.info(f"Disconnecting to Small WebRTC")
+            logger.info(f"Disconnecting the Small WebRTC client")
             self._closing = True
             await self._webrtc_connection.disconnect()
             await self._handle_peer_disconnected()
