@@ -31,6 +31,8 @@ class UsageMetricsAggregator(FrameProcessor):
         self._llm_usage_metrics: Dict[str, LLMTokenUsage] = {}
         self._tts_usage_metrics: Dict[str, int] = defaultdict(int)
 
+        self._end_task_frame_pushed = False
+
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
 
@@ -54,13 +56,19 @@ class UsageMetricsAggregator(FrameProcessor):
     async def _check_call_duration(self):
         if self._start_time is not None:
             if time.time() - self._start_time > self._max_call_duration_seconds:
-                logger.debug("Max call duration exceeded. Terminating call")
-                end_task_frame = EndTaskFrame()
-                end_task_frame.metadata = {"reason": EndTaskReason.CALL_DURATION_EXCEEDED.value}
-                await self.push_frame(
-                    end_task_frame,
-                    FrameDirection.UPSTREAM,
-                )
+                if not self._end_task_frame_pushed:
+                    logger.debug("Max call duration exceeded. Terminating call")
+                    end_task_frame = EndTaskFrame()
+                    end_task_frame.metadata = {"reason": EndTaskReason.CALL_DURATION_EXCEEDED.value}
+                    await self.push_frame(
+                        end_task_frame,
+                        FrameDirection.UPSTREAM,
+                    )
+                    self._end_task_frame_pushed = True
+                else:
+                    logger.debug(
+                        "Max call duration exceeded. Skipping EndTaskFrame since already sent"
+                    )
 
     async def _start(self, _: StartFrame):
         """Start tracking call duration."""

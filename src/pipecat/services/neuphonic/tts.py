@@ -247,8 +247,25 @@ class NeuphonicTTSService(InterruptibleTTSService):
         logger.debug(f"Generating TTS: [{text}]")
 
         try:
-            if not self._websocket or self._websocket.closed:
+            # Check if websocket needs to be connected/reconnected
+            if not self._websocket:
                 await self._connect()
+            else:
+                # Check if connection is closed - handle websockets API compatibility
+                is_closed = False
+                try:
+                    # Try to access the closed attribute for older websockets versions
+                    is_closed = self._websocket.closed
+                except AttributeError:
+                    # For newer websockets versions without closed attribute,
+                    # try to ping to verify connection is still alive
+                    try:
+                        await self._websocket.ping()
+                    except Exception:
+                        is_closed = True
+                
+                if is_closed:
+                    await self._connect()
 
             try:
                 if not self._started:
