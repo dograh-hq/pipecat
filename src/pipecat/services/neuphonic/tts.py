@@ -263,7 +263,7 @@ class NeuphonicTTSService(InterruptibleTTSService):
                         await self._websocket.ping()
                     except Exception:
                         is_closed = True
-                
+
                 if is_closed:
                     await self._connect()
 

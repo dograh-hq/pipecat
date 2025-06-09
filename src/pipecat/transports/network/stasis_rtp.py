@@ -158,7 +158,7 @@ class StasisRTPOutputTransport(BaseOutputTransport):
     async def stop(self, frame: EndFrame):
         await super().stop(frame)
         await self._write_frame(frame)
-        
+
         # _client.disconnect triggers socket close and then _connection.disconnect
         # depending on the reason, we either hangup or continue in dialer
         await self._client.disconnect(frame.metadata.get("reason", EndTaskReason.UNKNOWN.value))
