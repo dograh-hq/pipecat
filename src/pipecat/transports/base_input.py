@@ -62,7 +62,7 @@ class BaseInputTransport(FrameProcessor):
 
         # Till we figure out how to solve for task cancelled error, lets keep a flag
         # to determine whether we have received EndFrame or is it client disconnect
-        self._is_end_frame_received = False
+        self._received_end_frame = None
 
         # Task to process incoming audio (VAD) and push audio frames downstream
         # if passthrough is enabled.
@@ -217,7 +217,8 @@ class BaseInputTransport(FrameProcessor):
         # Control frames
         elif isinstance(frame, EndFrame):
             logger.debug(f"Received EndFrame, stopping {self}")
-            self._is_end_frame_received = True
+            self._received_end_frame = frame
+
             # Push EndFrame before stop(), because stop() waits on the task to
             # finish and the task finishes when EndFrame is processed.
             await self.push_frame(frame, direction)
