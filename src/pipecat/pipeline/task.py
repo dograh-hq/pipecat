@@ -562,7 +562,9 @@ class PipelineTask(BaseTask):
 
             if isinstance(frame, EndTaskFrame):
                 # Tell the task we should end nicely.
-                await self.queue_frame(EndFrame())
+                end_frame = EndFrame()
+                end_frame.metadata = frame.metadata
+                await self.queue_frame(end_frame)
             elif isinstance(frame, CancelTaskFrame):
                 # Tell the task we should end right away.
                 await self.queue_frame(CancelFrame())

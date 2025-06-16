@@ -22,12 +22,14 @@ class HttpSmartTurnAnalyzer(BaseSmartTurn):
         url: str,
         aiohttp_session: aiohttp.ClientSession,
         headers: Optional[Dict[str, str]] = None,
+        service_context: Optional[Any] = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
         self._url = url
         self._headers = headers or {}
         self._aiohttp_session = aiohttp_session
+        self._service_context = service_context
 
     def _serialize_array(self, audio_array: np.ndarray) -> bytes:
         logger.trace("Serializing NumPy array to bytes...")
@@ -40,6 +42,10 @@ class HttpSmartTurnAnalyzer(BaseSmartTurn):
     async def _send_raw_request(self, data_bytes: bytes) -> Dict[str, Any]:
         headers = {"Content-Type": "application/octet-stream"}
         headers.update(self._headers)
+
+        # Add service context as header if available
+        if hasattr(self, "_service_context") and self._service_context is not None:
+            headers["X-Service-Context"] = str(self._service_context)
 
         try:
             timeout = aiohttp.ClientTimeout(total=self._params.stop_secs)

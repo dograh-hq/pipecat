@@ -13,6 +13,7 @@ from pipecat.audio.filters.base_audio_filter import BaseAudioFilter
 from pipecat.audio.mixers.base_audio_mixer import BaseAudioMixer
 from pipecat.audio.turn.base_turn_analyzer import BaseTurnAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADAnalyzer
+from pipecat.frames.frames import EndFrame
 from pipecat.processors.frame_processor import FrameProcessor
 from pipecat.utils.base_object import BaseObject
 
@@ -67,6 +68,9 @@ class BaseTransport(BaseObject):
         super().__init__(name=name)
         self._input_name = input_name
         self._output_name = output_name
+
+    def fetch_received_end_frame(self) -> EndFrame:
+        return self.input()._received_end_frame
 
     @abstractmethod
     def input(self) -> FrameProcessor:

@@ -348,7 +348,9 @@ class FrameProcessor(BaseObject):
 
     def _check_started(self, frame: Frame):
         if not self.__started:
-            logger.error(f"{self} Trying to process {frame} but StartFrame not received yet")
+            # TODO: Fix it by ensuring HeartBeat is not sent before all processors have processed
+            # StartFrame
+            logger.warning(f"{self} Trying to process {frame} but StartFrame not received yet")
         return self.__started
 
     def __create_input_task(self):
