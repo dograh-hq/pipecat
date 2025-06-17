@@ -356,6 +356,7 @@ class PipelineTask(BaseTask):
 
     async def cancel(self):
         """Stops the running pipeline immediately."""
+        logger.debug(f"Calling _cancel on Task {self}")
         await self._cancel()
 
     async def run(self):
@@ -380,12 +381,14 @@ class PipelineTask(BaseTask):
             # (e.g. Ctrl-C). This means we will get a CancelledError here as
             # well, because you get a CancelledError in every place you are
             # awaiting a task.
+            logger.debug(f"Pipeline task {self}: handling CancelledError Exception")
             pass
         finally:
             # It's possibe that we get an asyncio.CancelledError from the
             # outside, if so we need to make sure everything gets cancelled
             # properly.
             if cleanup_pipeline:
+                logger.debug(f"Cleaning up pipeline {self} in finally")
                 await self._cancel()
             await self._cancel_tasks()
             await self._cleanup(cleanup_pipeline)

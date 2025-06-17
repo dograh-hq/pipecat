@@ -283,6 +283,7 @@ class FrameProcessor(BaseObject):
         self.__create_push_task()
 
     async def __cancel(self, frame: CancelFrame):
+        logger.debug(f"Received CancelFrame, cancelling {self}")
         self._cancelling = True
         await self.__cancel_input_task()
         await self.__cancel_push_task()

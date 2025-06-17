@@ -183,6 +183,7 @@ class FastAPIWebsocketInputTransport(BaseInputTransport):
         except Exception as e:
             logger.error(f"{self} exception receiving data: {e.__class__.__name__} ({e})")
 
+        logger.debug(f"In _receive_messages - triggering client disconnected")
         await self._client.trigger_client_disconnected()
 
     async def _monitor_websocket(self):
@@ -297,7 +298,8 @@ class FastAPIWebsocketOutputTransport(BaseOutputTransport):
             if payload:
                 await self._client.send(payload)
         except Exception as e:
-            logger.error(f"{self} exception sending data: {e.__class__.__name__} ({e})")
+            logger.warning(f"{self} exception sending data: {e.__class__.__name__} ({e}). Disconnecting client.")
+            await self._client.disconnect()
 
     async def _write_audio_sleep(self):
         # Simulate a clock.

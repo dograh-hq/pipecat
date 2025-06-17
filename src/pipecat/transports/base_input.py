@@ -194,7 +194,6 @@ class BaseInputTransport(FrameProcessor):
             await self.push_frame(frame, direction)
             await self.start(frame)
         elif isinstance(frame, CancelFrame):
-            logger.debug(f"Received CancelFrame, cancelling {self}")
             await self.cancel(frame)
             await self.push_frame(frame, direction)
         elif isinstance(frame, BotInterruptionFrame):
