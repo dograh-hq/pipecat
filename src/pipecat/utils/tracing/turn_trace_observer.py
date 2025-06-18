@@ -153,7 +153,7 @@ class TurnTraceObserver(BaseObserver):
             parent_context = context_provider.get_current_conversation_context()
 
         # Create a new span for this turn
-        self._current_span = self._tracer.start_span("turn", context=parent_context)
+        self._current_span = self._tracer.start_span(f"turn-{turn_number}", context=parent_context)
         self._current_turn_number = turn_number
 
         # Set span attributes
