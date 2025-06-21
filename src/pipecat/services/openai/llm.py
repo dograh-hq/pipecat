@@ -80,6 +80,9 @@ class OpenAIUserContextAggregator(LLMUserContextAggregator):
 
 class OpenAIAssistantContextAggregator(LLMAssistantContextAggregator):
     async def handle_function_call_in_progress(self, frame: FunctionCallInProgressFrame):
+        # Track message indices before adding for potential reordering
+        messages_before = len(self._context.get_messages())
+
         self._context.add_message(
             {
                 "role": "assistant",
@@ -102,6 +105,19 @@ class OpenAIAssistantContextAggregator(LLMAssistantContextAggregator):
                 "tool_call_id": frame.tool_call_id,
             }
         )
+
+        # Track these message indices for potential reordering
+        if self._current_llm_response_id:
+            if self._current_llm_response_id not in self._response_function_messages:
+                self._response_function_messages[self._current_llm_response_id] = []
+
+            # Store the indices of the messages we just added
+            self._response_function_messages[self._current_llm_response_id].extend(
+                [
+                    messages_before,  # function call message index
+                    messages_before + 1,  # function result message index
+                ]
+            )
 
     async def handle_function_call_result(self, frame: FunctionCallResultFrame):
         if frame.result:

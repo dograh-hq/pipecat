@@ -86,7 +86,7 @@ def add_tts_span_attributes(
 
     # Add optional attributes
     if text:
-        span.set_attribute("text", text)
+        span.set_attribute("input", text)
 
     if character_count is not None:
         span.set_attribute("metrics.character_count", character_count)
@@ -142,7 +142,7 @@ def add_stt_span_attributes(
 
     # Add optional attributes
     if transcript:
-        span.set_attribute("transcript", transcript)
+        span.set_attribute("output", transcript)
 
     if is_final is not None:
         span.set_attribute("is_final", is_final)

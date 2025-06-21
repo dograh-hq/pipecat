@@ -5,6 +5,7 @@
 #
 
 import asyncio
+import uuid
 from abc import abstractmethod
 from dataclasses import dataclass
 from typing import Dict, List, Literal, Optional, Set
@@ -232,6 +233,9 @@ class LLMContextResponseAggregator(BaseLLMResponseAggregator):
 
     async def reset(self):
         self._aggregation = ""
+        # Clean up response session tracking when resetting aggregator state
+        if self._current_llm_response_id:
+            self._cleanup_response_session(self._current_llm_response_id)
 
 
 class LLMUserContextAggregator(LLMContextResponseAggregator):
@@ -504,8 +508,65 @@ class LLMAssistantContextAggregator(LLMContextResponseAggregator):
         self._function_calls_in_progress: Dict[str, Optional[FunctionCallInProgressFrame]] = {}
         self._context_updated_tasks: Set[asyncio.Task] = set()
 
+        # _current_llm_response_id: Tracks the UUID of the currently active LLM response session.
+        # Set when LLMFullResponseStartFrame is received, cleared on completion or interruption.
+        # Used to associate function calls with their originating LLM response for proper ordering.
+        # None when no LLM response is active.
+        self._current_llm_response_id: Optional[str] = None
+
+        # _response_function_messages: Maps response session IDs to lists of message indices
+        # in the context that belong to that response session. When function calls are added
+        # to the context, their indices are stored here. Later, when text content arrives
+        # and triggers reordering, these indices are used to move the function messages
+        # to appear after the text message, maintaining chronological order.
+        # Format: {response_id: [msg_index1, msg_index2, ...]}
+        # Cleaned up when response session ends to prevent memory leaks.
+        self._response_function_messages: Dict[
+            str, List[int]
+        ] = {}  # response_id -> message indices
+
     async def handle_aggregation(self, aggregation: str):
+        """Add text content to context and reorder function messages if needed"""
+        # Add text message normally
+        text_msg_index = len(self._context.get_messages())
         self._context.add_message({"role": "assistant", "content": aggregation})
+
+        # IMMEDIATELY reorder if we have function messages from same response
+        if (
+            self._current_llm_response_id
+            and self._current_llm_response_id in self._response_function_messages
+        ):
+            await self._reorder_context_for_response(self._current_llm_response_id, text_msg_index)
+
+    async def _reorder_context_for_response(self, response_id: str, text_msg_index: int):
+        """Reorder context so text message comes before function messages from same response"""
+
+        messages = self._context.get_messages()
+        function_indices = self._response_function_messages[response_id]
+
+        if not function_indices:
+            return  # No function messages to reorder
+
+        # Extract function messages that need to be moved
+        function_messages = [messages[i] for i in sorted(function_indices)]
+
+        # Remove function messages from their current positions (reverse order to maintain indices)
+        for i in sorted(function_indices, reverse=True):
+            messages.pop(i)
+
+        # After removing function messages, adjust text message index
+        # Count how many function messages were before the text message
+        removed_before_text = sum(1 for i in function_indices if i < text_msg_index)
+        adjusted_text_index = text_msg_index - removed_before_text
+
+        # Insert function messages right after the text message
+        messages[adjusted_text_index + 1 : adjusted_text_index + 1] = function_messages
+
+        self._context.set_messages(messages)
+
+        logger.debug(
+            f"Reordered {len(function_messages)} function messages to come after text message"
+        )
 
     async def handle_function_call_in_progress(self, frame: FunctionCallInProgressFrame):
         pass
@@ -527,6 +588,7 @@ class LLMAssistantContextAggregator(LLMContextResponseAggregator):
             await self.push_frame(frame, direction)
         elif isinstance(frame, LLMFullResponseStartFrame):
             await self._handle_llm_start(frame)
+            await self.push_frame(frame, direction)
         elif isinstance(frame, LLMFullResponseEndFrame):
             await self._handle_llm_end(frame)
         elif isinstance(frame, TextFrame):
@@ -573,9 +635,9 @@ class LLMAssistantContextAggregator(LLMContextResponseAggregator):
         await self.push_frame(timestamp_frame)
 
     async def _handle_interruptions(self, frame: StartInterruptionFrame):
-        await self.push_aggregation()
+        await self.push_aggregation()  # This will trigger reordering if needed
         self._started = 0
-        await self.reset()
+        await self.reset()  # This will clean up response session tracking
 
     async def _handle_function_calls_started(self, frame: FunctionCallsStartedFrame):
         function_names = [f"{f.function_name}:{f.tool_call_id}" for f in frame.function_calls]
@@ -660,8 +722,17 @@ class LLMAssistantContextAggregator(LLMContextResponseAggregator):
         await self.push_aggregation()
         await self.push_context_frame(FrameDirection.UPSTREAM)
 
+    def _cleanup_response_session(self, response_id: str):
+        """Clean up response session without relying on end frames"""
+        if response_id in self._response_function_messages:
+            del self._response_function_messages[response_id]
+        if self._current_llm_response_id == response_id:
+            self._current_llm_response_id = None
+
     async def _handle_llm_start(self, _: LLMFullResponseStartFrame):
         self._started += 1
+        if self._started == 1:  # First start of this response
+            self._current_llm_response_id = str(uuid.uuid4())
 
     async def _handle_llm_end(self, _: LLMFullResponseEndFrame):
         self._started -= 1

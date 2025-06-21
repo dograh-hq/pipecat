@@ -23,6 +23,7 @@ from pipecat.frames.frames import (
     Frame,
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
+    LLMGeneratedTextFrame,
     LLMMessagesFrame,
     LLMTextFrame,
     LLMUpdateSettingsFrame,
@@ -192,6 +193,9 @@ class BaseOpenAILLMService(LLMService):
             context
         )
 
+        # Track if we've sent the LLMGeneratedTextFrame signal for this response
+        text_generation_signaled = False
+
         async for chunk in chunk_stream:
             if chunk.usage:
                 tokens = LLMTokenUsage(
@@ -237,6 +241,11 @@ class BaseOpenAILLMService(LLMService):
                     # Keep iterating through the response to collect all the argument fragments
                     arguments += tool_call.function.arguments
             elif chunk.choices[0].delta.content:
+                # Send a frame that signals that some text was generated in the current generation
+                if not text_generation_signaled:
+                    await self.push_frame(LLMGeneratedTextFrame())
+                    text_generation_signaled = True
+
                 await self.push_frame(LLMTextFrame(chunk.choices[0].delta.content))
 
             # When gpt-4o-audio / gpt-4o-mini-audio is used for llm or stt+llm

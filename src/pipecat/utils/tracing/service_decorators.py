@@ -15,14 +15,16 @@ import contextlib
 import functools
 import inspect
 import json
-from loguru import logger
 from typing import TYPE_CHECKING, Callable, Optional, TypeVar
+
+from loguru import logger
 
 # Type imports for type checking only
 if TYPE_CHECKING:
     from opentelemetry import context as context_api
     from opentelemetry import trace
 
+from pipecat.processors.frame_processor import FrameDirection
 from pipecat.utils.tracing.service_attributes import (
     add_gemini_live_span_attributes,
     add_llm_span_attributes,
@@ -32,7 +34,6 @@ from pipecat.utils.tracing.service_attributes import (
 )
 from pipecat.utils.tracing.setup import is_tracing_available
 from pipecat.utils.tracing.turn_context_provider import get_current_turn_context
-from pipecat.processors.frame_processor import FrameDirection
 
 if is_tracing_available():
     from opentelemetry import context as context_api
@@ -372,7 +373,9 @@ def traced_llm(func: Optional[Callable] = None, *, name: Optional[str] = None) -
                                     for call in getattr(frame, "function_calls", []):
                                         function_calls_info.append(
                                             {
-                                                "function_name": getattr(call, "function_name", None),
+                                                "function_name": getattr(
+                                                    call, "function_name", None
+                                                ),
                                                 "tool_call_id": getattr(call, "tool_call_id", None),
                                                 "arguments": getattr(call, "arguments", None),
                                             }

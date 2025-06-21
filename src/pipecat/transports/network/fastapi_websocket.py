@@ -298,7 +298,9 @@ class FastAPIWebsocketOutputTransport(BaseOutputTransport):
             if payload:
                 await self._client.send(payload)
         except Exception as e:
-            logger.warning(f"{self} exception sending data: {e.__class__.__name__} ({e}). Disconnecting client.")
+            logger.warning(
+                f"{self} exception sending data: {e.__class__.__name__} ({e}). Disconnecting client."
+            )
             await self._client.disconnect()
 
     async def _write_audio_sleep(self):
