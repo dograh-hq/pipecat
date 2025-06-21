@@ -233,9 +233,9 @@ class LLMContextResponseAggregator(BaseLLMResponseAggregator):
 
     async def reset(self):
         self._aggregation = ""
-        # Clean up response session tracking when resetting aggregator state
-        if self._current_llm_response_id:
-            self._cleanup_response_session(self._current_llm_response_id)
+        # Base aggregator has no response-session state — subclasses that
+        # track an active LLM response (e.g. LLMAssistantContextAggregator)
+        # should override `reset()` and perform their own clean-up there.
 
 
 class LLMUserContextAggregator(LLMContextResponseAggregator):
@@ -753,6 +753,14 @@ class LLMAssistantContextAggregator(LLMContextResponseAggregator):
         # this because otherwise the task manager would report a dangling task
         # if we don't remove it.
         asyncio.run_coroutine_threadsafe(self.wait_for_task(task), self.get_event_loop())
+
+    async def reset(self):
+        """Reset internal aggregation and clean up any active response session."""
+        await super().reset()
+
+        # Clean up response session tracking when resetting aggregator state.
+        if self._current_llm_response_id:
+            self._cleanup_response_session(self._current_llm_response_id)
 
 
 class LLMUserResponseAggregator(LLMUserContextAggregator):
