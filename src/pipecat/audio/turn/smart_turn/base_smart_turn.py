@@ -94,7 +94,6 @@ class BaseSmartTurn(BaseTurnAnalyzer):
         state, result = await self._process_speech_segment(self._audio_buffer)
         if state == EndOfTurnState.COMPLETE or self._params.use_only_last_vad_segment:
             self._clear(state)
-        logger.debug(f"End of Turn result: {state}")
         return state, result
 
     def _clear(self, turn_state: EndOfTurnState):
@@ -161,6 +160,10 @@ class BaseSmartTurn(BaseTurnAnalyzer):
                     inference_time_ms=inference_time * 1000,
                     server_total_time_ms=total_time * 1000,
                     e2e_processing_time_ms=e2e_processing_time_ms,
+                )
+
+                logger.debug(
+                    f"End of Turn result: {state} (processing time: {e2e_processing_time_ms:.2f} ms)"
                 )
 
                 logger.trace(
