@@ -7,6 +7,7 @@
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import (
+    TYPE_CHECKING,
     Any,
     Awaitable,
     Callable,
@@ -25,6 +26,9 @@ from pipecat.metrics.metrics import MetricsData
 from pipecat.transcriptions.language import Language
 from pipecat.utils.time import nanoseconds_to_str
 from pipecat.utils.utils import obj_count, obj_id
+
+if TYPE_CHECKING:
+    from pipecat.processors.frame_processor import FrameProcessor
 
 
 class KeypadEntry(str, Enum):
@@ -528,6 +532,29 @@ class StopTaskFrame(SystemFrame):
 
 
 @dataclass
+class FrameProcessorPauseUrgentFrame(SystemFrame):
+    """This frame is used to pause frame processing for the given processor as
+    fast as possible. Pausing frame processing will keep frames in the internal
+    queue which will then be processed when frame processing is resumed with
+    `FrameProcessorResumeFrame`.
+
+    """
+
+    processor: "FrameProcessor"
+
+
+@dataclass
+class FrameProcessorResumeUrgentFrame(SystemFrame):
+    """This frame is used to resume frame processing for the given processor
+    if it was previously paused as fast as possible. After resuming frame
+    processing all queued frames will be processed in the order received.
+
+    """
+
+    processor: "FrameProcessor"
+
+
+@dataclass
 class StartInterruptionFrame(SystemFrame):
     """Emitted by VAD to indicate that a user has started speaking (i.e. is
     interruption). This is similar to UserStartedSpeakingFrame except that it
@@ -852,6 +879,29 @@ class StopFrame(ControlFrame):
     """
 
     pass
+
+
+@dataclass
+class FrameProcessorPauseFrame(ControlFrame):
+    """This frame is used to pause frame processing for the given
+    processor. Pausing frame processing will keep frames in the internal queue
+    which will then be processed when frame processing is resumed with
+    `FrameProcessorResumeFrame`.
+
+    """
+
+    processor: "FrameProcessor"
+
+
+@dataclass
+class FrameProcessorResumeFrame(ControlFrame):
+    """This frame is used to resume frame processing for the given processor if
+    it was previously paused. After resuming frame processing all queued frames
+    will be processed in the order received.
+
+    """
+
+    processor: "FrameProcessor"
 
 
 @dataclass
