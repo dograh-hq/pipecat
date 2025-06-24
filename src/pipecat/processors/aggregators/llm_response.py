@@ -525,6 +525,12 @@ class LLMAssistantContextAggregator(LLMContextResponseAggregator):
             str, List[int]
         ] = {}  # response_id -> message indices
 
+        # Register event handler that will be triggered when an aggregation is pushed.
+        # External components (e.g., PipecatEngine) can subscribe to this event to be
+        # notified whenever the assistant context has been updated and pushed
+        # downstream.
+        self._register_event_handler("on_push_aggregation")
+
     async def handle_aggregation(self, aggregation: str):
         """Add text content to context and reorder function messages if needed"""
         # Add text message normally
@@ -537,6 +543,7 @@ class LLMAssistantContextAggregator(LLMContextResponseAggregator):
             and self._current_llm_response_id in self._response_function_messages
         ):
             await self._reorder_context_for_response(self._current_llm_response_id, text_msg_index)
+            self._cleanup_response_session(self._current_llm_response_id)
 
     async def _reorder_context_for_response(self, response_id: str, text_msg_index: int):
         """Reorder context so text message comes before function messages from same response"""
@@ -618,7 +625,11 @@ class LLMAssistantContextAggregator(LLMContextResponseAggregator):
             await self.push_frame(frame, direction)
 
     async def push_aggregation(self):
+        logger.debug(f"{self} push_aggregation called, aggregation: {self._aggregation}")
         if not self._aggregation:
+            # Even if there is no _aggregation, which might happen because of interrupt, we
+            # would to notify the engine that push_aggregation has been called
+            await self._call_event_handler("on_push_aggregation")
             return
 
         aggregation = self._aggregation.strip()
@@ -626,6 +637,10 @@ class LLMAssistantContextAggregator(LLMContextResponseAggregator):
 
         if aggregation:
             await self.handle_aggregation(aggregation)
+
+        # If there is an _aggregation, lets notify **after** the context has been
+        # updated
+        await self._call_event_handler("on_push_aggregation")
 
         # Push context frame
         await self.push_context_frame()
@@ -753,14 +768,6 @@ class LLMAssistantContextAggregator(LLMContextResponseAggregator):
         # this because otherwise the task manager would report a dangling task
         # if we don't remove it.
         asyncio.run_coroutine_threadsafe(self.wait_for_task(task), self.get_event_loop())
-
-    async def reset(self):
-        """Reset internal aggregation and clean up any active response session."""
-        await super().reset()
-
-        # Clean up response session tracking when resetting aggregator state.
-        if self._current_llm_response_id:
-            self._cleanup_response_session(self._current_llm_response_id)
 
 
 class LLMUserResponseAggregator(LLMUserContextAggregator):

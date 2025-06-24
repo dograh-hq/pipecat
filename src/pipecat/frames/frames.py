@@ -711,15 +711,6 @@ class FunctionCallResultFrame(SystemFrame):
 
 
 @dataclass
-class LLMGeneratedTextFrame(SystemFrame):
-    """Indicates that the LLM has generated some text in the
-    current generation. This can help distinguish between cases when
-    there is content generated along with function call by the LLM."""
-
-    pass
-
-
-@dataclass
 class STTMuteFrame(SystemFrame):
     """System frame to mute/unmute the STT service."""
 
@@ -875,6 +866,15 @@ class LLMFullResponseStartFrame(ControlFrame):
 @dataclass
 class LLMFullResponseEndFrame(ControlFrame):
     """Indicates the end of an LLM response."""
+
+    pass
+
+
+@dataclass
+class LLMGeneratedTextFrame(ControlFrame):
+    """Indicates that the LLM has generated some text in the
+    current generation. This can help distinguish between cases when
+    there is content generated along with function call by the LLM."""
 
     pass
 
