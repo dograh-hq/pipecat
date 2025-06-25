@@ -530,7 +530,7 @@ class LLMAssistantContextAggregator(LLMContextResponseAggregator):
         # notified whenever the assistant context has been updated and pushed
         # downstream.
         self._register_event_handler("on_push_aggregation")
-    
+
     @property
     def has_function_calls_in_progress(self) -> bool:
         """Check if there are any function calls currently in progress.

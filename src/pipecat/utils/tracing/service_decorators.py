@@ -456,7 +456,9 @@ def traced_llm(func: Optional[Callable] = None, *, name: Optional[str] = None) -
                             # --------------------------------------------------
                             try:
                                 if system_message is not None:
-                                    messages = [{"role": "system", "content": system_message}] + messages
+                                    messages = [
+                                        {"role": "system", "content": system_message}
+                                    ] + messages
                                 serialized_messages = json.dumps(messages)
                             except Exception as e:
                                 serialized_messages = f"Error serializing messages: {str(e)}"
