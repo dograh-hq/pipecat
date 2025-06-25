@@ -105,9 +105,7 @@ class GoogleAssistantContextAggregator(OpenAIAssistantContextAggregator):
             self._current_llm_response_id
             and self._current_llm_response_id in self._response_function_messages
         ):
-            await self._reorder_context_for_response(
-                self._current_llm_response_id, text_msg_index
-            )
+            await self._reorder_context_for_response(self._current_llm_response_id, text_msg_index)
             # Response session is finished, clean up bookkeeping.
             self._cleanup_response_session(self._current_llm_response_id)
 
