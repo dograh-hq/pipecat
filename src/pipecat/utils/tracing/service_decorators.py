@@ -429,13 +429,6 @@ def traced_llm(func: Optional[Callable] = None, *, name: Optional[str] = None) -
                                 elif hasattr(context, "messages"):
                                     messages = context.messages
 
-                            # Serialize messages if available
-                            if messages:
-                                try:
-                                    serialized_messages = json.dumps(messages)
-                                except Exception as e:
-                                    serialized_messages = f"Error serializing messages: {str(e)}"
-
                             # Get tools, system message, etc. based on the service type
                             tools = getattr(context, "tools", None)
                             serialized_tools = None
@@ -456,6 +449,17 @@ def traced_llm(func: Optional[Callable] = None, *, name: Optional[str] = None) -
                                 system_message = context.system_message
                             elif hasattr(self, "_system_instruction"):
                                 system_message = self._system_instruction
+
+                            # --------------------------------------------------
+                            # Combine the system message with the conversation messages so that
+                            # they are emitted as a single `messages` span attribute
+                            # --------------------------------------------------
+                            try:
+                                if system_message is not None:
+                                    messages = [{"role": "system", "content": system_message}] + messages
+                                serialized_messages = json.dumps(messages)
+                            except Exception as e:
+                                serialized_messages = f"Error serializing messages: {str(e)}"
 
                             # Get settings from the service
                             params = {}

@@ -403,21 +403,27 @@ class SmallWebRTCInputTransport(BaseInputTransport):
         await self.set_transport_ready(frame)
 
     async def _stop_tasks(self):
+        logger.debug(f"Stopping tasks in SmallWebRTCInputTransport in _stop_tasks")
         if self._receive_audio_task:
             await self.cancel_task(self._receive_audio_task)
             self._receive_audio_task = None
         if self._receive_video_task:
             await self.cancel_task(self._receive_video_task)
             self._receive_video_task = None
+        logger.debug(f"Tasks stopped in SmallWebRTCInputTransport in _stop_tasks")
 
     async def stop(self, frame: EndFrame):
+        logger.debug(f"Stopping SmallWebRTCInputTransport in stop")
         await super().stop(frame)
         await self._stop_tasks()
+        logger.debug(f"Tasks stopped in SmallWebRTCInputTransport after stop")
 
     async def cancel(self, frame: CancelFrame):
+        logger.debug(f"Cancelling SmallWebRTCInputTransport in cancel")
         await super().cancel(frame)
         await self._stop_tasks()
         await self._client.disconnect()
+        logger.debug(f"SmallWebRTCInputTransport disconnected after cancel")
 
     async def _receive_audio(self):
         try:

@@ -151,10 +151,12 @@ class BaseInputTransport(FrameProcessor):
 
     async def stop(self, frame: EndFrame):
         # Cancel and wait for the audio input task to finish.
+        logger.debug(f"Stopping audio input task in BaseInputTransport")
         await self._cancel_audio_task()
         # Stop audio filter.
         if self._params.audio_in_filter:
             await self._params.audio_in_filter.stop()
+        logger.debug(f"Audio input task stopped in BaseInputTransport")
 
     async def pause(self, frame: StopFrame):
         self._paused = True
@@ -295,9 +297,11 @@ class BaseInputTransport(FrameProcessor):
             self._audio_task = self.create_task(self._audio_task_handler())
 
     async def _cancel_audio_task(self):
+        logger.debug(f"Cancelling audio task in BaseInputTransport")
         if self._audio_task:
             await self.cancel_task(self._audio_task)
             self._audio_task = None
+        logger.debug(f"Audio task cancelled in BaseInputTransport")
 
     async def _vad_analyze(self, audio_frame: InputAudioRawFrame) -> VADState:
         state = VADState.QUIET
