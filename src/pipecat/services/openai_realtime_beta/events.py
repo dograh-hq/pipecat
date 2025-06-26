@@ -9,7 +9,7 @@ import json
 import uuid
 from typing import Any, Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 #
 # session properties
@@ -203,11 +203,10 @@ class ResponseCancelEvent(ClientEvent):
 
 
 class ServerEvent(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     event_id: str
     type: str
-
-    class Config:
-        arbitrary_types_allowed = True
 
 
 class SessionCreatedEvent(ServerEvent):

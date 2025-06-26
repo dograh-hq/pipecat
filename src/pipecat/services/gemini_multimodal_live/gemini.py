@@ -58,9 +58,10 @@ from pipecat.services.openai.llm import (
     OpenAIUserContextAggregator,
 )
 from pipecat.transcriptions.language import Language
+from pipecat.utils.asyncio.watchdog_async_iterator import WatchdogAsyncIterator
 from pipecat.utils.string import match_endofsentence
 from pipecat.utils.time import time_now_iso8601
-from pipecat.utils.tracing.service_decorators import traced_gemini_live, traced_stt, traced_tts
+from pipecat.utils.tracing.service_decorators import traced_gemini_live, traced_stt
 
 from . import events
 
@@ -686,7 +687,9 @@ class GeminiMultimodalLiveLLMService(LLMService):
     #
 
     async def _receive_task_handler(self):
-        async for message in self._websocket:
+        async for message in WatchdogAsyncIterator(
+            self._websocket, reseter=self, watchdog_enabled=self.watchdog_timers_enabled
+        ):
             evt = events.parse_server_event(message)
             # logger.debug(f"Received event: {message[:500]}")
             # logger.debug(f"Received event: {evt}")
@@ -708,8 +711,6 @@ class GeminiMultimodalLiveLLMService(LLMService):
                 await self._handle_evt_error(evt)
                 # errors are fatal, so exit the receive loop
                 return
-            else:
-                pass
 
     #
     #

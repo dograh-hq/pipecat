@@ -29,7 +29,10 @@ from pipecat.frames.frames import (
 from pipecat.metrics.metrics import LLMTokenUsage, MetricsData
 from pipecat.observers.base_observer import BaseObserver, FramePushed
 from pipecat.processors.metrics.frame_processor_metrics import FrameProcessorMetrics
-from pipecat.utils.asyncio import BaseTaskManager
+from pipecat.utils.asyncio.task_manager import BaseTaskManager
+from pipecat.utils.asyncio.watchdog_event import WatchdogEvent
+from pipecat.utils.asyncio.watchdog_queue import WatchdogQueue
+from pipecat.utils.asyncio.watchdog_reseter import WatchdogReseter
 from pipecat.utils.base_object import BaseObject
 
 
@@ -43,20 +46,33 @@ class FrameProcessorSetup:
     clock: BaseClock
     task_manager: BaseTaskManager
     observer: Optional[BaseObserver] = None
+    watchdog_timers_enabled: bool = False
 
 
-class FrameProcessor(BaseObject):
+class FrameProcessor(WatchdogReseter, BaseObject):
     def __init__(
         self,
         *,
         name: Optional[str] = None,
+        enable_watchdog_logging: Optional[bool] = None,
+        enable_watchdog_timers: Optional[bool] = None,
         metrics: Optional[FrameProcessorMetrics] = None,
+        watchdog_timeout_secs: Optional[float] = None,
         **kwargs,
     ):
         super().__init__(name=name)
         self._parent: Optional["FrameProcessor"] = None
         self._prev: Optional["FrameProcessor"] = None
         self._next: Optional["FrameProcessor"] = None
+
+        # Enable watchdog timers for all tasks created by this frame processor.
+        self._enable_watchdog_timers = enable_watchdog_timers
+
+        # Enable watchdog logging for all tasks created by this frame processor.
+        self._enable_watchdog_logging = enable_watchdog_logging
+
+        # Allow this frame processor to control their tasks timeout.
+        self._watchdog_timeout_secs = watchdog_timeout_secs
 
         # Clock
         self._clock: Optional[BaseClock] = None
@@ -73,6 +89,7 @@ class FrameProcessor(BaseObject):
         self._enable_usage_metrics = False
         self._report_only_initial_ttfb = False
         self._interruption_strategies: List[BaseInterruptionStrategy] = []
+        self._watchdog_timers_enabled = False
 
         # Indicates whether we have received the StartFrame.
         self.__started = False
@@ -93,7 +110,7 @@ class FrameProcessor(BaseObject):
         # is called. To resume processing frames we need to call
         # `resume_processing_frames()` which will wake up the event.
         self.__should_block_frames = False
-        self.__input_event = asyncio.Event()
+        self.__input_event = None
         self.__input_frame_task: Optional[asyncio.Task] = None
 
         # Every processor in Pipecat should only output frames from a single
@@ -128,6 +145,10 @@ class FrameProcessor(BaseObject):
     @property
     def interruption_strategies(self) -> Sequence[BaseInterruptionStrategy]:
         return self._interruption_strategies
+
+    @property
+    def watchdog_timers_enabled(self):
+        return self._watchdog_timers_enabled
 
     def can_generate_metrics(self) -> bool:
         return False
@@ -171,34 +192,62 @@ class FrameProcessor(BaseObject):
         await self.stop_ttfb_metrics()
         await self.stop_processing_metrics()
 
-    def create_task(self, coroutine: Coroutine, name: Optional[str] = None) -> asyncio.Task:
-        if not self._task_manager:
-            raise Exception(f"{self} TaskManager is still not initialized.")
+    def create_task(
+        self,
+        coroutine: Coroutine,
+        name: Optional[str] = None,
+        *,
+        enable_watchdog_logging: Optional[bool] = None,
+        enable_watchdog_timers: Optional[bool] = None,
+        watchdog_timeout_secs: Optional[float] = None,
+    ) -> asyncio.Task:
         if name:
             name = f"{self}::{name}"
         else:
             name = f"{self}::{coroutine.cr_code.co_name}"
-        return self._task_manager.create_task(coroutine, name)
+        return self.get_task_manager().create_task(
+            coroutine,
+            name,
+            enable_watchdog_logging=(
+                enable_watchdog_logging
+                if enable_watchdog_logging
+                else self._enable_watchdog_logging
+            ),
+            enable_watchdog_timers=(
+                enable_watchdog_timers if enable_watchdog_timers else self.watchdog_timers_enabled
+            ),
+            watchdog_timeout=(
+                watchdog_timeout_secs if watchdog_timeout_secs else self._watchdog_timeout_secs
+            ),
+        )
 
     async def cancel_task(self, task: asyncio.Task, timeout: Optional[float] = None):
-        if not self._task_manager:
-            raise Exception(f"{self} TaskManager is still not initialized.")
-        await self._task_manager.cancel_task(task, timeout)
+        await self.get_task_manager().cancel_task(task, timeout)
 
     async def wait_for_task(self, task: asyncio.Task, timeout: Optional[float] = None):
-        if not self._task_manager:
-            raise Exception(f"{self} TaskManager is still not initialized.")
-        await self._task_manager.wait_for_task(task, timeout)
+        await self.get_task_manager().wait_for_task(task, timeout)
+
+    def reset_watchdog(self):
+        self.get_task_manager().reset_watchdog(asyncio.current_task())
 
     async def setup(self, setup: FrameProcessorSetup):
         self._clock = setup.clock
         self._task_manager = setup.task_manager
         self._observer = setup.observer
+        self._watchdog_timers_enabled = (
+            self._enable_watchdog_timers
+            if self._enable_watchdog_timers
+            else setup.watchdog_timers_enabled
+        )
+        if self._metrics is not None:
+            await self._metrics.setup(self._task_manager, self._watchdog_timers_enabled)
 
     async def cleanup(self):
         await super().cleanup()
         await self.__cancel_input_task()
         await self.__cancel_push_task()
+        if self._metrics is not None:
+            await self._metrics.cleanup()
 
     def link(self, processor: "FrameProcessor"):
         self._next = processor
@@ -206,9 +255,7 @@ class FrameProcessor(BaseObject):
         logger.debug(f"Linking {self} -> {self._next}")
 
     def get_event_loop(self) -> asyncio.AbstractEventLoop:
-        if not self._task_manager:
-            raise Exception(f"{self} TaskManager is still not initialized.")
-        return self._task_manager.get_event_loop()
+        return self.get_task_manager().get_event_loop()
 
     def set_parent(self, parent: "FrameProcessor"):
         self._parent = parent
@@ -251,7 +298,8 @@ class FrameProcessor(BaseObject):
 
     async def resume_processing_frames(self):
         logger.trace(f"{self}: resuming frame processing")
-        self.__input_event.set()
+        if self.__input_event:
+            self.__input_event.set()
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         if isinstance(frame, StartFrame):
@@ -285,8 +333,8 @@ class FrameProcessor(BaseObject):
         self._allow_interruptions = frame.allow_interruptions
         self._enable_metrics = frame.enable_metrics
         self._enable_usage_metrics = frame.enable_usage_metrics
-        self._report_only_initial_ttfb = frame.report_only_initial_ttfb
         self._interruption_strategies = frame.interruption_strategies
+        self._report_only_initial_ttfb = frame.report_only_initial_ttfb
         self.__create_input_task()
         self.__create_push_task()
 
@@ -316,9 +364,8 @@ class FrameProcessor(BaseObject):
             # Cancel the input task. This will stop processing queued frames.
             await self.__cancel_input_task()
         except Exception as e:
-            logger.exception(f"Uncaught exception in {self}: {e}")
+            logger.exception(f"Uncaught exception in {self} when handling _start_interruption: {e}")
             await self.push_error(ErrorFrame(str(e)))
-            raise
 
         # Create a new input queue and task.
         self.__create_input_task()
@@ -361,7 +408,6 @@ class FrameProcessor(BaseObject):
         except Exception as e:
             logger.exception(f"Uncaught exception in {self}: {e}")
             await self.push_error(ErrorFrame(str(e)))
-            raise
 
     def _check_started(self, frame: Frame):
         if not self.__started:
@@ -373,8 +419,12 @@ class FrameProcessor(BaseObject):
     def __create_input_task(self):
         if not self.__input_frame_task:
             self.__should_block_frames = False
+            if not self.__input_event:
+                self.__input_event = WatchdogEvent(
+                    self, watchdog_enabled=self.watchdog_timers_enabled
+                )
             self.__input_event.clear()
-            self.__input_queue = asyncio.Queue()
+            self.__input_queue = WatchdogQueue(self, watchdog_enabled=self.watchdog_timers_enabled)
             self.__input_frame_task = self.create_task(self.__input_frame_task_handler())
 
     async def __cancel_input_task(self):
@@ -384,7 +434,7 @@ class FrameProcessor(BaseObject):
 
     async def __input_frame_task_handler(self):
         while True:
-            if self.__should_block_frames:
+            if self.__should_block_frames and self.__input_event:
                 logger.trace(f"{self}: frame processing paused")
                 await self.__input_event.wait()
                 self.__input_event.clear()
@@ -392,19 +442,21 @@ class FrameProcessor(BaseObject):
                 logger.trace(f"{self}: frame processing resumed")
 
             (frame, direction, callback) = await self.__input_queue.get()
-
-            # Process the frame.
-            await self.process_frame(frame, direction)
-
-            # If this frame has an associated callback, call it now.
-            if callback:
-                await callback(self, frame, direction)
-
-            self.__input_queue.task_done()
+            try:
+                # Process the frame.
+                await self.process_frame(frame, direction)
+                # If this frame has an associated callback, call it now.
+                if callback:
+                    await callback(self, frame, direction)
+            except Exception as e:
+                logger.exception(f"{self}: error processing frame: {e}")
+                await self.push_error(ErrorFrame(str(e)))
+            finally:
+                self.__input_queue.task_done()
 
     def __create_push_task(self):
         if not self.__push_frame_task:
-            self.__push_queue = asyncio.Queue()
+            self.__push_queue = WatchdogQueue(self, watchdog_enabled=self.watchdog_timers_enabled)
             self.__push_frame_task = self.create_task(self.__push_frame_task_handler())
 
     async def __cancel_push_task(self):

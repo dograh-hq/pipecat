@@ -5,15 +5,27 @@
 #
 
 import asyncio
+import time
 from abc import ABC, abstractmethod
-from typing import Coroutine, Dict, Optional, Sequence, Set
+from dataclasses import dataclass
+from typing import Coroutine, Dict, Optional, Sequence
 
 from loguru import logger
+
+WATCHDOG_TIMEOUT = 5.0
+
+
+@dataclass
+class TaskManagerParams:
+    loop: asyncio.AbstractEventLoop
+    enable_watchdog_timers: bool = False
+    enable_watchdog_logging: bool = False
+    watchdog_timeout: float = WATCHDOG_TIMEOUT
 
 
 class BaseTaskManager(ABC):
     @abstractmethod
-    def set_event_loop(self, loop: asyncio.AbstractEventLoop):
+    def setup(self, params: TaskManagerParams):
         pass
 
     @abstractmethod
@@ -21,7 +33,15 @@ class BaseTaskManager(ABC):
         pass
 
     @abstractmethod
-    def create_task(self, coroutine: Coroutine, name: str) -> asyncio.Task:
+    def create_task(
+        self,
+        coroutine: Coroutine,
+        name: str,
+        *,
+        enable_watchdog_logging: Optional[bool] = None,
+        enable_watchdog_timers: Optional[bool] = None,
+        watchdog_timeout: Optional[float] = None,
+    ) -> asyncio.Task:
         """
         Creates and schedules a new asyncio Task that runs the given coroutine.
 
@@ -31,6 +51,9 @@ class BaseTaskManager(ABC):
             loop (asyncio.AbstractEventLoop): The event loop to use for creating the task.
             coroutine (Coroutine): The coroutine to be executed within the task.
             name (str): The name to assign to the task for identification.
+            enable_watchdog_logging(bool): whether this task should log watchdog processing times.
+            enable_watchdog_timers(bool): whether this task should have a watchdog timer.
+            watchdog_timeout(float): watchdog timer timeout for this task.
 
         Returns:
             asyncio.Task: The created task object.
@@ -73,21 +96,48 @@ class BaseTaskManager(ABC):
         """Returns the list of currently created/registered tasks."""
         pass
 
+    @abstractmethod
+    def reset_watchdog(self, task: asyncio.Task):
+        """Resets the given task watchdog timer. If not reset, a warning will be
+        logged indicating the task is stalling.
+
+        """
+        pass
+
+
+@dataclass
+class TaskData:
+    task: asyncio.Task
+    watchdog_timer: asyncio.Event
+    enable_watchdog_logging: bool
+    enable_watchdog_timers: bool
+    watchdog_timeout: float
+    watchdog_task: Optional[asyncio.Task]
+
 
 class TaskManager(BaseTaskManager):
     def __init__(self) -> None:
-        self._tasks: Dict[str, asyncio.Task] = {}
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._tasks: Dict[str, TaskData] = {}
+        self._params: Optional[TaskManagerParams] = None
 
-    def set_event_loop(self, loop: asyncio.AbstractEventLoop):
-        self._loop = loop
+    def setup(self, params: TaskManagerParams):
+        if not self._params:
+            self._params = params
 
     def get_event_loop(self) -> asyncio.AbstractEventLoop:
-        if not self._loop:
-            raise Exception("TaskManager missing event loop, use TaskManager.set_event_loop().")
-        return self._loop
+        if not self._params:
+            raise Exception("TaskManager is not setup: unable to get event loop")
+        return self._params.loop
 
-    def create_task(self, coroutine: Coroutine, name: str) -> asyncio.Task:
+    def create_task(
+        self,
+        coroutine: Coroutine,
+        name: str,
+        *,
+        enable_watchdog_logging: Optional[bool] = None,
+        enable_watchdog_timers: Optional[bool] = None,
+        watchdog_timeout: Optional[float] = None,
+    ) -> asyncio.Task:
         """
         Creates and schedules a new asyncio Task that runs the given coroutine.
 
@@ -97,6 +147,9 @@ class TaskManager(BaseTaskManager):
             loop (asyncio.AbstractEventLoop): The event loop to use for creating the task.
             coroutine (Coroutine): The coroutine to be executed within the task.
             name (str): The name to assign to the task for identification.
+            enable_watchdog_logging(bool): whether this task should log watchdog processing time.
+            enable_watchdog_timers(bool): whether this task should have a watchdog timer.
+            watchdog_timeout(float): watchdog timer timeout for this task.
 
         Returns:
             asyncio.Task: The created task object.
@@ -112,12 +165,32 @@ class TaskManager(BaseTaskManager):
             except Exception as e:
                 logger.exception(f"{name}: unexpected exception: {e}")
 
-        if not self._loop:
-            raise Exception("TaskManager missing event loop, use TaskManager.set_event_loop().")
+        if not self._params:
+            raise Exception("TaskManager is not setup: unable to get event loop")
 
-        task = self._loop.create_task(run_coroutine())
+        task = self._params.loop.create_task(run_coroutine())
         task.set_name(name)
-        self._add_task(task)
+        task.add_done_callback(self._task_done_handler)
+        self._add_task(
+            TaskData(
+                task=task,
+                watchdog_timer=asyncio.Event(),
+                enable_watchdog_logging=(
+                    enable_watchdog_logging
+                    if enable_watchdog_logging
+                    else self._params.enable_watchdog_logging
+                ),
+                enable_watchdog_timers=(
+                    enable_watchdog_timers
+                    if enable_watchdog_timers
+                    else self._params.enable_watchdog_timers
+                ),
+                watchdog_timeout=(
+                    watchdog_timeout if watchdog_timeout else self._params.watchdog_timeout
+                ),
+                watchdog_task=None,
+            ),
+        )
         logger.trace(f"{name}: task created")
         return task
 
@@ -147,8 +220,6 @@ class TaskManager(BaseTaskManager):
             raise
         except Exception as e:
             logger.exception(f"{name}: unexpected exception while stopping task: {e}")
-        finally:
-            self._remove_task(task)
 
     async def cancel_task(self, task: asyncio.Task, timeout: Optional[float] = None):
         """Cancels the given asyncio Task and awaits its completion with an
@@ -165,6 +236,8 @@ class TaskManager(BaseTaskManager):
         name = task.get_name()
         task.cancel()
         try:
+            # Make sure to reset watchdog if a task is cancelled.
+            self.reset_watchdog(task)
             if timeout:
                 await asyncio.wait_for(task, timeout=timeout)
             else:
@@ -176,20 +249,59 @@ class TaskManager(BaseTaskManager):
             pass
         except Exception as e:
             logger.exception(f"{name}: unexpected exception while cancelling task: {e}")
-        finally:
-            self._remove_task(task)
+        except BaseException as e:
+            logger.critical(f"{name}: fatal base exception while cancelling task: {e}")
+            raise
 
     def current_tasks(self) -> Sequence[asyncio.Task]:
         """Returns the list of currently created/registered tasks."""
-        return list(self._tasks.values())
+        return [data.task for data in self._tasks.values()]
 
-    def _add_task(self, task: asyncio.Task):
+    def reset_watchdog(self, task: asyncio.Task):
+        """Resets the given task watchdog timer. If not reset on time, a warning
+        will be logged indicating the task is stalling.
+
+        """
         name = task.get_name()
-        self._tasks[name] = task
+        if name in self._tasks and self._tasks[name].enable_watchdog_timers:
+            self._tasks[name].watchdog_timer.set()
 
-    def _remove_task(self, task: asyncio.Task):
+    def _add_task(self, task_data: TaskData):
+        name = task_data.task.get_name()
+        self._tasks[name] = task_data
+        if self._params and task_data.enable_watchdog_timers:
+            watchdog_task = self.get_event_loop().create_task(
+                self._watchdog_task_handler(task_data)
+            )
+            task_data.watchdog_task = watchdog_task
+
+    async def _watchdog_task_handler(self, task_data: TaskData):
+        name = task_data.task.get_name()
+        timer = task_data.watchdog_timer
+        enable_watchdog_logging = task_data.enable_watchdog_logging
+        watchdog_timeout = task_data.watchdog_timeout
+
+        while True:
+            try:
+                start_time = time.time()
+                await asyncio.wait_for(timer.wait(), timeout=watchdog_timeout)
+                total_time = time.time() - start_time
+                if enable_watchdog_logging:
+                    logger.debug(f"{name} time between watchdog timer resets: {total_time:.20f}")
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"{name}: task is taking too long {WATCHDOG_TIMEOUT} second(s) (forgot to reset watchdog?)"
+                )
+            finally:
+                timer.clear()
+
+    def _task_done_handler(self, task: asyncio.Task):
         name = task.get_name()
         try:
+            task_data = self._tasks[name]
+            if task_data.watchdog_task:
+                task_data.watchdog_task.cancel()
+                task_data.watchdog_task = None
             del self._tasks[name]
         except KeyError as e:
-            logger.trace(f"{name}: unable to remove task (already removed?): {e}")
+            logger.trace(f"{name}: unable to remove task data (already removed?): {e}")

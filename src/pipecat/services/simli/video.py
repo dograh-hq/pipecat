@@ -18,6 +18,7 @@ from pipecat.frames.frames import (
     TTSAudioRawFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor, StartFrame
+from pipecat.utils.asyncio.watchdog_async_iterator import WatchdogAsyncIterator
 
 try:
     from av.audio.frame import AudioFrame
@@ -61,7 +62,10 @@ class SimliVideoService(FrameProcessor):
 
     async def _consume_and_process_audio(self):
         await self._pipecat_resampler_event.wait()
-        async for audio_frame in self._simli_client.getAudioStreamIterator():
+        audio_iterator = self._simli_client.getAudioStreamIterator()
+        async for audio_frame in WatchdogAsyncIterator(
+            audio_iterator, reseter=self, watchdog_enabled=self.watchdog_timers_enabled
+        ):
             resampled_frames = self._pipecat_resampler.resample(audio_frame)
             for resampled_frame in resampled_frames:
                 audio_array = resampled_frame.to_ndarray()
@@ -77,7 +81,10 @@ class SimliVideoService(FrameProcessor):
 
     async def _consume_and_process_video(self):
         await self._pipecat_resampler_event.wait()
-        async for video_frame in self._simli_client.getVideoStreamIterator(targetFormat="rgb24"):
+        video_iterator = self._simli_client.getVideoStreamIterator(targetFormat="rgb24")
+        async for video_frame in WatchdogAsyncIterator(
+            video_iterator, reseter=self, watchdog_enabled=self.watchdog_timers_enabled
+        ):
             # Process the video frame
             convertedFrame: OutputImageRawFrame = OutputImageRawFrame(
                 image=video_frame.to_rgb().to_image().tobytes(),

@@ -79,6 +79,7 @@ playht = [ "pyht~=0.1.12", "websockets~=13.1" ]
 qwen = []
 rime = [ "websockets~=13.1" ]
 riva = [ "nvidia-riva-client~=2.19.1" ]
+sambanova = []
 sentry = [ "sentry-sdk~=2.23.1" ]
 local-smart-turn = [ "coremltools>=8.0", "transformers", "torch==2.5.0", "torchaudio==2.5.0" ]
 remote-smart-turn = []
@@ -122,8 +123,7 @@ select = [
     "D", # Docstring rules
     "I", # Import rules
 ]
-# We ignore D107 because class docstrings already document __init__ parameters
-# and our Sphinx configuration uses napoleon_include_init_with_doc=True
+# Ignore requirement for __init__ docstrings
 ignore = ["D107"]
 
 [tool.ruff.lint.pydocstyle]
