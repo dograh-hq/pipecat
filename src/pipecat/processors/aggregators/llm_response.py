@@ -514,16 +514,13 @@ class LLMAssistantContextAggregator(LLMContextResponseAggregator):
         # None when no LLM response is active.
         self._current_llm_response_id: Optional[str] = None
 
-        # _response_function_messages: Maps response session IDs to lists of message indices
-        # in the context that belong to that response session. When function calls are added
-        # to the context, their indices are stored here. Later, when text content arrives
-        # and triggers reordering, these indices are used to move the function messages
-        # to appear after the text message, maintaining chronological order.
-        # Format: {response_id: [msg_index1, msg_index2, ...]}
-        # Cleaned up when response session ends to prevent memory leaks.
-        self._response_function_messages: Dict[
-            str, List[int]
-        ] = {}  # response_id -> message indices
+        # _response_function_messages: Maps response session IDs to **sets of tool_call_ids**
+        # emitted during that response. Storing IDs instead of message indices makes the
+        # bookkeeping resilient against later insertions/deletions in the context because
+        # IDs are stable whereas indices shift. When we need to reorder, we rebuild the
+        # current indices of the messages having those IDs on-the-fly.
+        # Format: {response_id: {tool_call_id1, tool_call_id2, ...}}
+        self._response_function_messages: Dict[str, Set[str]] = {}
 
         # Register event handler that will be triggered when an aggregation is pushed.
         # External components (e.g., PipecatEngine) can subscribe to this event to be
@@ -547,21 +544,48 @@ class LLMAssistantContextAggregator(LLMContextResponseAggregator):
         self._context.add_message({"role": "assistant", "content": aggregation})
 
         # IMMEDIATELY reorder if we have function messages from same response
-        if (
-            self._current_llm_response_id
-            and self._current_llm_response_id in self._response_function_messages
-        ):
+        tracked_ids = self._response_function_messages.get(self._current_llm_response_id)
+        if tracked_ids:
             await self._reorder_context_for_response(self._current_llm_response_id, text_msg_index)
             self._cleanup_response_session(self._current_llm_response_id)
 
     async def _reorder_context_for_response(self, response_id: str, text_msg_index: int):
         """Reorder context so text message comes before function messages from same response"""
 
+        tracked_ids = self._response_function_messages.get(response_id)
+        if not tracked_ids:
+            return  # Nothing to reorder
+
+        # Build fresh list of indices of messages that correspond to the tracked tool_call_ids.
         messages = self._context.get_messages()
-        function_indices = self._response_function_messages[response_id]
+        function_indices: List[int] = []
+
+        for i, m in enumerate(messages):
+            found = False
+            if hasattr(m, "parts"):
+                for part in m.parts:  # type: ignore[attr-defined]
+                    if (
+                        getattr(part, "function_call", None)
+                        and part.function_call.id in tracked_ids
+                    ) or (
+                        getattr(part, "function_response", None)
+                        and part.function_response.id in tracked_ids
+                    ):
+                        found = True
+                        break
+            # OpenAI-style dict messages
+            elif isinstance(m, dict):
+                if m.get("role") == "assistant" and m.get("tool_calls"):
+                    if any(tc["id"] in tracked_ids for tc in m["tool_calls"]):
+                        found = True
+                elif m.get("role") == "tool" and m.get("tool_call_id") in tracked_ids:
+                    found = True
+
+            if found:
+                function_indices.append(i)
 
         if not function_indices:
-            return  # No function messages to reorder
+            return  # No surviving function messages – nothing to reorder
 
         # Extract function messages that need to be moved
         function_messages = [messages[i] for i in sorted(function_indices)]
@@ -636,9 +660,6 @@ class LLMAssistantContextAggregator(LLMContextResponseAggregator):
     async def push_aggregation(self):
         logger.debug(f"{self} push_aggregation called, aggregation: {self._aggregation}")
         if not self._aggregation:
-            # Even if there is no _aggregation, which might happen because of interrupt, we
-            # would to notify the engine that push_aggregation has been called
-            await self._call_event_handler("on_push_aggregation")
             return
 
         aggregation = self._aggregation.strip()

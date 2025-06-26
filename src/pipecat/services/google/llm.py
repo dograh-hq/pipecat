@@ -29,6 +29,7 @@ from pipecat.frames.frames import (
     LLMMessagesFrame,
     LLMTextFrame,
     LLMUpdateSettingsFrame,
+    StartInterruptionFrame,
     UserImageRawFrame,
     VisionImageRawFrame,
 )
@@ -101,10 +102,8 @@ class GoogleAssistantContextAggregator(OpenAIAssistantContextAggregator):
 
         # If we are in the middle of an LLM response that already queued function call messages,
         # make sure they appear right after this text message to preserve chronological order.
-        if (
-            self._current_llm_response_id
-            and self._current_llm_response_id in self._response_function_messages
-        ):
+        tracked_ids = self._response_function_messages.get(self._current_llm_response_id)
+        if tracked_ids:
             await self._reorder_context_for_response(self._current_llm_response_id, text_msg_index)
             # Response session is finished, clean up bookkeeping.
             self._cleanup_response_session(self._current_llm_response_id)
@@ -152,14 +151,12 @@ class GoogleAssistantContextAggregator(OpenAIAssistantContextAggregator):
             )
         )
 
-        # Track indices of the two messages we have just added so that we can later reorder
-        # them once the assistant emits the textual portion of the response.
+        # Track the tool_call_id so we can later reorder the corresponding
+        # messages after the textual assistant response. We no longer store raw
+        # indices because they become stale if the context is mutated.
         if self._current_llm_response_id:
-            if self._current_llm_response_id not in self._response_function_messages:
-                self._response_function_messages[self._current_llm_response_id] = []
-
-            self._response_function_messages[self._current_llm_response_id].extend(
-                [messages_before, messages_before + 1]
+            self._response_function_messages.setdefault(self._current_llm_response_id, set()).add(
+                frame.tool_call_id
             )
 
     async def handle_function_call_result(self, frame: FunctionCallResultFrame):
@@ -196,6 +193,117 @@ class GoogleAssistantContextAggregator(OpenAIAssistantContextAggregator):
             image=frame.image,
             text=frame.request.context,
         )
+
+    # ------------------------------------------------------------------
+    # Interruption handling (overrides OpenAI logic for Gemini Content objects)
+    # ------------------------------------------------------------------
+
+    async def _handle_interruptions(self, frame: StartInterruptionFrame):
+        """Handle user interruption for Gemini context.
+
+        Mirrors the behaviour implemented for OpenAI but adapts to Google
+        Content/Part objects.
+        """
+        current_id = self._current_llm_response_id
+
+        # Build set of pending tasks whose result_callback has not been called
+        # or tasks which were cancelled due to interruption frame
+        pending_ids = set(self._function_calls_in_progress.keys())
+
+        msgs = self._context.get_messages()
+        for m in msgs:
+            if isinstance(m, Content) and m.role == "user":
+                for part in m.parts:
+                    if part.function_response and part.function_response.response == {
+                        "value": "CANCELLED"
+                    }:
+                        pending_ids.add(part.function_response.id)
+
+        if pending_ids:
+            new_msgs = []
+            for m in msgs:
+                if isinstance(m, Content):
+                    # remove assistant function_call with pending id
+                    if m.role == "model":
+                        to_remove = False
+                        for part in m.parts:
+                            if part.function_call and part.function_call.id in pending_ids:
+                                logger.debug(
+                                    f"{self} removing function call {part.function_call.id}"
+                                )
+                                to_remove = True
+                                break
+                        if to_remove:
+                            continue
+                    # remove tool responses
+                    if m.role == "user":
+                        for part in m.parts:
+                            if part.function_response and part.function_response.id in pending_ids:
+                                # skip this message
+                                break
+                        else:
+                            new_msgs.append(m)
+                            continue
+                        continue
+                new_msgs.append(m)
+            self._context.set_messages(new_msgs)
+
+        # Refresh mapping of tool_call_ids for this response so indices can be
+        # reconstructed later. We keep the mapping if at least one associated
+        # message is still present; otherwise we drop it.
+        if current_id and current_id in self._response_function_messages:
+            remaining_ids = set()
+            for m in self._context.get_messages():
+                if isinstance(m, Content):
+                    for part in m.parts:
+                        if part.function_call and part.function_call.id in self._response_function_messages[current_id]:
+                            remaining_ids.add(part.function_call.id)
+                        elif part.function_response and part.function_response.id in self._response_function_messages[current_id]:
+                            remaining_ids.add(part.function_response.id)
+                elif isinstance(m, dict):
+                    if m.get("role") == "assistant" and m.get("tool_calls"):
+                        for tc in m["tool_calls"]:
+                            if tc["id"] in self._response_function_messages[current_id]:
+                                remaining_ids.add(tc["id"])
+                    elif m.get("role") == "tool" and m.get("tool_call_id") in self._response_function_messages[current_id]:
+                        remaining_ids.add(m["tool_call_id"])
+
+            if remaining_ids:
+                self._response_function_messages[current_id] = remaining_ids
+            else:
+                self._response_function_messages.pop(current_id, None)
+
+        # Determine whether there is any aggregated text that needs to be
+        # appended. If there is none, we skip adding the interruption tag as
+        # well as any potential re-ordering because there is no anchor text
+        # message to attach the function messages to.
+
+        content_to_add = self._aggregation.strip() if self._aggregation else ""
+
+        if content_to_add:
+            # Only add the interruption tag when there is aggregated content.
+            content_to_add += " <<interrupted_by_user>>"
+
+            text_msg_index = len(self._context.get_messages())
+            self._context.add_message(Content(role="model", parts=[Part(text=content_to_add)]))
+            self._aggregation = ""
+
+            # Re-order function call / response messages so they follow the
+            # textual assistant message we have just added.
+            if current_id and current_id in self._response_function_messages:
+                await self._reorder_context_for_response(current_id, text_msg_index)
+
+        # Whether or not we added a message, ensure we tidy up any bookkeeping
+        # for the current LLM response session.
+        if current_id:
+            self._cleanup_response_session(current_id)
+
+        self._function_calls_in_progress.clear()
+        self._started = 0
+
+        await self.push_context_frame()
+        await self.reset()
+        return
 
 
 @dataclass
