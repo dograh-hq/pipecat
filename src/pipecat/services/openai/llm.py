@@ -158,93 +158,108 @@ class OpenAIAssistantContextAggregator(LLMAssistantContextAggregator):
     # ------------------------------------------------------------------
 
     async def _handle_interruptions(self, frame: StartInterruptionFrame):
-        """Override default interruption handling to:
-        1. Append a marker indicating the bot was interrupted.
-        2. Remove any pending function/tool call messages associated with the
-           current response.
-        3. Suppress the `on_push_aggregation` event so deferred transitions are
-           not flushed by the engine.
+        """Handle user interruption while minimizing iterations over the context.
+
+        The new implementation performs **two** passes instead of three over the
+        message list by:
+        1. Collecting *CANCELLED* tool call ids in a first light pass.
+        2. Building the filtered message list **and** computing the remaining
+           tracked ids in a single second pass.
         """
 
-        # Store current response id before any cleanup actions
-        current_id = self._current_llm_response_id
+        # Lets not reorder if interrupted, so that the last thing the model
+        # sees is assistant message getting interrupted
+        SHOULD_REORDER = False
 
-        # Determine tool_call_ids that are still pending
-        pending_ids = set(self._function_calls_in_progress.keys())
+        current_llm_response_id = self._current_llm_response_id
+        messages = self._context.get_messages()
 
-        # Also capture any calls already marked as CANCELLED in the context
-        msgs = self._context.get_messages()
+        # Pass 1 – gather ids for calls that were either still in progress or
+        # already cancelled.
+        cancelled_ids = {
+            m.get("tool_call_id")
+            for m in messages
+            if m.get("role") == "tool" and m.get("content") == "CANCELLED"
+        }
+        pending_ids: set[str] = set(self._function_calls_in_progress.keys()).union(cancelled_ids)
 
-        logger.debug(f"Pending IDs: {pending_ids} {msgs}")
+        # Prepare variables required for Pass 2 (executed regardless of whether
+        # *pending_ids* is empty so we can still compute *remaining_ids*).
+        tracked_ids: set[str] = (
+            self._response_function_messages.get(current_llm_response_id, set())
+            if current_llm_response_id
+            else set()
+        )
+        remaining_ids: set[str] = set()
 
-        for m in msgs:
-            if m.get("role") == "tool" and m.get("content") == "CANCELLED":
-                logger.debug(f"Got cancelled tool call id {m.get('tool_call_id')}")
-                pending_ids.add(m.get("tool_call_id"))
-
+        # Pass 2 – rebuild message list while collecting *remaining_ids* for the
+        # current response in a single sweep.
         if pending_ids:
-            new_msgs = []
-            for m in msgs:
-                if m.get("role") == "assistant" and m.get("tool_calls"):
-                    if any(tc["id"] in pending_ids for tc in m["tool_calls"]):
-                        continue  # skip this assistant tool_call stub
-                if m.get("role") == "tool" and m.get("tool_call_id") in pending_ids:
-                    continue  # skip corresponding tool response
-                new_msgs.append(m)
-            self._context.set_messages(new_msgs)
-        # Refresh mapping for the current response so that only surviving
-        # tool_call_ids remain. This keeps reordering logic working even after
-        # we deleted some messages.
-        if current_id and current_id in self._response_function_messages:
-            tracked_ids = self._response_function_messages[current_id]
+            new_msgs: list = []
+            for m in messages:
+                role = m.get("role")
 
-            remaining_ids = set()
-            for m in self._context.get_messages():
-                if m.get("role") == "assistant" and m.get("tool_calls"):
-                    for tc in m["tool_calls"]:
+                # Skip assistant tool_call stubs that reference a pending id.
+                if role == "assistant" and m.get("tool_calls"):
+                    tool_calls = m["tool_calls"]
+                    if any(tc["id"] in pending_ids for tc in tool_calls):
+                        continue
+                    # Track surviving ids for later re-ordering
+                    for tc in tool_calls:
                         if tc["id"] in tracked_ids:
                             remaining_ids.add(tc["id"])
-                elif m.get("role") == "tool" and m.get("tool_call_id") in tracked_ids:
-                    remaining_ids.add(m["tool_call_id"])
+                    new_msgs.append(m)
+                    continue
 
-            if remaining_ids:
-                self._response_function_messages[current_id] = remaining_ids
-            else:
-                self._response_function_messages.pop(current_id, None)
+                # Skip tool responses that reference a pending id.
+                if role == "tool" and m.get("tool_call_id") in pending_ids:
+                    continue
 
-        # Determine if there is any aggregated content that warrants adding
-        # a textual assistant message. If none exists, we skip adding the
-        # interruption tag and any subsequent reordering since there is no
-        # anchor message to attach tool call messages to.
+                # Track surviving ids appearing in tool responses.
+                if role == "tool" and m.get("tool_call_id") in tracked_ids:
+                    remaining_ids.add(m.get("tool_call_id"))
 
+                new_msgs.append(m)
+
+            self._context.set_messages(new_msgs)
+
+            # Update mapping for the current response so that only ids still
+            # present in the context remain tracked.
+            if (
+                current_llm_response_id
+                and current_llm_response_id in self._response_function_messages
+            ):
+                if remaining_ids:
+                    self._response_function_messages[current_llm_response_id] = remaining_ids
+                else:
+                    self._response_function_messages.pop(current_llm_response_id, None)
+
+        # ------------------------------------------------------------------
+        # Add interruption marker & eventual reordering of remaining messages
+        # ------------------------------------------------------------------
         content_to_add = self._aggregation.strip() if self._aggregation else ""
-
         if content_to_add:
             content_to_add += " <<interrupted_by_user>>"
-
             text_msg_index = len(self._context.get_messages())
             self._context.add_message({"role": "assistant", "content": content_to_add})
             self._aggregation = ""
 
-            # Reorder any remaining function messages tied to this response id
-            if current_id and current_id in self._response_function_messages:
-                await self._reorder_context_for_response(current_id, text_msg_index)
+            if (
+                current_llm_response_id
+                and current_llm_response_id in self._response_function_messages
+                and SHOULD_REORDER
+            ):
+                await self._reorder_context_for_response(current_llm_response_id, text_msg_index)
 
-        # Cleanup response session bookkeeping regardless of whether we added
-        # a message or not.
-        if current_id:
-            self._cleanup_response_session(current_id)
+        # ------------------------------------------------------------------
+        # Final cleanup (mirrors previous behaviour)
+        # ------------------------------------------------------------------
+        if current_llm_response_id:
+            self._cleanup_response_session(current_llm_response_id)
 
         self._function_calls_in_progress.clear()
         self._started = 0  # Reset state for current response
 
-        # Push the updated context frame (without emitting on_push_aggregation)
         await self.push_context_frame()
-
-        # Final cleanup similar to original behaviour
         await self.reset()
-
-        # Do NOT call super()._handle_interruptions or on_push_aggregation –
-        # simply exit so the caller's process_frame will still push the frame
-        # downstream/upstream as usual.
         return

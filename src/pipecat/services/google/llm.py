@@ -199,104 +199,138 @@ class GoogleAssistantContextAggregator(OpenAIAssistantContextAggregator):
     # ------------------------------------------------------------------
 
     async def _handle_interruptions(self, frame: StartInterruptionFrame):
-        """Handle user interruption for Gemini context.
+        """Handle user interruption for Gemini context with reduced passes.
 
-        Mirrors the behaviour implemented for OpenAI but adapts to Google
-        Content/Part objects.
+        The refactored implementation performs only two scans over the context
+        messages – one to collect *CANCELLED* tool call ids and a second to
+        rebuild the message list while simultaneously updating bookkeeping
+        structures. This lowers both cognitive and computational complexity.
         """
-        current_id = self._current_llm_response_id
 
-        # Build set of pending tasks whose result_callback has not been called
-        # or tasks which were cancelled due to interruption frame
-        pending_ids = set(self._function_calls_in_progress.keys())
+        # Lets not reorder if interrupted, so that the last thing the model
+        # sees is assistant message getting interrupted
+        SHOULD_REORDER = False
 
-        msgs = self._context.get_messages()
-        for m in msgs:
+        current_llm_response_id = self._current_llm_response_id
+        messages = self._context.get_messages()
+
+        # Pass 1 – Capture ids that are still pending (in-progress) or already
+        # cancelled in the context.
+        cancelled_ids: set[str] = set()
+        for m in messages:
             if isinstance(m, Content) and m.role == "user":
                 for part in m.parts:
                     if part.function_response and part.function_response.response == {
                         "value": "CANCELLED"
                     }:
-                        pending_ids.add(part.function_response.id)
+                        cancelled_ids.add(part.function_response.id)
 
+            elif isinstance(m, dict):
+                if m.get("role") == "tool" and m.get("content") == "CANCELLED":
+                    cancelled_ids.add(m.get("tool_call_id"))
+
+        pending_ids: set[str] = set(self._function_calls_in_progress.keys()).union(cancelled_ids)
+
+        tracked_ids: set[str] = (
+            self._response_function_messages.get(current_llm_response_id, set())
+            if current_llm_response_id
+            else set()
+        )
+        remaining_ids: set[str] = set()
+
+        # Pass 2 – Build filtered message list and harvest remaining tracked ids.
         if pending_ids:
-            new_msgs = []
-            for m in msgs:
+            new_msgs: list = []
+            for m in messages:
+                # ----------------------------------------------------------
+                # Content-based messages (Gemini format)
+                # ----------------------------------------------------------
                 if isinstance(m, Content):
-                    # remove assistant function_call with pending id
                     if m.role == "model":
-                        to_remove = False
-                        for part in m.parts:
-                            if part.function_call and part.function_call.id in pending_ids:
-                                logger.debug(
-                                    f"{self} removing function call {part.function_call.id}"
-                                )
-                                to_remove = True
-                                break
-                        if to_remove:
+                        # Skip assistant function_call stubs linked to pending ids.
+                        if any(
+                            part.function_call and part.function_call.id in pending_ids
+                            for part in m.parts
+                        ):
                             continue
-                    # remove tool responses
-                    if m.role == "user":
+                        # Track survivors
                         for part in m.parts:
-                            if part.function_response and part.function_response.id in pending_ids:
-                                # skip this message
-                                break
-                        else:
-                            new_msgs.append(m)
-                            continue
+                            if part.function_call and part.function_call.id in tracked_ids:
+                                remaining_ids.add(part.function_call.id)
+                        new_msgs.append(m)
                         continue
+
+                    if m.role == "user":
+                        # Skip tool responses with pending ids.
+                        if any(
+                            part.function_response and part.function_response.id in pending_ids
+                            for part in m.parts
+                        ):
+                            continue
+                        # Track surviving tool responses.
+                        for part in m.parts:
+                            if part.function_response and part.function_response.id in tracked_ids:
+                                remaining_ids.add(part.function_response.id)
+                        new_msgs.append(m)
+                        continue
+
+                # ----------------------------------------------------------
+                # Dict-based messages (OpenAI style left-overs)
+                # ----------------------------------------------------------
+                if isinstance(m, dict):
+                    role = m.get("role")
+                    if role == "assistant" and m.get("tool_calls"):
+                        if any(tc["id"] in pending_ids for tc in m["tool_calls"]):
+                            continue
+                        for tc in m["tool_calls"]:
+                            if tc["id"] in tracked_ids:
+                                remaining_ids.add(tc["id"])
+                        new_msgs.append(m)
+                        continue
+                    if role == "tool" and m.get("tool_call_id") in pending_ids:
+                        continue
+                    if role == "tool" and m.get("tool_call_id") in tracked_ids:
+                        remaining_ids.add(m.get("tool_call_id"))
+                    new_msgs.append(m)
+                    continue
+
+                # Fallback – keep any message we don't explicitly filter out.
                 new_msgs.append(m)
+
             self._context.set_messages(new_msgs)
 
-        # Refresh mapping of tool_call_ids for this response so indices can be
-        # reconstructed later. We keep the mapping if at least one associated
-        # message is still present; otherwise we drop it.
-        if current_id and current_id in self._response_function_messages:
-            remaining_ids = set()
-            for m in self._context.get_messages():
-                if isinstance(m, Content):
-                    for part in m.parts:
-                        if part.function_call and part.function_call.id in self._response_function_messages[current_id]:
-                            remaining_ids.add(part.function_call.id)
-                        elif part.function_response and part.function_response.id in self._response_function_messages[current_id]:
-                            remaining_ids.add(part.function_response.id)
-                elif isinstance(m, dict):
-                    if m.get("role") == "assistant" and m.get("tool_calls"):
-                        for tc in m["tool_calls"]:
-                            if tc["id"] in self._response_function_messages[current_id]:
-                                remaining_ids.add(tc["id"])
-                    elif m.get("role") == "tool" and m.get("tool_call_id") in self._response_function_messages[current_id]:
-                        remaining_ids.add(m["tool_call_id"])
+            # Update mapping so only surviving ids are tracked for reordering.
+            if (
+                current_llm_response_id
+                and current_llm_response_id in self._response_function_messages
+            ):
+                if remaining_ids:
+                    self._response_function_messages[current_llm_response_id] = remaining_ids
+                else:
+                    self._response_function_messages.pop(current_llm_response_id, None)
 
-            if remaining_ids:
-                self._response_function_messages[current_id] = remaining_ids
-            else:
-                self._response_function_messages.pop(current_id, None)
-
-        # Determine whether there is any aggregated text that needs to be
-        # appended. If there is none, we skip adding the interruption tag as
-        # well as any potential re-ordering because there is no anchor text
-        # message to attach the function messages to.
-
+        # --------------------------------------------------------------
+        # Append interruption marker if needed & reorder remaining calls
+        # --------------------------------------------------------------
         content_to_add = self._aggregation.strip() if self._aggregation else ""
-
         if content_to_add:
-            # Only add the interruption tag when there is aggregated content.
             content_to_add += " <<interrupted_by_user>>"
-
             text_msg_index = len(self._context.get_messages())
             self._context.add_message(Content(role="model", parts=[Part(text=content_to_add)]))
             self._aggregation = ""
 
-            # Re-order function call / response messages so they follow the
-            # textual assistant message we have just added.
-            if current_id and current_id in self._response_function_messages:
-                await self._reorder_context_for_response(current_id, text_msg_index)
+            if (
+                current_llm_response_id
+                and current_llm_response_id in self._response_function_messages
+                and SHOULD_REORDER
+            ):
+                await self._reorder_context_for_response(current_llm_response_id, text_msg_index)
 
-        # Whether or not we added a message, ensure we tidy up any bookkeeping
-        # for the current LLM response session.
-        if current_id:
-            self._cleanup_response_session(current_id)
+        # --------------------------------------------------------------
+        # Final cleanup – identical to previous logic
+        # --------------------------------------------------------------
+        if current_llm_response_id:
+            self._cleanup_response_session(current_llm_response_id)
 
         self._function_calls_in_progress.clear()
         self._started = 0
