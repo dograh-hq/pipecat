@@ -475,7 +475,7 @@ class PipelineTask(WatchdogReseter, BasePipelineTask):
         return self._process_push_task
 
     def _maybe_start_heartbeat_tasks(self):
-        if self._params.enable_heartbeats:
+        if self._params.enable_heartbeats and self._heartbeat_push_task is None:
             self._heartbeat_push_task = self._task_manager.create_task(
                 self._heartbeat_push_handler(), f"{self}::_heartbeat_push_handler"
             )
@@ -573,7 +573,7 @@ class PipelineTask(WatchdogReseter, BasePipelineTask):
         """
         self._clock.start()
 
-        self._maybe_start_heartbeat_tasks()
+        # Delay heartbeat frames until the pipeline has fully started (StartFrame reaches sink).
         self._maybe_start_idle_task()
 
         start_frame = StartFrame(
@@ -657,6 +657,8 @@ class PipelineTask(WatchdogReseter, BasePipelineTask):
 
             if isinstance(frame, StartFrame):
                 await self._call_event_handler("on_pipeline_started", frame)
+                # Start heartbeat tasks now that all processors have acknowledged StartFrame.
+                self._maybe_start_heartbeat_tasks()
             elif isinstance(frame, EndFrame):
                 await self._call_event_handler("on_pipeline_ended", frame)
                 self._pipeline_end_event.set()
