@@ -248,10 +248,10 @@ class BaseOpenAILLMService(LLMService):
 
         # Track if we've sent the LLMGeneratedTextFrame signal for this response
         text_generation_signaled = False
-        
-        async for chunk in WatchdogAsyncIterator(
-            chunk_stream, reseter=self, watchdog_enabled=self.watchdog_timers_enabled
-        ):
+
+        # We use a WatchdogAsyncIterator to ensure that we don't hang on to
+        # the chunk stream if the LLM response takes too long.
+        async for chunk in WatchdogAsyncIterator(chunk_stream, manager=self.task_manager):
             if chunk.usage:
                 tokens = LLMTokenUsage(
                     prompt_tokens=chunk.usage.prompt_tokens,

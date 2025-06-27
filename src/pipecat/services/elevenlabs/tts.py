@@ -396,7 +396,7 @@ class ElevenLabsTTSService(AudioContextWordTTSService):
 
     async def _receive_messages(self):
         async for message in WatchdogAsyncIterator(
-            self._get_websocket(), reseter=self, watchdog_enabled=self.watchdog_timers_enabled
+            self._get_websocket(), manager=self.task_manager
         ):
             msg = json.loads(message)
 
@@ -428,7 +428,7 @@ class ElevenLabsTTSService(AudioContextWordTTSService):
                 self._cumulative_time = word_times[-1][1]
 
     async def _keepalive_task_handler(self):
-        KEEPALIVE_SLEEP = 10 if self.watchdog_timers_enabled else 3
+        KEEPALIVE_SLEEP = 10 if self.task_manager.task_watchdog_enabled else 3
         while True:
             self.reset_watchdog()
             await asyncio.sleep(KEEPALIVE_SLEEP)
