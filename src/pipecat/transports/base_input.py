@@ -366,6 +366,14 @@ class BaseInputTransport(FrameProcessor):
         # If silence exceeds threshold, we are going to receive EndOfTurnState.COMPLETE
         end_of_turn_state = self._params.turn_analyzer.append_audio(frame.audio, is_speech)
         if end_of_turn_state == EndOfTurnState.COMPLETE:
+            # Check if the turn analyzer has timeout metrics to emit
+            if (
+                hasattr(self._params.turn_analyzer, "_timeout_metrics")
+                and self._params.turn_analyzer._timeout_metrics
+            ):
+                logger.debug("Sending event _timeout_metrics")
+                await self._handle_prediction_result(self._params.turn_analyzer._timeout_metrics)
+                self._params.turn_analyzer._timeout_metrics = None
             await self._handle_end_of_turn_complete(end_of_turn_state)
         # Otherwise we are going to trigger to check if the turn is completed based on the VAD
         elif vad_state == VADState.QUIET and vad_state != previous_vad_state:
