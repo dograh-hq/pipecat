@@ -12,6 +12,8 @@ from loguru import logger
 from pipecat.frames.frames import (
     BotStartedSpeakingFrame,
     MetricsFrame,
+    STTMuteFrame,
+    UserStoppedSpeakingFrame,
     VADUserStoppedSpeakingFrame,
 )
 from pipecat.observers.base_observer import BaseObserver, FramePushed
@@ -64,7 +66,13 @@ class TurnTraceObserver(BaseObserver):
 
         # Latency measurement helpers (reset on every turn)
         self._latency_span: Optional["Span"] = None
+        # Timestamp when the user was detected to stop speaking (after end of turn)
         self._user_stopped_ts: float = 0.0
+        # Timestamp when VAD non-definitively detected the user stopped speaking (pre end of turn)
+        self._vad_stopped_ts: float = 0.0
+
+        # STT mute tracking
+        self._stt_muted: bool = False
 
         if turn_tracker:
 
@@ -98,19 +106,51 @@ class TurnTraceObserver(BaseObserver):
         frame = data.frame
 
         # ------------------------------------------------------------
+        # 0) Handle STT mute state updates early and skip user stop events
+        # ------------------------------------------------------------
+        if isinstance(frame, STTMuteFrame):
+            # Update the internal mute flag so latency calculations can
+            # ignore VAD/UserStoppedSpeaking events when STT is muted.
+            self._stt_muted = frame.mute
+            # Nothing else to do for this frame.
+            return
+
+        # ------------------------------------------------------------
         # 1) Latency attributes within the pre-allocated span
         # ------------------------------------------------------------
         if isinstance(frame, VADUserStoppedSpeakingFrame):
-            # Record the timestamp – actual span already exists from turn start
-            logger.debug("VADUserStoppedSpeakingFrame in TurnTraceObserver")
-            self._user_stopped_ts = time.time()
+            # Ignore VAD events while STT is muted – the audio is not being
+            # processed, so these timestamps are not meaningful.
+            if not self._stt_muted:
+                # Record the timestamp – actual span already exists from turn start
+                logger.debug("VADUserStoppedSpeakingFrame in TurnTraceObserver")
+                self._vad_stopped_ts = time.time()
+
+        elif isinstance(frame, UserStoppedSpeakingFrame):
+            if not self._stt_muted:
+                # Record generic user stop speaking timestamp (may occur before definitive VAD stop)
+                logger.debug("UserStoppedSpeakingFrame in TurnTraceObserver")
+                self._user_stopped_ts = time.time()
 
         elif isinstance(frame, BotStartedSpeakingFrame):
             # Capture latency attribute once
             logger.debug("BotStartedSpeakingFrame in TurnTraceObserver")
-            if self._latency_span is not None and self._user_stopped_ts > 0:
-                latency = max(time.time() - self._user_stopped_ts, 0.0)
-                self._latency_span.set_attribute("user_to_bot_latency_ms", latency * 1000)
+            if self._latency_span is not None:
+                now = time.time()
+
+                # Latency from VAD definitive stop to bot start
+                if self._vad_stopped_ts > 0:
+                    latency_vad = max(now - self._vad_stopped_ts, 0.0)
+                    self._latency_span.set_attribute(
+                        "vad_stop_to_bot_start_latency", latency_vad * 1000
+                    )
+
+                # Latency from first user stop event to bot start
+                if self._user_stopped_ts > 0:
+                    latency_user = max(now - self._user_stopped_ts, 0.0)
+                    self._latency_span.set_attribute(
+                        "user_stop_to_bot_start_latency", latency_user * 1000
+                    )
 
         # ------------------------------------------------------------
         # 2) MetricsFrames – capture TTFB and end-of-turn processing times
@@ -247,6 +287,7 @@ class TurnTraceObserver(BaseObserver):
             "latency.user_stop_to_bot_start", context=context_provider.get_current_turn_context()
         )
         self._user_stopped_ts = 0.0
+        self._vad_stopped_ts = 0.0
 
         logger.debug(f"Started tracing for Turn {turn_number}")
 
@@ -266,6 +307,7 @@ class TurnTraceObserver(BaseObserver):
                 self._latency_span.end()
                 self._latency_span = None
                 self._user_stopped_ts = 0.0
+                self._vad_stopped_ts = 0.0
 
             # Now end the main turn span
             self._current_span.end()
