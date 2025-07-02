@@ -1,4 +1,6 @@
 import asyncio
+import json
+import os
 import uuid
 from typing import Optional
 
@@ -87,7 +89,7 @@ class StasisRTPConnection(BaseObject):
     # Public helpers – similar surface as SmallWebRTCConnection
     # ---------------------------------------------------------------------
 
-    async def disconnect(self, reason: str):
+    async def disconnect(self, reason: str, extracted_variables: dict):
         """Instruct Asterisk to hang-up the call and perform cleanup."""
         # If self._closed is set, then we have already called _handle_disconnect. We might
         # have called _handle_disconnect upon remote hangup, and hence we should not
@@ -101,11 +103,12 @@ class StasisRTPConnection(BaseObject):
                 if reason == EndTaskReason.USER_QUALIFIED.value:
                     # User qualified - continue in dialplan
                     logger.debug(
-                        f"User qualified, continuing in dialplan for channel {self.caller_channel.id}"
+                        f"User qualified, continuing in dialplan for channel {self.caller_channel.id} REMOTE_DISPO_CALL_VARIABLES: {json.dumps(extracted_variables)}"
                     )
                     # Set variable REMOTE_DISPO_CALL_VARIABLES before continuing in dialplan
                     await self.caller_channel.setChannelVar(
-                        variable="REMOTE_DISPO_CALL_VARIABLES", value="REMOTE_DISPOSITION"
+                        variable="REMOTE_DISPO_CALL_VARIABLES",
+                        value=json.dumps(extracted_variables),
                     )
                     await self.caller_channel.continueInDialplan()
                 else:
@@ -174,7 +177,9 @@ class StasisRTPConnection(BaseObject):
 
             ip = await self.em_channel.getChannelVar(variable="UNICASTRTP_LOCAL_ADDRESS")
             port = await self.em_channel.getChannelVar(variable="UNICASTRTP_LOCAL_PORT")
-            self.remote_addr = (ip["value"], int(port["value"]))
+
+            # self.remote_addr = (ip["value"], int(port["value"]))
+            self.remote_addr = (os.environ.get("ASTERISK_REMOTE_IP"), int(port["value"]))
 
             logger.debug(
                 f"StasisRTPConnection {self} connection resources ready (bridge {self._bridge.id}) and remote address: {self.remote_addr}"

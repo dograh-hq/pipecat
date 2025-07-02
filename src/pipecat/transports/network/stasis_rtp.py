@@ -101,7 +101,8 @@ class StasisRTPInputTransport(BaseInputTransport):
         await super().cancel(frame)
         await self._stop_tasks()
         await self._client.disconnect(
-            frame.metadata.get("reason", EndTaskReason.SYSTEM_CANCELLED.value)
+            frame.metadata.get("reason", EndTaskReason.SYSTEM_CANCELLED.value),
+            frame.metadata.get("extracted_variables", {}),
         )
 
     async def _receive_audio(self):
@@ -160,7 +161,10 @@ class StasisRTPOutputTransport(BaseOutputTransport):
 
         # _client.disconnect triggers socket close and then _connection.disconnect
         # depending on the reason, we either hangup or continue in dialer
-        await self._client.disconnect(frame.metadata.get("reason", EndTaskReason.UNKNOWN.value))
+        await self._client.disconnect(
+            frame.metadata.get("reason", EndTaskReason.UNKNOWN.value),
+            frame.metadata.get("extracted_variables", {}),
+        )
 
     async def cancel(self, frame: CancelFrame):
         await super().cancel(frame)
