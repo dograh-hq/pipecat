@@ -162,5 +162,40 @@ pipecat/
 - Review periodically for new patterns
 - Architectural decisions in docs/
 
+## WebSocket Patterns
+
+### Persistent WebSocket Connections
+- Use connection manager pattern for auto-reconnection
+- Implement heartbeat/ping mechanism to keep alive
+- Exponential backoff for reconnection attempts
+- Monitor connection health with timestamps
+- Start connection immediately on init if event loop running
+
+### WebSocket Connection Management
+```python
+# Connection manager runs continuously
+async def _connection_manager(self):
+    while not self._closing:
+        try:
+            await self._establish_connection()
+            await self._ws.wait_closed()
+        finally:
+            # Exponential backoff reconnection
+            await asyncio.sleep(delay)
+
+# Heartbeat keeps connection alive
+async def _heartbeat_loop(self):
+    while not self._closing:
+        await asyncio.sleep(15)
+        await self._ws.ping()
+```
+
+### WebSocket Best Practices
+- Enable `autoping=True` in aiohttp
+- Set reasonable heartbeat intervals (15-30s)
+- Track last successful request time
+- Clean shutdown with task cancellation
+- Lock WebSocket for concurrent access
+
 ---
-*Last updated when consolidating memories from docs/CLAUDE.md and adding missing architectural patterns*
+*Last updated when implementing persistent WebSocket pattern for Smart Turn analyzer*

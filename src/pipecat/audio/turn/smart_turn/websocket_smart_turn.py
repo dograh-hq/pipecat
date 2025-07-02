@@ -49,6 +49,17 @@ class WebSocketSmartTurnAnalyzer(BaseSmartTurn):
         self._ws: Optional[aiohttp.ClientWebSocketResponse] = None
         # Protects _ws so we don't attempt concurrent `receive` on one socket.
         self._ws_lock = asyncio.Lock()
+        
+        # Connection management
+        self._connection_task: Optional[asyncio.Task] = None
+        self._heartbeat_task: Optional[asyncio.Task] = None
+        self._reconnect_delay = 1.0  # Start with 1 second
+        self._max_reconnect_delay = 30.0  # Max 30 seconds
+        self._closing = False
+        
+        # Connection health monitoring
+        self._last_successful_request = 0.0
+        self._connection_attempts = 0
 
         # ------------------------------------------------------------------
         # Warm-up: establish the WebSocket immediately if an event loop is
@@ -58,12 +69,13 @@ class WebSocketSmartTurnAnalyzer(BaseSmartTurn):
         try:
             loop = asyncio.get_event_loop()
             if loop.is_running():
-                # Fire-and-forget task – store it so we can await in tests if needed.
-                self._warmup_task = loop.create_task(self._ensure_ws())
+                # Start connection manager instead of single warmup
+                self._connection_task = loop.create_task(self._connection_manager())
         except RuntimeError:
             # No running loop at object creation time (e.g. in sync path). The
             # connection will be opened lazily on first use.
-            self._warmup_task = None
+            logger.error("No running loop at object creation time. The connection will be opened lazily on first use.")
+            pass
 
     # ---------------------------------------------------------------------
     # Internal helpers
@@ -74,24 +86,110 @@ class WebSocketSmartTurnAnalyzer(BaseSmartTurn):
         np.save(buffer, audio_array)
         return buffer.getvalue()
 
-    async def _ensure_ws(self) -> aiohttp.ClientWebSocketResponse:
-        """Return a connected WebSocket, reconnecting if necessary."""
-        if self._ws is None or self._ws.closed:
-            logger.debug("Opening new WebSocket connection to Smart-Turn service…")
-            # Forward service context as a header if provided.
-            extra_headers = dict(self._headers)
-            if self._service_context is not None:
-                extra_headers["X-Service-Context"] = str(self._service_context)
+    async def _connection_manager(self) -> None:
+        """Manages WebSocket connection lifecycle with automatic reconnection."""
+        while not self._closing:
             try:
-                self._ws = await self._aiohttp_session.ws_connect(
-                    self._url,
-                    headers=extra_headers,
-                    heartbeat=30,
-                    timeout=self._params.stop_secs,  # same as silence window
-                )
-            except Exception as exc:
-                logger.error(f"Failed to establish WebSocket: {exc}")
-                raise
+                # Establish connection
+                await self._establish_connection()
+                
+                # Reset reconnect delay on successful connection
+                self._reconnect_delay = 1.0
+                self._connection_attempts = 0
+                
+                # Start heartbeat
+                if self._heartbeat_task:
+                    self._heartbeat_task.cancel()
+                self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+                
+                # Wait for connection to close
+                if self._ws and not self._ws.closed:
+                    await self._ws.wait_closed()
+                    
+            except Exception as e:
+                logger.error(f"Connection manager error: {e}")
+                
+            finally:
+                # Cancel heartbeat if running
+                if self._heartbeat_task:
+                    self._heartbeat_task.cancel()
+                    self._heartbeat_task = None
+                
+                # Clean up connection
+                if self._ws and not self._ws.closed:
+                    try:
+                        await self._ws.close()
+                    except:
+                        pass
+                self._ws = None
+                
+                if not self._closing:
+                    # Exponential backoff for reconnection
+                    self._connection_attempts += 1
+                    delay = min(self._reconnect_delay * (2 ** min(self._connection_attempts - 1, 5)), 
+                               self._max_reconnect_delay)
+                    logger.info(f"Reconnecting in {delay:.1f} seconds (attempt {self._connection_attempts})")
+                    await asyncio.sleep(delay)
+
+    async def _establish_connection(self) -> None:
+        """Establish a new WebSocket connection."""
+        logger.debug("Establishing new WebSocket connection to Smart-Turn service…")
+        
+        # Forward service context as a header if provided.
+        extra_headers = dict(self._headers)
+        if self._service_context is not None:
+            extra_headers["X-Service-Context"] = str(self._service_context)
+            
+        try:
+            self._ws = await self._aiohttp_session.ws_connect(
+                self._url,
+                headers=extra_headers,
+                heartbeat=30,
+                timeout=aiohttp.ClientTimeout(total=10.0),  # Connection timeout
+                autoping=True,  # Enable automatic ping/pong
+            )
+            logger.info("WebSocket connection established successfully")
+        except Exception as exc:
+            logger.error(f"Failed to establish WebSocket: {exc}")
+            raise
+
+    async def _heartbeat_loop(self) -> None:
+        """Send periodic pings to keep connection alive."""
+        try:
+            while not self._closing and self._ws and not self._ws.closed:
+                await asyncio.sleep(15)  # Ping every 15 seconds
+                
+                # Check connection health
+                if time.time() - self._last_successful_request > 60:
+                    logger.debug("Sending heartbeat ping to turn service")
+                    try:
+                        pong = await self._ws.ping()
+                        await pong  # Wait for pong response
+                    except Exception as e:
+                        logger.warning(f"Heartbeat failed: {e}")
+                        # Force reconnection
+                        if self._ws and not self._ws.closed:
+                            await self._ws.close()
+                        break
+        except asyncio.CancelledError:
+            pass
+
+    async def _ensure_ws(self) -> aiohttp.ClientWebSocketResponse:
+        """Return a connected WebSocket, waiting for connection if necessary."""
+        # If connection manager isn't running, start it
+        if not self._connection_task or self._connection_task.done():
+            self._connection_task = asyncio.create_task(self._connection_manager())
+        
+        # Wait for connection with timeout
+        start_time = time.time()
+        while (not self._ws or self._ws.closed) and not self._closing:
+            if time.time() - start_time > 10:  # 10 second timeout
+                raise Exception("Timeout waiting for WebSocket connection")
+            await asyncio.sleep(0.1)
+            
+        if self._closing:
+            raise Exception("Analyzer is closing")
+            
         return self._ws
 
     # ------------------------------------------------------------------
@@ -105,7 +203,6 @@ class WebSocketSmartTurnAnalyzer(BaseSmartTurn):
 
         try:
             async with self._ws_lock:
-                send_start = time.perf_counter()
                 await ws.send_bytes(data_bytes)
                 # Wait for response (must be text) with timeout.
                 try:
@@ -120,7 +217,10 @@ class WebSocketSmartTurnAnalyzer(BaseSmartTurn):
 
                 if recv_msg.type == aiohttp.WSMsgType.TEXT:
                     try:
-                        return json.loads(recv_msg.data)
+                        result = json.loads(recv_msg.data)
+                        # Mark successful request
+                        self._last_successful_request = time.time()
+                        return result
                     except json.JSONDecodeError as exc:
                         logger.error(f"Smart turn service returned invalid JSON: {exc}")
                         raise
@@ -138,7 +238,7 @@ class WebSocketSmartTurnAnalyzer(BaseSmartTurn):
             raise
         except Exception as exc:
             logger.error(f"Smart turn prediction failed over WebSocket: {exc}")
-            # Close so next attempt will reopen.
+            # Close so connection manager will reconnect
             if self._ws and not self._ws.closed:
                 await self._ws.close()
             # Return default incomplete prediction so pipeline continues.
@@ -150,6 +250,25 @@ class WebSocketSmartTurnAnalyzer(BaseSmartTurn):
 
     async def close(self):
         """Asynchronously close the WebSocket (called from pipeline cleanup)."""
+        self._closing = True
+        
+        # Cancel connection manager
+        if self._connection_task:
+            self._connection_task.cancel()
+            try:
+                await self._connection_task
+            except asyncio.CancelledError:
+                pass
+                
+        # Cancel heartbeat
+        if self._heartbeat_task:
+            self._heartbeat_task.cancel()
+            try:
+                await self._heartbeat_task
+            except asyncio.CancelledError:
+                pass
+        
+        # Close WebSocket
         if self._ws and not self._ws.closed:
             try:
                 await self._ws.close()
