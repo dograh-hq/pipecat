@@ -8,6 +8,8 @@ import asyncio
 import inspect
 from typing import Awaitable, Callable, Union
 
+from loguru import logger
+
 from pipecat.frames.frames import (
     BotSpeakingFrame,
     CancelFrame,
@@ -127,6 +129,7 @@ class UserIdleProcessor(FrameProcessor):
 
         # Check for end frames before processing
         if isinstance(frame, (EndFrame, CancelFrame)):
+            logger.debug("UserIdleProcessor: EndFrame or CancelFrame received")
             # Stop the idle task, if it exists
             await self._stop()
             # Push the frame down the pipeline

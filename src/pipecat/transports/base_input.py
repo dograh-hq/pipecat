@@ -219,8 +219,14 @@ class BaseInputTransport(FrameProcessor):
             await self._handle_bot_stopped_speaking(frame)
             await self.push_frame(frame, direction)
         elif isinstance(frame, EmulateUserStartedSpeakingFrame):
-            logger.debug("Emulating user started speaking")
-            await self._handle_user_interruption(UserStartedSpeakingFrame(emulated=True))
+            # If we've already received an EndFrame (i.e. the pipeline is shutting down),
+            # ignore any late emulated VAD events so we don't spuriously restart the
+            # interruption logic.
+            if self._received_end_frame:
+                logger.debug("Ignoring EmulateUserStartedSpeakingFrame received after EndFrame")
+            else:
+                logger.debug("Emulating user started speaking")
+                await self._handle_user_interruption(UserStartedSpeakingFrame(emulated=True))
         elif isinstance(frame, EmulateUserStoppedSpeakingFrame):
             logger.debug("Emulating user stopped speaking")
             await self._handle_user_interruption(UserStoppedSpeakingFrame(emulated=True))
