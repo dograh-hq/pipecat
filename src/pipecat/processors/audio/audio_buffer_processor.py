@@ -7,7 +7,12 @@
 import time
 from typing import Optional
 
-from pipecat.audio.utils import create_default_resampler, interleave_stereo_audio, mix_audio
+from pipecat.audio.utils import (
+    create_default_resampler,
+    interleave_stereo_audio,
+    mix_audio,
+    ulaw_to_pcm,
+)
 from pipecat.frames.frames import (
     AudioRawFrame,
     BotStartedSpeakingFrame,
@@ -277,7 +282,21 @@ class AudioBufferProcessor(FrameProcessor):
         self._bot_turn_audio_buffer = bytearray()
 
     async def _resample_audio(self, frame: AudioRawFrame) -> bytes:
-        return await self._resampler.resample(frame.audio, frame.sample_rate, self._sample_rate)
+        """Return PCM audio for *frame* at the processor's output rate.
+
+        Frames may arrive already μ-law-encoded (ElevenLabs in Stasis mode).
+        Detect this via ``frame.metadata["audio_encoding"] == "ulaw"`` and
+        convert to 16-bit PCM before resampling.
+        """
+
+        target_rate = self._sample_rate or frame.sample_rate
+
+        # Decode μ-law if required
+        if getattr(frame, "metadata", {}).get("audio_encoding") == "ulaw":
+            return await ulaw_to_pcm(frame.audio, frame.sample_rate, target_rate, self._resampler)
+
+        # Default PCM path
+        return await self._resampler.resample(frame.audio, frame.sample_rate, target_rate)
 
     def _compute_silence(self, from_time: float) -> bytes:
         quiet_time = time.time() - from_time
