@@ -102,9 +102,12 @@ class WebSocketSmartTurnAnalyzer(BaseSmartTurn):
                     self._heartbeat_task.cancel()
                 self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
                 
-                # Wait for connection to close
-                if self._ws and not self._ws.closed:
-                    await self._ws.wait_closed()
+                # Wait for connection to close by monitoring the closed state
+                while self._ws and not self._ws.closed and not self._closing:
+                    await asyncio.sleep(0.5)  # Check connection status periodically
+                
+                if self._ws and self._ws.closed:
+                    logger.debug("WebSocket connection closed")
                     
             except Exception as e:
                 logger.error(f"Connection manager error: {e}")
@@ -149,6 +152,11 @@ class WebSocketSmartTurnAnalyzer(BaseSmartTurn):
                 autoping=True,  # Enable automatic ping/pong
             )
             logger.info("WebSocket connection established successfully")
+            
+            # Check if connection was actually established
+            if self._ws.closed:
+                raise Exception("WebSocket connection closed immediately after establishment")
+                
         except Exception as exc:
             logger.error(f"Failed to establish WebSocket: {exc}")
             raise
