@@ -22,13 +22,15 @@
 - Frames flow through pipeline sequentially
 
 ### Frame Types
-- AudioRawFrame - Raw audio data
+- InputAudioRawFrame - Raw audio from input transports (SystemFrame)
+- OutputAudioRawFrame - Raw audio to output transports (DataFrame)
+- TTSAudioRawFrame - TTS-generated audio (extends OutputAudioRawFrame)
 - TextFrame - Text messages
-- UserStartedSpeakingFrame - Voice activity
-- UserStoppedSpeakingFrame - Voice inactivity
-- TranscriptionFrame - STT results
-- LLMResponseFrame - LLM outputs
-- TTSAudioFrame - TTS audio
+- UserStartedSpeakingFrame - Voice activity detection
+- UserStoppedSpeakingFrame - Voice inactivity detection
+- TranscriptionFrame - STT results with user_id and timestamp
+- LLMMessagesFrame - LLM context messages
+- TTSStartedFrame/TTSStoppedFrame - TTS processing boundaries
 
 ### Base Classes
 - FrameProcessor - Base for all processors
@@ -118,6 +120,93 @@ async def process_frame(self, frame: Frame, direction: FrameDirection):
 4. Processors handle/modify/observe
 5. Output transport sends result
 
+### Audio Frame Flow
+
+#### InputAudioRawFrame Flow
+1. **Produced by**: Input transports (BaseInputTransport subclasses)
+   - From microphone/WebRTC/phone connections
+   - Includes transport_source identifier
+   - SystemFrame type (processed immediately, not queued)
+2. **Consumed by**:
+   - VAD analyzer (if enabled) for speech detection
+   - STT services for transcription
+   - Audio filters/processors
+   - Passed through if audio_in_passthrough enabled
+
+#### OutputAudioRawFrame Flow
+1. **Produced by**:
+   - TTS services (as TTSAudioRawFrame subclass)
+   - Audio mixing/processing components
+   - Any processor generating audio for playback
+2. **Features**:
+   - DataFrame type (queued and ordered)
+   - Includes transport_destination for routing
+   - Contains sample_rate, num_channels, audio bytes
+3. **Consumed by**:
+   - Output transports (BaseOutputTransport subclasses)
+   - Audio mixers (if configured)
+   - Sent to speakers/WebRTC/phone connections
+
+#### Key Differences
+- InputAudioRawFrame: SystemFrame, immediate processing, from users
+- OutputAudioRawFrame: DataFrame, queued processing, to users
+- Both carry audio bytes + metadata (sample rate, channels)
+
+### Audio Buffer Split Pattern
+
+#### AudioBuffer Factory Pattern
+```python
+# New pattern for splitting audio processing
+buffer = AudioBuffer()
+input_processor = buffer.input()   # Creates AudioBufferInputProcessor
+output_processor = buffer.output() # Creates AudioBufferOutputProcessor
+
+# Use in pipeline
+pipeline = Pipeline([
+    input_transport,
+    stt_service,      # Set audio_passthrough=False to avoid duplication
+    input_processor,  # Buffers InputAudioRawFrame
+    # ... other processors ...
+    output_processor, # Emits buffered audio as OutputAudioRawFrame
+    output_transport
+])
+```
+
+#### Benefits
+- **Separation of concerns**: Input buffering separate from output emission
+- **Flexible placement**: Processors can be placed anywhere in pipeline
+- **No audio duplication**: Set `audio_passthrough=False` in STT to prevent duplicate audio
+- **External synchronization**: Use AudioSynchronizer to merge audio outside pipeline
+
+#### AudioSynchronizer
+- Merges multiple audio streams outside the pipeline
+- Useful for combining buffered audio with other sources
+- Handles timing and synchronization automatically
+
+##### Timeline-Based Audio Synchronization
+- **Problem**: Simple buffer-based merging causes audio overlap when input/output occur at different times
+- **Solution**: Timeline-based approach with timestamps
+```python
+# Each audio chunk stored with timestamp
+self._input_timeline: List[Tuple[float, bytes]] = []  # (timestamp, audio_data)
+self._output_timeline: List[Tuple[float, bytes]] = []
+
+# Audio placed at correct temporal position
+relative_time = current_time - self._start_time
+self._input_timeline.append((relative_time, pcm))
+
+# Merge based on timeline, filling gaps with silence
+for timestamp, audio_data in timeline:
+    offset_time = timestamp - last_processed_time
+    offset_bytes = int(offset_time * bytes_per_second)
+    buffer[offset_bytes:end_pos] = audio_data
+```
+- **Benefits**: 
+  - Proper temporal alignment of input/output audio
+  - No overlap between user speech and bot speech
+  - Silence automatically inserted for gaps
+  - Chronological processing ensures accuracy
+
 ## Common Gotchas
 
 ### What Doesn't Exist
@@ -198,4 +287,4 @@ async def _heartbeat_loop(self):
 - Lock WebSocket for concurrent access
 
 ---
-*Last updated when implementing persistent WebSocket pattern for Smart Turn analyzer*
+*Last updated when implementing timeline-based audio synchronization to fix overlap issues*

@@ -341,7 +341,7 @@ class BaseOutputTransport(FrameProcessor):
 
             # Determine audio encoding from metadata
             encoding = get_audio_encoding(frame.metadata)
-            
+
             if encoding in (AudioEncoding.ULAW, AudioEncoding.ALAW):
                 # Skip resampling for compressed audio formats
                 resampled = frame.audio
@@ -356,12 +356,9 @@ class BaseOutputTransport(FrameProcessor):
             # This approach is robust against upstream changes to audio_bytes_10ms calculation
             duration_ms = self._params.audio_out_10ms_chunks * 10
             chunk_size = calculate_chunk_size_bytes(
-                self._sample_rate,
-                duration_ms,
-                frame.num_channels,
-                encoding
+                self._sample_rate, duration_ms, frame.num_channels, encoding
             )
-            
+
             if chunk_size != self._audio_chunk_size and encoding != AudioEncoding.PCM:
                 logger.debug(
                     f"BaseOutputTransport: Using {encoding} chunk size of {chunk_size} bytes "
@@ -372,7 +369,7 @@ class BaseOutputTransport(FrameProcessor):
             self._audio_buffer.extend(resampled)
             while len(self._audio_buffer) >= chunk_size:
                 chunk = cls(
-                    bytes(self._audio_buffer[: chunk_size]),
+                    bytes(self._audio_buffer[:chunk_size]),
                     sample_rate=self._sample_rate,
                     num_channels=frame.num_channels,
                 )
@@ -380,7 +377,7 @@ class BaseOutputTransport(FrameProcessor):
                 # Preserve metadata from the original frame
                 chunk.metadata = frame.metadata.copy()
                 await self._audio_queue.put(chunk)
-                self._audio_buffer = self._audio_buffer[chunk_size :]
+                self._audio_buffer = self._audio_buffer[chunk_size:]
 
         async def handle_image_frame(self, frame: OutputImageRawFrame | SpriteFrame):
             if not self._params.video_out_enabled:

@@ -143,8 +143,14 @@ class BaseInputTransport(FrameProcessor):
 
         self._sample_rate = self._params.audio_in_sample_rate or frame.audio_in_sample_rate
 
+        logger.info(
+            f"BaseInputTransport: Setting sample rate to {self._sample_rate}Hz "
+            f"(params={self._params.audio_in_sample_rate}, frame={frame.audio_in_sample_rate})"
+        )
+
         # Configure VAD analyzer.
         if self._params.vad_analyzer:
+            logger.debug(f"BaseInputTransport: Configuring VAD with {self._sample_rate}Hz")
             self._params.vad_analyzer.set_sample_rate(self._sample_rate)
 
         # Configure End of turn analyzer.

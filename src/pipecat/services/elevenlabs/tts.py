@@ -426,7 +426,7 @@ class ElevenLabsTTSService(AudioContextWordTTSService):
                 audio = base64.b64decode(msg["audio"])
                 frame = TTSAudioRawFrame(audio, self.sample_rate, 1)
                 # Mark the frame with encoding information if using μ-law
-                
+
                 if self._use_ulaw and self.sample_rate == 8000:
                     frame.metadata["audio_encoding"] = "ulaw"
                 await self.append_to_audio_context(received_ctx_id, frame)
