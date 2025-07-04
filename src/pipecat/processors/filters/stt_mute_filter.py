@@ -140,7 +140,7 @@ class STTMuteFilter(FrameProcessor):
                     if not self._first_speech_handled:
                         return True
 
-                    if self._bot_is_speaking and self._config.should_mute_callback:
+                    if self._config.should_mute_callback:
                         should_mute = await self._config.should_mute_callback(self)
                         if should_mute:
                             return True

@@ -126,7 +126,9 @@ class StasisRTPClient:
             return
         await self._connection.connect()
 
-    async def disconnect(self, reason: str = EndTaskReason.UNKNOWN.value):
+    async def disconnect(
+        self, reason: str = EndTaskReason.UNKNOWN.value, extracted_variables: dict = {}
+    ):
         """
         This can either be called from the transport when the transport encounters EndFrame or from
         connection when the connection disconnect handler is called (e.g. when the call is ended by the user).
@@ -166,7 +168,9 @@ class StasisRTPClient:
 
         # Disconnect the underlying RTP connection to hang up the call
         try:
-            await asyncio.wait_for(self._connection.disconnect(reason), timeout=5.0)
+            await asyncio.wait_for(
+                self._connection.disconnect(reason, extracted_variables), timeout=5.0
+            )
         except asyncio.TimeoutError:
             logger.warning("RTP connection disconnect timed out")
         except Exception as exc:

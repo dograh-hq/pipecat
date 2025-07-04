@@ -105,7 +105,9 @@ def language_to_elevenlabs_language(language: Language) -> Optional[str]:
     return result
 
 
-def output_format_from_sample_rate(sample_rate: int) -> str:
+def output_format_from_sample_rate(sample_rate: int, use_ulaw: bool = False) -> str:
+    if use_ulaw and sample_rate == 8000:
+        return "ulaw_8000"
     match sample_rate:
         case 8000:
             return "pcm_8000"
@@ -176,6 +178,7 @@ class ElevenLabsTTSService(AudioContextWordTTSService):
         auto_mode: Optional[bool] = True
         enable_ssml_parsing: Optional[bool] = None
         enable_logging: Optional[bool] = None
+        use_ulaw: Optional[bool] = False
 
     def __init__(
         self,
@@ -232,6 +235,7 @@ class ElevenLabsTTSService(AudioContextWordTTSService):
         self.set_voice(voice_id)
         self._output_format = ""  # initialized in start()
         self._voice_settings = self._set_voice_settings()
+        self._use_ulaw = params.use_ulaw
 
         # Indicates if we have sent TTSStartedFrame. It will reset to False when
         # there's an interruption or TTSStoppedFrame.
@@ -268,7 +272,7 @@ class ElevenLabsTTSService(AudioContextWordTTSService):
 
     async def start(self, frame: StartFrame):
         await super().start(frame)
-        self._output_format = output_format_from_sample_rate(self.sample_rate)
+        self._output_format = output_format_from_sample_rate(self.sample_rate, self._use_ulaw)
         await self._connect()
 
     async def stop(self, frame: EndFrame):
@@ -421,6 +425,10 @@ class ElevenLabsTTSService(AudioContextWordTTSService):
 
                 audio = base64.b64decode(msg["audio"])
                 frame = TTSAudioRawFrame(audio, self.sample_rate, 1)
+                # Mark the frame with encoding information if using μ-law
+
+                if self._use_ulaw and self.sample_rate == 8000:
+                    frame.metadata["audio_encoding"] = "ulaw"
                 await self.append_to_audio_context(received_ctx_id, frame)
             if msg.get("alignment"):
                 word_times = calculate_word_times(msg["alignment"], self._cumulative_time)
@@ -517,6 +525,7 @@ class ElevenLabsHttpTTSService(WordTTSService):
         style: Optional[float] = None
         use_speaker_boost: Optional[bool] = None
         speed: Optional[float] = None
+        use_ulaw: Optional[bool] = False
 
     def __init__(
         self,
@@ -560,6 +569,7 @@ class ElevenLabsHttpTTSService(WordTTSService):
         self.set_voice(voice_id)
         self._output_format = ""  # initialized in start()
         self._voice_settings = self._set_voice_settings()
+        self._use_ulaw = params.use_ulaw
 
         # Track cumulative time to properly sequence word timestamps across utterances
         self._cumulative_time = 0
@@ -589,7 +599,7 @@ class ElevenLabsHttpTTSService(WordTTSService):
     async def start(self, frame: StartFrame):
         """Initialize the service upon receiving a StartFrame."""
         await super().start(frame)
-        self._output_format = output_format_from_sample_rate(self.sample_rate)
+        self._output_format = output_format_from_sample_rate(self.sample_rate, self._use_ulaw)
         self._reset_state()
 
     async def push_frame(self, frame: Frame, direction: FrameDirection = FrameDirection.DOWNSTREAM):
@@ -751,7 +761,11 @@ class ElevenLabsHttpTTSService(WordTTSService):
                         if data and "audio_base64" in data:
                             await self.stop_ttfb_metrics()
                             audio = base64.b64decode(data["audio_base64"])
-                            yield TTSAudioRawFrame(audio, self.sample_rate, 1)
+                            frame = TTSAudioRawFrame(audio, self.sample_rate, 1)
+                            # Mark the frame with encoding information if using μ-law
+                            if self._use_ulaw and self.sample_rate == 8000:
+                                frame.metadata["audio_encoding"] = "ulaw"
+                            yield frame
 
                         # Process alignment if present
                         if data and "alignment" in data:

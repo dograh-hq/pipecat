@@ -159,7 +159,6 @@ class STTService(AIService):
             await self._update_settings(frame.settings)
         elif isinstance(frame, STTMuteFrame):
             self._muted = frame.mute
-            logger.debug(f"STT service {'muted' if frame.mute else 'unmuted'}")
         else:
             await self.push_frame(frame, direction)
 

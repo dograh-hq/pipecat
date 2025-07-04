@@ -101,7 +101,8 @@ class StasisRTPInputTransport(BaseInputTransport):
         await super().cancel(frame)
         await self._stop_tasks()
         await self._client.disconnect(
-            frame.metadata.get("reason", EndTaskReason.SYSTEM_CANCELLED.value)
+            frame.metadata.get("reason", EndTaskReason.SYSTEM_CANCELLED.value),
+            frame.metadata.get("extracted_variables", {}),
         )
 
     async def _receive_audio(self):
@@ -150,8 +151,7 @@ class StasisRTPOutputTransport(BaseOutputTransport):
         await self._client.setup(frame)
         await self._params.serializer.setup(frame)
 
-        # Compute pacing interval (same logic as FastAPI transport)
-        self._send_interval = (self.audio_chunk_size / self.sample_rate) / 2
+        self._send_interval = self._params.audio_out_10ms_chunks * 10 / 1000  # ms
 
         await self.set_transport_ready(frame)
 
@@ -160,7 +160,10 @@ class StasisRTPOutputTransport(BaseOutputTransport):
 
         # _client.disconnect triggers socket close and then _connection.disconnect
         # depending on the reason, we either hangup or continue in dialer
-        await self._client.disconnect(frame.metadata.get("reason", EndTaskReason.UNKNOWN.value))
+        await self._client.disconnect(
+            frame.metadata.get("reason", EndTaskReason.UNKNOWN.value),
+            frame.metadata.get("extracted_variables", {}),
+        )
 
     async def cancel(self, frame: CancelFrame):
         await super().cancel(frame)

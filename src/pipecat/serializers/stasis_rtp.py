@@ -75,14 +75,19 @@ class StasisRTPFrameSerializer(FrameSerializer):
 
         if isinstance(frame, AudioRawFrame):
             try:
-                # Pipeline PCM → 8-kHz μ-law
-                encoded = await pcm_to_ulaw(
-                    frame.audio,
-                    frame.sample_rate,
-                    self._stasis_sample_rate,
-                    self._resampler,
-                )
-                return encoded  # raw bytes
+                # Check if audio is already μ-law encoded
+                if frame.metadata.get("audio_encoding") == "ulaw" and frame.sample_rate == 8000:
+                    # Audio is already in the correct format, pass through
+                    return frame.audio
+                else:
+                    # Pipeline PCM → 8-kHz μ-law
+                    encoded = await pcm_to_ulaw(
+                        frame.audio,
+                        frame.sample_rate,
+                        self._stasis_sample_rate,
+                        self._resampler,
+                    )
+                    return encoded  # raw bytes
             except Exception as exc:  # pragma: no cover – robustness
                 logger.error(f"StasisRTPFrameSerializer.serialize: encode failed: {exc}")
                 return None

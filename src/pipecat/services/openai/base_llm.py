@@ -207,7 +207,16 @@ class BaseOpenAILLMService(LLMService):
     async def _stream_chat_completions(
         self, context: OpenAILLMContext
     ) -> AsyncStream[ChatCompletionChunk]:
-        logger.debug(f"{self}: Generating chat [{context.get_messages_for_logging()}]")
+        # Generate a concise log message that includes the first 20 and last 100 words of the
+        # conversation context. This avoids logging extremely long conversations while still
+        # providing enough information for debugging. If the context is shorter than this
+        # threshold, we log it in full.
+        messages_for_log = context.get_messages_for_logging()
+        words = messages_for_log.split()
+        if len(words) > 120:
+            messages_for_log = " ".join(words[:20] + ["......"] + words[-100:])
+
+        logger.debug(f"{self}: Generating chat [{messages_for_log}]")
 
         messages: List[ChatCompletionMessageParam] = context.get_messages()
 
