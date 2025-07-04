@@ -151,8 +151,7 @@ class StasisRTPOutputTransport(BaseOutputTransport):
         await self._client.setup(frame)
         await self._params.serializer.setup(frame)
 
-        # Compute pacing interval (same logic as FastAPI transport)
-        self._send_interval = (self.audio_chunk_size / self.sample_rate) / 2
+        self._send_interval = self._params.audio_out_10ms_chunks * 10 / 1000  # ms
 
         await self.set_transport_ready(frame)
 

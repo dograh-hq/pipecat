@@ -14,7 +14,6 @@ from typing import Any, AsyncGenerator, Dict, List, Mapping, Optional
 from loguru import logger
 from PIL import Image
 
-from pipecat.audio.audio_utils import AudioEncoding, calculate_chunk_size_bytes, get_audio_encoding
 from pipecat.audio.mixers.base_audio_mixer import BaseAudioMixer
 from pipecat.audio.utils import create_default_resampler
 from pipecat.frames.frames import (
@@ -80,7 +79,11 @@ class BaseOutputTransport(FrameProcessor):
         # We will write 10ms*CHUNKS of audio at a time (where CHUNKS is the
         # `audio_out_10ms_chunks` parameter). If we receive long audio frames we
         # will chunk them. This will help with interruption handling.
-        audio_bytes_10ms = int(self._sample_rate / 100) * self._params.audio_out_channels * 2
+        audio_bytes_10ms = (
+            int(self._sample_rate / 100)
+            * self._params.audio_out_channels
+            * self._params.audio_out_bytes_per_sample
+        )
         self._audio_chunk_size = audio_bytes_10ms * self._params.audio_out_10ms_chunks
 
     async def stop(self, frame: EndFrame):
@@ -339,37 +342,15 @@ class BaseOutputTransport(FrameProcessor):
             if not self._params.audio_out_enabled:
                 return
 
-            # Determine audio encoding from metadata
-            encoding = get_audio_encoding(frame.metadata)
-
-            if encoding in (AudioEncoding.ULAW, AudioEncoding.ALAW):
-                # Skip resampling for compressed audio formats
-                resampled = frame.audio
-            else:
-                # We might need to resample if incoming audio doesn't match the
-                # transport sample rate.
-                resampled = await self._resampler.resample(
-                    frame.audio, frame.sample_rate, self._sample_rate
-                )
-
-            # Calculate the correct chunk size based on encoding
-            # This approach is robust against upstream changes to audio_bytes_10ms calculation
-            duration_ms = self._params.audio_out_10ms_chunks * 10
-            chunk_size = calculate_chunk_size_bytes(
-                self._sample_rate, duration_ms, frame.num_channels, encoding
+            resampled = await self._resampler.resample(
+                frame.audio, frame.sample_rate, self._sample_rate
             )
-
-            if chunk_size != self._audio_chunk_size and encoding != AudioEncoding.PCM:
-                logger.debug(
-                    f"BaseOutputTransport: Using {encoding} chunk size of {chunk_size} bytes "
-                    f"(vs PCM size of {self._audio_chunk_size} bytes) for {duration_ms}ms chunks"
-                )
 
             cls = type(frame)
             self._audio_buffer.extend(resampled)
-            while len(self._audio_buffer) >= chunk_size:
+            while len(self._audio_buffer) >= self._audio_chunk_size:
                 chunk = cls(
-                    bytes(self._audio_buffer[:chunk_size]),
+                    bytes(self._audio_buffer[: self._audio_chunk_size]),
                     sample_rate=self._sample_rate,
                     num_channels=frame.num_channels,
                 )
@@ -377,7 +358,7 @@ class BaseOutputTransport(FrameProcessor):
                 # Preserve metadata from the original frame
                 chunk.metadata = frame.metadata.copy()
                 await self._audio_queue.put(chunk)
-                self._audio_buffer = self._audio_buffer[chunk_size:]
+                self._audio_buffer = self._audio_buffer[self._audio_chunk_size :]
 
         async def handle_image_frame(self, frame: OutputImageRawFrame | SpriteFrame):
             if not self._params.video_out_enabled:
