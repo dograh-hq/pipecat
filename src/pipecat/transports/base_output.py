@@ -357,6 +357,11 @@ class BaseOutputTransport(FrameProcessor):
                 chunk.transport_destination = self._destination
                 # Preserve metadata from the original frame
                 chunk.metadata = frame.metadata.copy()
+                
+                # Debug: Log chunk info
+                # logger.debug(f"BaseOutput: Creating chunk - type: {type(chunk).__name__}, size: {self._audio_chunk_size} bytes, "
+                #            f"sample_rate: {self._sample_rate}, original_type: {type(frame).__name__}")
+                
                 await self._audio_queue.put(chunk)
                 self._audio_buffer = self._audio_buffer[self._audio_chunk_size :]
 

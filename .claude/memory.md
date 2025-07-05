@@ -60,9 +60,28 @@ class MyProcessor(FrameProcessor):
 
 ### Internal Transport
 - For in-memory agent communication
-- No network overhead
+- No network overhead (unless simulated)
 - Direct frame passing
 - Use InternalTransportManager for pairing
+- **Network Latency Simulation**:
+  ```python
+  # Add latency to simulate real-world network conditions
+  transport_manager.create_transport_pair(
+      test_session_id="test_123",
+      actor_params=transport_params,
+      adversary_params=transport_params,
+      latency_seconds=0.1  # 100ms latency
+  )
+  ```
+  - **Fixed delay implementation** - packets are delayed by exact latency amount
+  - Uses separate latency processor task to prevent accumulating delays
+  - Maintains packet order (FIFO delivery after delay)
+  - Configurable per transport pair
+  - Useful for testing real-world scenarios
+  - Implementation details:
+    - Packets timestamped on arrival with delivery time
+    - Latency processor checks every 5ms for packets ready to deliver
+    - No accumulation - each packet delayed exactly once
 
 ### WebRTC Transport
 - SmallWebRTCTransport for browser communication
@@ -286,5 +305,86 @@ async def _heartbeat_loop(self):
 - Clean shutdown with task cancellation
 - Lock WebSocket for concurrent access
 
+## Audio Data Flow Patterns
+
+### Audio Format Through Pipeline
+1. **TTS Services Generate Audio**:
+   - TTS services (e.g., ElevenLabs) receive audio from API
+   - Audio arrives as base64 encoded data
+   - Decoded to raw PCM bytes: `audio = base64.b64decode(msg["audio"])`
+   - Created as TTSAudioRawFrame with sample_rate, num_channels=1
+   - Audio field contains raw PCM 16-bit bytes
+
+2. **Internal Transport Serialization**:
+   - **Fixed-size binary header** to avoid parsing issues
+   - Format: `[AUDIO (5 bytes)][sample_rate (4 bytes, big-endian)][num_channels (2 bytes, big-endian)][audio_data]`
+   - No encoding/decoding of audio data - passed as-is
+   - Deserialized back to InputAudioRawFrame with same raw bytes
+   - **Important**: Never use delimiters that might appear in binary audio data
+   ```python
+   # Serialization
+   header = b"AUDIO"
+   sample_rate_bytes = frame.sample_rate.to_bytes(4, byteorder='big')
+   num_channels_bytes = frame.num_channels.to_bytes(2, byteorder='big')
+   serialized = header + sample_rate_bytes + num_channels_bytes + frame.audio
+   
+   # Deserialization
+   sample_rate = int.from_bytes(data[5:9], byteorder='big')
+   num_channels = int.from_bytes(data[9:11], byteorder='big')
+   audio_data = data[11:]
+   ```
+
+3. **STT Services Expect PCM**:
+   - Deepgram expects "linear16" encoding (raw PCM 16-bit)
+   - STT receives InputAudioRawFrame.audio (raw bytes)
+   - Audio sent directly to STT: `await connection.send(audio)`
+   - No format conversion needed if TTS outputs PCM
+
+### Audio Frame Metadata
+- **AudioRawFrame** base class:
+  - `audio`: bytes (raw PCM data)
+  - `sample_rate`: int (e.g., 16000, 24000)
+  - `num_channels`: int (typically 1 for mono)
+  - `num_frames`: calculated from audio length
+
+### Common Audio Issues
+- **Format mismatch**: Ensure TTS output format matches STT expected format
+- **Sample rate**: Must be consistent through pipeline
+- **Encoding**: Most services use raw PCM, but some may use μ-law
+- **Metadata**: Check frame.metadata for special encodings (e.g., "audio_encoding": "ulaw")
+
+## TTS Service Audio Formats
+
+### ElevenLabs TTS
+- **Primary format**: PCM (Pulse Code Modulation) raw audio
+- **Sample rates**: 8000, 16000, 22050, 24000, 44100 Hz
+- **Audio depth**: 16-bit signed integers (2 bytes per sample)
+- **Channels**: Mono (1 channel)
+- **Optional**: μ-law encoding at 8000 Hz for bandwidth optimization
+- **No normalization**: Audio passes through unchanged from API
+
+### WebRTC Audio Transmission
+- **Chunking**: Audio broken into 10ms segments
+- **Conversion**: PCM bytes → numpy int16 → aiortc AudioFrame
+- **Timing**: RawAudioTrack handles timestamp synchronization
+- **Resampling**: Automatic in transport layer if needed
+
+### Audio Format Selection Pattern
+```python
+# ElevenLabs format selection
+def output_format_from_sample_rate(sample_rate: int, use_ulaw: bool = False) -> str:
+    if use_ulaw and sample_rate == 8000:
+        return "ulaw_8000"
+    # Returns pcm_<sample_rate> format string
+```
+
+### RawAudioTrack Processing
+```python
+# WebRTC audio frame creation
+samples = np.frombuffer(chunk, dtype=np.int16)
+frame = AudioFrame.from_ndarray(samples[None, :], layout="mono")
+frame.sample_rate = self._sample_rate
+```
+
 ---
-*Last updated when implementing timeline-based audio synchronization to fix overlap issues*
+*Last updated when analyzing ElevenLabs TTS audio format and WebRTC transmission*

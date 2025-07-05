@@ -5,6 +5,7 @@
 #
 
 import asyncio
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
@@ -76,6 +77,8 @@ class LocalAudioInputTransport(BaseInputTransport):
             sample_rate=self._sample_rate,
             num_channels=self._params.audio_in_channels,
         )
+        
+        # logger.debug(f"Received audio frame in LocalAudioInputTransport{len(frame.audio)}")
 
         asyncio.run_coroutine_threadsafe(self.push_audio_frame(frame), self.get_event_loop())
 
@@ -95,6 +98,10 @@ class LocalAudioOutputTransport(BaseOutputTransport):
         # We only write audio frames from a single task, so only one thread
         # should be necessary.
         self._executor = ThreadPoolExecutor(max_workers=1)
+        
+        # Audio timing synchronization (following WebsocketServerOutputTransport pattern)
+        self._send_interval = 0
+        self._next_send_time = 0
 
     async def start(self, frame: StartFrame):
         await super().start(frame)
@@ -112,6 +119,9 @@ class LocalAudioOutputTransport(BaseOutputTransport):
             output_device_index=self._params.output_device_index,
         )
         self._out_stream.start_stream()
+        
+        # Calculate the send interval based on audio chunk size
+        self._send_interval = self._params.audio_out_10ms_chunks * 10 / 1000  # Convert ms to seconds
 
         await self.set_transport_ready(frame)
 
@@ -121,12 +131,29 @@ class LocalAudioOutputTransport(BaseOutputTransport):
             self._out_stream.stop_stream()
             self._out_stream.close()
             self._out_stream = None
+        # Reset timing state
+        self._next_send_time = 0
 
     async def write_audio_frame(self, frame: OutputAudioRawFrame):
         if self._out_stream:
+            # Write the audio
             await self.get_event_loop().run_in_executor(
                 self._executor, self._out_stream.write, frame.audio
             )
+            
+            # Simulate audio playback timing
+            await self._write_audio_sleep()
+    
+    async def _write_audio_sleep(self):
+        """Simulate audio playback timing to ensure proper pacing."""
+        # Simulate a clock to ensure audio is played at real-time pace
+        current_time = time.monotonic()
+        sleep_duration = max(0, self._next_send_time - current_time)
+        await asyncio.sleep(sleep_duration)
+        if sleep_duration == 0:
+            self._next_send_time = time.monotonic() + self._send_interval
+        else:
+            self._next_send_time += self._send_interval
 
 
 class LocalAudioTransport(BaseTransport):

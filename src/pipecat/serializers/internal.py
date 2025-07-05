@@ -38,10 +38,20 @@ class InternalFrameSerializer(FrameSerializer):
         """Only serialize audio frames for transmission between agents."""
         # Only pass audio frames between agents
         if isinstance(frame, OutputAudioRawFrame):
-            # Pack frame metadata along with audio data
-            # Format: "AUDIO|sample_rate|num_channels|data"
-            metadata = f"AUDIO|{frame.sample_rate}|{frame.num_channels}|".encode()
-            return metadata + frame.audio
+            # Use a fixed-size header to avoid parsing issues with binary data
+            # Format: "AUDIO" (5 bytes) + sample_rate (4 bytes) + num_channels (2 bytes) + audio data
+            header = b"AUDIO"
+            sample_rate_bytes = frame.sample_rate.to_bytes(4, byteorder='big')
+            num_channels_bytes = frame.num_channels.to_bytes(2, byteorder='big')
+            
+            serialized = header + sample_rate_bytes + num_channels_bytes + frame.audio
+            
+            # Debug
+            # logger.debug(f"InternalSerializer: Serialized - header={len(header)}, "
+            #            f"sample_rate_bytes={len(sample_rate_bytes)}, num_channels_bytes={len(num_channels_bytes)}, "
+            #            f"audio_len={len(frame.audio)}, total_len={len(serialized)}")
+            
+            return serialized
 
         # Don't pass control frames between agents
         return None
@@ -50,25 +60,27 @@ class InternalFrameSerializer(FrameSerializer):
         """Deserialize audio frames from partner agent."""
         if data.startswith(b"AUDIO"):
             try:
-                # Find the end of metadata
-                metadata_end = data.find(b"|", 6)  # Skip "AUDIO|"
-                if metadata_end == -1:
+                # Fixed-size header parsing
+                # Header: "AUDIO" (5 bytes) + sample_rate (4 bytes) + num_channels (2 bytes)
+                if len(data) < 11:  # Minimum size for header
+                    logger.error(f"InternalSerializer: Data too short for header: {len(data)} bytes")
                     return None
-
-                metadata_end2 = data.find(b"|", metadata_end + 1)
-                if metadata_end2 == -1:
-                    return None
-
-                metadata_end3 = data.find(b"|", metadata_end2 + 1)
-                if metadata_end3 == -1:
-                    return None
-
-                # Extract metadata
-                sample_rate = int(data[6:metadata_end])
-                num_channels = int(data[metadata_end + 1 : metadata_end2])
-
-                # Extract audio data
-                audio_data = data[metadata_end3 + 1 :]
+                
+                # Extract fixed-size fields
+                # Skip header validation - we already checked startswith(b"AUDIO")
+                sample_rate = int.from_bytes(data[5:9], byteorder='big')
+                num_channels = int.from_bytes(data[9:11], byteorder='big')
+                
+                # Extract audio data - everything after the header
+                audio_data = data[11:]
+                
+                # Debug
+                # logger.debug(f"InternalSerializer: Deserialized - sample_rate={sample_rate}, "
+                #            f"channels={num_channels}, audio_size={len(audio_data)} bytes")
+                
+                # Check if audio data length is valid
+                if len(audio_data) % 2 != 0:
+                    logger.warning(f"InternalSerializer: Audio data has odd length: {len(audio_data)}")
 
                 # Convert to InputAudioRawFrame for the receiving agent
                 return InputAudioRawFrame(
