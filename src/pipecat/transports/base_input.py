@@ -398,6 +398,8 @@ class BaseInputTransport(FrameProcessor):
                 frame: InputAudioRawFrame = await asyncio.wait_for(
                     self._audio_in_queue.get(), timeout=AUDIO_INPUT_TIMEOUT_SECS
                 )
+                
+                # logger.debug(f"Received audio frame in BaseInputTransport{len(frame.audio)}")
 
                 # If an audio filter is available, run it before VAD.
                 if self._params.audio_in_filter:

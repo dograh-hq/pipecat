@@ -123,18 +123,18 @@ class TurnTraceObserver(BaseObserver):
             # processed, so these timestamps are not meaningful.
             if not self._stt_muted:
                 # Record the timestamp – actual span already exists from turn start
-                logger.debug("VADUserStoppedSpeakingFrame in TurnTraceObserver")
+                # logger.debug("VADUserStoppedSpeakingFrame in TurnTraceObserver")
                 self._vad_stopped_ts = time.time()
 
         elif isinstance(frame, UserStoppedSpeakingFrame):
             if not self._stt_muted:
                 # Record generic user stop speaking timestamp (may occur before definitive VAD stop)
-                logger.debug("UserStoppedSpeakingFrame in TurnTraceObserver")
+                # logger.debug("UserStoppedSpeakingFrame in TurnTraceObserver")
                 self._user_stopped_ts = time.time()
 
         elif isinstance(frame, BotStartedSpeakingFrame):
             # Capture latency attribute once
-            logger.debug("BotStartedSpeakingFrame in TurnTraceObserver")
+            # logger.debug("BotStartedSpeakingFrame in TurnTraceObserver")
             if self._latency_span is not None:
                 now = time.time()
 

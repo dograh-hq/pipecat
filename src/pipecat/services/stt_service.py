@@ -152,6 +152,7 @@ class STTService(AIService):
             # In this service we accumulate audio internally and at the end we
             # push a TextFrame. We also push audio downstream in case someone
             # else needs it.
+            # logger.debug(f"Processing audio frame in STTService: {frame} {len(frame.audio)} bytes {self._muted}")
             await self.process_audio_frame(frame, direction)
             if self._audio_passthrough:
                 await self.push_frame(frame, direction)
