@@ -45,12 +45,6 @@ class InternalFrameSerializer(FrameSerializer):
             num_channels_bytes = frame.num_channels.to_bytes(2, byteorder='big')
             
             serialized = header + sample_rate_bytes + num_channels_bytes + frame.audio
-            
-            # Debug
-            # logger.debug(f"InternalSerializer: Serialized - header={len(header)}, "
-            #            f"sample_rate_bytes={len(sample_rate_bytes)}, num_channels_bytes={len(num_channels_bytes)}, "
-            #            f"audio_len={len(frame.audio)}, total_len={len(serialized)}")
-            
             return serialized
 
         # Don't pass control frames between agents
@@ -73,10 +67,6 @@ class InternalFrameSerializer(FrameSerializer):
                 
                 # Extract audio data - everything after the header
                 audio_data = data[11:]
-                
-                # Debug
-                # logger.debug(f"InternalSerializer: Deserialized - sample_rate={sample_rate}, "
-                #            f"channels={num_channels}, audio_size={len(audio_data)} bytes")
                 
                 # Check if audio data length is valid
                 if len(audio_data) % 2 != 0:
