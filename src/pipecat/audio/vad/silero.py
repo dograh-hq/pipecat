@@ -173,7 +173,7 @@ class SileroVADAnalyzer(VADAnalyzer):
             if diff_time >= _MODEL_RESET_STATES_TIME:
                 self._model.reset_states()
                 self._last_reset_time = curr_time
-                logger.debug("VAD: Reset model states")
+                # logger.debug("VAD: Reset model states")
 
             return new_confidence
         except Exception as e:

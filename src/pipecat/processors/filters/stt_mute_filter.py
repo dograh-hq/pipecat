@@ -136,11 +136,7 @@ class STTMuteFilter(FrameProcessor):
                         return True
 
                 case STTMuteStrategy.CUSTOM:
-                    # Ensure that the speech is muted till bot has done its first speech
-                    if not self._first_speech_handled:
-                        return True
-
-                    if self._config.should_mute_callback:
+                    if self._bot_is_speaking and self._config.should_mute_callback:
                         should_mute = await self._config.should_mute_callback(self)
                         if should_mute:
                             return True

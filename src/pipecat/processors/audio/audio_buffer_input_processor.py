@@ -74,7 +74,7 @@ class AudioBufferInputProcessor(FrameProcessor):
 
     async def start_recording(self):
         """Start recording audio from input."""
-        logger.debug(f"AudioBufferInputProcessor: Starting recording")
+        # logger.debug(f"AudioBufferInputProcessor: Starting recording")
         self._recording = True
         self._reset_recording()
 

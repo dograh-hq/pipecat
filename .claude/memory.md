@@ -37,6 +37,122 @@
 - BaseTransport - Base for transports
 - BaseService - Base for services
 
+## Pipeline Creation and Configuration
+
+### Where Pipelines are Created
+1. **Main Entry Points**:
+   - `/dograh/api/services/pipecat/run_pipeline.py` - Primary pipeline creation
+   - Functions: `run_pipeline_twilio`, `run_pipeline_smallwebrtc`, `run_pipeline_ari_stasis`
+   - All delegate to `_run_pipeline` for actual pipeline creation
+
+2. **Pipeline Builder**:
+   - `/dograh/api/services/pipecat/pipeline_builder.py`
+   - `build_pipeline()` - Assembles processors in correct order
+   - `create_pipeline_components()` - Creates audio buffers, transcript, context
+   - `create_pipeline_task()` - Creates PipelineTask with params
+
+3. **Context Aggregator Creation**:
+   ```python
+   # Pattern: LLM service creates aggregator pair
+   context_aggregator = llm.create_context_aggregator(context)
+   user_context_aggregator = context_aggregator.user()
+   assistant_context_aggregator = context_aggregator.assistant()
+   ```
+
+### Pipeline Processor Order
+The standard pipeline order (from `build_pipeline()`):
+1. `transport.input()` - Receives user input
+2. `stt_mute_filter` - Controls when STT is active
+3. `audio_buffer.input()` - Records input audio
+4. `stt` - Speech-to-text conversion
+5. `user_idle_disconnect` - Handles user inactivity
+6. `transcript.user()` - Tracks user transcripts
+7. `user_context_aggregator` - Aggregates user messages
+8. `llm` - Language model processing
+9. `pipeline_engine_callback_processor` - Workflow callbacks
+10. `tts` - Text-to-speech conversion
+11. `bot_idle_filler_sound` - Optional idle sounds
+12. `transport.output()` - Sends bot output
+13. `audio_buffer.output()` - Records output audio
+14. `transcript.assistant()` - Tracks assistant transcripts
+15. `assistant_context_aggregator` - Aggregates assistant messages
+16. `pipeline_metrics_aggregator` - Collects metrics
+
+### Key Integration Points
+1. **Assistant Aggregator Event**:
+   ```python
+   @assistant_context_aggregator.event_handler("on_push_aggregation")
+   async def on_assistant_aggregator_push_context(_aggregator):
+       # Triggers workflow transitions after assistant speaks
+       await engine.flush_pending_transitions(source="context_push")
+   ```
+
+2. **Audio Configuration**:
+   - Different configs for Twilio, WebRTC, Stasis
+   - Sets sample rates, buffer sizes
+   - Created via `create_audio_config(transport_type)`
+
+3. **Service Factory Pattern**:
+   - `create_llm_service()`, `create_stt_service()`, `create_tts_service()`
+   - Based on user configuration from database
+
+## Context Aggregators
+
+### LLMUserContextAggregator
+Aggregates user transcriptions and manages conversation context:
+
+**Key Features**:
+1. **Transcription Aggregation**:
+   - Collects transcriptions between VAD events
+   - Handles interim vs final transcriptions
+   - Configurable aggregation timeout (default 0.5s)
+
+2. **VAD Emulation**:
+   - Emulates UserStarted/StoppedSpeakingFrame if VAD misses
+   - Only emulates when bot is not speaking
+   - Prevents interrupting bot with whispers
+
+3. **Interruption Support**:
+   - Checks interruption strategies before pushing aggregation
+   - Sends BotInterruptionFrame when conditions met
+   - Resets aggregation if interruption denied
+
+4. **Event Flow**:
+   ```python
+   # Process transcriptions
+   TranscriptionFrame -> aggregate text
+   InterimTranscriptionFrame -> set flag, wait for final
+   
+   # Push aggregation when:
+   - User stops speaking (VAD)
+   - Aggregation timeout expires
+   - Interruption conditions met
+   ```
+
+### LLMAssistantContextAggregator
+Aggregates assistant responses and manages function calls:
+
+**Key Features**:
+1. **Text Aggregation**:
+   - Collects LLMTextFrame tokens
+   - Between LLMFullResponseStart/EndFrame
+   - Handles stripped vs non-stripped words
+
+2. **Function Call Management**:
+   - Tracks function calls in progress
+   - Reorders messages for proper context
+   - Handles cancellation on interruption
+
+3. **Message Reordering**:
+   - Ensures text comes before function messages
+   - Uses stable tool_call_ids for tracking
+   - Maintains conversation flow integrity
+
+4. **Event Notification**:
+   - Fires `on_push_aggregation` event
+   - Used by PipecatEngine for workflow transitions
+   - Enables deferred transition execution
+
 ## Creating Custom Components
 
 ### Custom Frame Processor

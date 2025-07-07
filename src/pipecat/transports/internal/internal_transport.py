@@ -53,6 +53,7 @@ class InternalInputTransport(BaseInputTransport):
 
     async def receive_data(self, data: bytes):
         """Receive serialized data from the partner output transport."""
+        # logger.debug("received data in input transport")
         if self._latency_seconds > 0:
             # Add to delayed queue with delivery timestamp
             delivery_time = time.monotonic() + self._latency_seconds
@@ -219,6 +220,8 @@ class InternalOutputTransport(BaseOutputTransport):
         data = await self._serializer.serialize(frame)
         if data and self._partner:
             await self._partner.receive_data(data)
+            
+        # logger.debug(f"InternalOutput: Sent audio frame to partner")
         
         # Then simulate audio playback timing (following WebsocketServerOutputTransport pattern)
         await self._write_audio_sleep()

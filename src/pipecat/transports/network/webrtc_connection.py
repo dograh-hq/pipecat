@@ -272,7 +272,7 @@ class SmallWebRTCConnection(BaseObject):
             # logger.debug(f"Sender track: {transceiver.sender.track}")
 
     def replace_audio_track(self, track):
-        logger.debug(f"Replacing audio track {track.kind}")
+        # logger.debug(f"Replacing audio track {track.kind}")
         # Transceivers always appear in creation-order for both peers
         # For now we are only considering that we are going to have 02 transceivers,
         # one for audio and one for video

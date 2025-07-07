@@ -84,12 +84,12 @@ class VADAnalyzer(ABC):
         self._vad_stopping_count = 0
         self._vad_state: VADState = VADState.QUIET
         
-        logger.debug(f"VAD config: frames={self._vad_frames}, bytes_required={self._vad_frames_num_bytes}, "
-                    f"start_frames={self._vad_start_frames}, stop_frames={self._vad_stop_frames}, "
-                    f"sample_rate={self.sample_rate}")
+        # logger.debug(f"VAD config: frames={self._vad_frames}, bytes_required={self._vad_frames_num_bytes}, "
+        #             f"start_frames={self._vad_start_frames}, stop_frames={self._vad_stop_frames}, "
+        #             f"sample_rate={self.sample_rate}")
         
         # Check the actual default parameter values
-        logger.debug(f"VAD thresholds: confidence={self._params.confidence}, min_volume={self._params.min_volume}")
+        # logger.debug(f"VAD thresholds: confidence={self._params.confidence}, min_volume={self._params.min_volume}")
 
     def _get_smoothed_volume(self, audio: bytes) -> float:
         volume = calculate_audio_volume(audio, self.sample_rate)
@@ -142,7 +142,7 @@ class VADAnalyzer(ABC):
             self._vad_state == VADState.STARTING
             and self._vad_starting_count >= self._vad_start_frames
         ):
-            logger.debug(f"VADAnalyzer: State transition STARTING -> SPEAKING")
+            # logger.debug(f"VADAnalyzer: State transition STARTING -> SPEAKING")
             self._vad_state = VADState.SPEAKING
             self._vad_starting_count = 0
 
@@ -150,7 +150,7 @@ class VADAnalyzer(ABC):
             self._vad_state == VADState.STOPPING
             and self._vad_stopping_count >= self._vad_stop_frames
         ):
-            logger.debug(f"VADAnalyzer: State transition STOPPING -> QUIET")
+            # logger.debug(f"VADAnalyzer: State transition STOPPING -> QUIET")
             self._vad_state = VADState.QUIET
             self._vad_stopping_count = 0
 
