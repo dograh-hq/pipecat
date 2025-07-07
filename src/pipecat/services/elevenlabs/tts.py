@@ -425,8 +425,8 @@ class ElevenLabsTTSService(AudioContextWordTTSService):
 
                 audio = base64.b64decode(msg["audio"])
                 # Debug TTS audio
-                import numpy as np
-                audio_array = np.frombuffer(audio, dtype=np.int16)
+                # import numpy as np
+                # audio_array = np.frombuffer(audio, dtype=np.int16)
                 # logger.debug(f"ElevenLabs TTS: Generated audio - size: {len(audio)} bytes, samples: {len(audio_array)}, "
                 #            f"min: {audio_array.min()}, max: {audio_array.max()}, sample_rate: {self.sample_rate}")
                 frame = TTSAudioRawFrame(audio, self.sample_rate, 1)
