@@ -332,11 +332,26 @@ class WebSocketSmartTurnAnalyzer(BaseSmartTurn):
                                     await ws.send_str(
                                         json.dumps({"type": "pong", "timestamp": time.time()})
                                     )
-                                    logger.debug("Sent pong response to server ping")
+                                    logger.debug("Sent pong response to smart turn web server ping")
                                     continue  # Wait for actual response
                                 except Exception as e:
                                     logger.error(f"Failed to send pong: {e}")
                                     continue
+
+                            # Validate that this is a prediction response
+                            if "prediction" not in result:
+                                # If it has a type field, it might be a control message
+                                if "type" in result:
+                                    # Silently ignore other control messages
+                                    continue  # Wait for actual prediction response
+                                else:
+                                    # If no type and no prediction, return a default response
+                                    logger.error("Invalid response format from Smart-Turn service")
+                                    return {
+                                        "prediction": 0,
+                                        "probability": 0.0,
+                                        "metrics": {"inference_time": 0.0, "total_time": 0.0},
+                                    }
 
                             # Mark successful request
                             self._last_successful_request = time.time()
