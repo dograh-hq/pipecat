@@ -32,6 +32,11 @@ class TTSUsageMetricsData(MetricsData):
     value: int
 
 
+class STTUsageMetricsData(MetricsData):
+    """Metrics data for Speech-to-Text usage in seconds."""
+    value: float
+
+
 class SmartTurnMetricsData(MetricsData):
     """Metrics data for smart turn predictions."""
 

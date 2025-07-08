@@ -6,6 +6,7 @@
 
 """Deepgram speech-to-text service implementation."""
 
+import time
 from typing import AsyncGenerator, Dict, Optional
 
 from loguru import logger
@@ -15,11 +16,13 @@ from pipecat.frames.frames import (
     EndFrame,
     Frame,
     InterimTranscriptionFrame,
+    MetricsFrame,
     StartFrame,
     TranscriptionFrame,
     UserStartedSpeakingFrame,
     UserStoppedSpeakingFrame,
 )
+from pipecat.metrics.metrics import STTUsageMetricsData
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.stt_service import STTService
 from pipecat.transcriptions.language import Language
@@ -111,6 +114,9 @@ class DeepgramSTTService(STTService):
         self.set_model_name(merged_options["model"])
         self._settings = merged_options
         self._addons = addons
+        
+        # Track session timing for STT usage metrics
+        self._session_start_time: Optional[float] = None
 
         self._client = DeepgramClient(
             api_key,
@@ -132,6 +138,20 @@ class DeepgramSTTService(STTService):
             True if VAD events are enabled in the current settings.
         """
         return self._settings["vad_events"]
+    
+    async def _emit_stt_usage_metrics(self):
+        """Emit STT usage metrics for the session."""
+        if self._session_start_time is not None:
+            duration = time.time() - self._session_start_time
+            if duration > 0:
+                metrics_data = STTUsageMetricsData(
+                    processor=f"{self.__class__.__name__}#0",
+                    model=self.model_name,
+                    value=duration
+                )
+                frame = MetricsFrame(data=[metrics_data])
+                await self.push_frame(frame)
+                logger.debug(f"Emitted STT usage metrics: {duration:.2f} seconds for model {self.model_name}")
 
     def can_generate_metrics(self) -> bool:
         """Check if this service can generate processing metrics.
@@ -172,6 +192,7 @@ class DeepgramSTTService(STTService):
         """
         await super().start(frame)
         self._settings["sample_rate"] = self.sample_rate
+        self._session_start_time = time.time()
         await self._connect()
 
     async def stop(self, frame: EndFrame):
@@ -181,7 +202,9 @@ class DeepgramSTTService(STTService):
             frame: The end frame.
         """
         await super().stop(frame)
+        await self._emit_stt_usage_metrics()
         await self._disconnect()
+        self._session_start_time = None
 
     async def cancel(self, frame: CancelFrame):
         """Cancel the Deepgram STT service.
@@ -190,7 +213,9 @@ class DeepgramSTTService(STTService):
             frame: The cancel frame.
         """
         await super().cancel(frame)
+        await self._emit_stt_usage_metrics()
         await self._disconnect()
+        self._session_start_time = None
 
     async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame, None]:
         """Send audio data to Deepgram for transcription.

@@ -241,6 +241,7 @@ class ElevenLabsTTSService(AudioContextWordTTSService):
         # there's an interruption or TTSStoppedFrame.
         self._started = False
         self._cumulative_time = 0
+        self._accumulated_text = ""
 
         # Context management for v1 multi API
         self._context_id = None
@@ -293,6 +294,10 @@ class ElevenLabsTTSService(AudioContextWordTTSService):
     async def push_frame(self, frame: Frame, direction: FrameDirection = FrameDirection.DOWNSTREAM):
         await super().push_frame(frame, direction)
         if isinstance(frame, (TTSStoppedFrame, StartInterruptionFrame)):
+            # Send accumulated usage metrics before resetting
+            if self._accumulated_text:
+                await self.start_tts_usage_metrics(self._accumulated_text)
+                self._accumulated_text = ""
             self._started = False
             if isinstance(frame, TTSStoppedFrame):
                 await self.add_word_timestamps([("Reset", 0)])
@@ -395,6 +400,12 @@ class ElevenLabsTTSService(AudioContextWordTTSService):
                 )
             except Exception as e:
                 logger.error(f"Error closing context on interruption: {e}")
+            
+            # Send accumulated usage metrics before resetting
+            if self._accumulated_text:
+                await self.start_tts_usage_metrics(self._accumulated_text)
+                self._accumulated_text = ""
+            
             self._context_id = None
             self._started = False
 
@@ -496,9 +507,10 @@ class ElevenLabsTTSService(AudioContextWordTTSService):
                     logger.trace(f"Created new context {self._context_id} with voice settings")
 
                     await self._send_text(text)
-                    await self.start_tts_usage_metrics(text)
+                    self._accumulated_text += text
                 else:
                     await self._send_text(text)
+                    self._accumulated_text += text
             except Exception as e:
                 logger.error(f"{self} error sending message: {e}")
                 yield TTSStoppedFrame()
@@ -579,6 +591,7 @@ class ElevenLabsHttpTTSService(WordTTSService):
         # Track cumulative time to properly sequence word timestamps across utterances
         self._cumulative_time = 0
         self._started = False
+        self._accumulated_text = ""
 
         # Store previous text for context within a turn
         self._previous_text = ""
@@ -594,8 +607,13 @@ class ElevenLabsHttpTTSService(WordTTSService):
     def _set_voice_settings(self):
         return build_elevenlabs_voice_settings(self._settings)
 
-    def _reset_state(self):
+    async def _reset_state(self):
         """Reset internal state variables."""
+        # Send accumulated usage metrics before resetting
+        if self._accumulated_text:
+            await self.start_tts_usage_metrics(self._accumulated_text)
+            self._accumulated_text = ""
+        
         self._cumulative_time = 0
         self._started = False
         self._previous_text = ""
@@ -605,13 +623,13 @@ class ElevenLabsHttpTTSService(WordTTSService):
         """Initialize the service upon receiving a StartFrame."""
         await super().start(frame)
         self._output_format = output_format_from_sample_rate(self.sample_rate, self._use_ulaw)
-        self._reset_state()
+        await self._reset_state()
 
     async def push_frame(self, frame: Frame, direction: FrameDirection = FrameDirection.DOWNSTREAM):
         await super().push_frame(frame, direction)
         if isinstance(frame, (StartInterruptionFrame, TTSStoppedFrame)):
             # Reset timing on interruption or stop
-            self._reset_state()
+            await self._reset_state()
 
             if isinstance(frame, TTSStoppedFrame):
                 await self.add_word_timestamps([("Reset", 0)])
@@ -743,7 +761,7 @@ class ElevenLabsHttpTTSService(WordTTSService):
                     yield ErrorFrame(error=f"ElevenLabs API error: {error_text}")
                     return
 
-                await self.start_tts_usage_metrics(text)
+                self._accumulated_text += text
 
                 # Start TTS sequence if not already started
                 if not self._started:
