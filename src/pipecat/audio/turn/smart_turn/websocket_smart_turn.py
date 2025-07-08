@@ -58,10 +58,12 @@ class WebSocketSmartTurnAnalyzer(BaseSmartTurn):
         self._reconnect_delay = 1.0  # Start with 1 second (base before jitter)
         self._max_reconnect_delay = 30.0  # Max 30 seconds
         self._closing = False
+        self._connection_closed_event = asyncio.Event()
 
         # Connection health monitoring
         self._last_successful_request = 0.0
         self._connection_attempts = 0
+        self._last_pong_time = 0.0
 
         # ------------------------------------------------------------------
         # Warm-up: establish the WebSocket immediately if an event loop is
@@ -105,13 +107,23 @@ class WebSocketSmartTurnAnalyzer(BaseSmartTurn):
                 if self._heartbeat_task:
                     self._heartbeat_task.cancel()
                 self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+                
+                # Also monitor the WebSocket state in case it closes unexpectedly
+                monitor_task = asyncio.create_task(self._monitor_connection())
 
-                # Wait for connection to close by monitoring the closed state
-                while self._ws and not self._ws.closed and not self._closing:
-                    await asyncio.sleep(1)  # Check connection status periodically
+                # Wait for connection close event instead of polling
+                self._connection_closed_event.clear()
+                
+                try:
+                    await self._connection_closed_event.wait()
+                finally:
+                    monitor_task.cancel()
+                    try:
+                        await monitor_task
+                    except asyncio.CancelledError:
+                        pass
 
-                if self._ws and self._ws.closed:
-                    logger.debug("WebSocket connection closed")
+                logger.debug("WebSocket connection closed")
 
             except Exception as e:
                 logger.error(f"Connection manager error: {e}")
@@ -179,6 +191,7 @@ class WebSocketSmartTurnAnalyzer(BaseSmartTurn):
                     raise Exception("WebSocket connection closed immediately after establishment")
 
                 logger.info("WebSocket connection established successfully")
+                self._last_pong_time = time.time()  # Initialize pong time
                 return
 
             except asyncio.CancelledError:
@@ -192,28 +205,59 @@ class WebSocketSmartTurnAnalyzer(BaseSmartTurn):
                 await asyncio.sleep(0.5 * (attempt + 1))  # Exponential backoff
 
     async def _heartbeat_loop(self) -> None:
-        """Send periodic pings to keep connection alive."""
+        """Send periodic pings to keep connection alive.
+
+        NOTE: Currently using aggressive 2-second interval for stability monitoring.
+        TODO: Taper down to 10-15 seconds once services are stable.
+        """
         try:
             while not self._closing and self._ws and not self._ws.closed:
-                await asyncio.sleep(10)  # Ping every 10 seconds
+                await asyncio.sleep(
+                    2
+                )  # Aggressive ping every 2 seconds (will taper down once stable)
 
-                # Check connection health
-                if time.time() - self._last_successful_request > 60:
-                    logger.debug("Sending heartbeat ping to turn service")
-                    try:
-                        # `ping()` returns a Future that resolves when the pong
-                        # is received. Do NOT await the result of `ping()` *and*
-                        # then the returned value, otherwise the second await
-                        # will raise `TypeError: object NoneType can't be used
-                        # in 'await' expression`.
-                        pong_waiter = self._ws.ping()
-                        await pong_waiter  # Wait for pong response
-                    except Exception as e:
-                        logger.warning(f"Heartbeat failed: {e}")
-                        # Force reconnection
+                try:
+                    # Send JSON ping message instead of WebSocket ping frame
+                    ping_msg = json.dumps({"type": "ping", "timestamp": time.time()})
+                    async with self._ws_lock:
+                        if self._ws and not self._ws.closed:
+                            await self._ws.send_str(ping_msg)
+                            logger.debug(f"Sent ping to smart turn service")
+                        else:
+                            logger.warning("WebSocket closed when trying to send ping")
+                            self._connection_closed_event.set()
+                            break
+
+                    # Check if we've received a pong recently (2 missed pings = 4 seconds)
+                    if self._last_pong_time > 0 and time.time() - self._last_pong_time > 4:
+                        logger.warning(f"No pong received for 4 seconds (2 missed pings), forcing reconnection")
                         if self._ws and not self._ws.closed:
                             await self._ws.close()
+                        self._connection_closed_event.set()
                         break
+                except Exception as e:
+                    logger.warning(f"Heartbeat failed: {e}")
+                    # Force reconnection
+                    if self._ws and not self._ws.closed:
+                        try:
+                            await self._ws.close()
+                        except:
+                            pass
+                    self._connection_closed_event.set()
+                    break
+        except asyncio.CancelledError:
+            logger.debug("Heartbeat task cancelled")
+            pass
+    
+    async def _monitor_connection(self) -> None:
+        """Monitor WebSocket state and trigger event if closed unexpectedly."""
+        try:
+            while self._ws and not self._closing:
+                if self._ws.closed:
+                    logger.debug("WebSocket closed unexpectedly, triggering reconnection")
+                    self._connection_closed_event.set()
+                    break
+                await asyncio.sleep(0.1)  # Check every 100ms
         except asyncio.CancelledError:
             pass
 
@@ -259,30 +303,23 @@ class WebSocketSmartTurnAnalyzer(BaseSmartTurn):
         data_bytes = self._serialize_array(audio_array)
 
         try:
+            # Send request with minimal lock duration
             async with self._ws_lock:
                 # Check if WebSocket is still open before sending
                 if ws.closed:
                     logger.warning("WebSocket is closed, triggering reconnection")
-                    # Force reconnection
                     self._ws = None
                     ws = await self._ensure_ws()
 
-                # Additional check for closing state
-                if hasattr(ws, "_closing") and ws._closing:
-                    logger.warning("WebSocket is in closing state, triggering reconnection")
-                    self._ws = None
-                    ws = await self._ensure_ws()
-
-                # Send data with specific error handling
+                # Send data
                 try:
                     await ws.send_bytes(data_bytes)
                 except Exception as e:
                     error_msg = str(e).lower()
                     if "closing" in error_msg or "closed" in error_msg:
                         logger.warning(f"WebSocket in closing/closed state: {e}")
-                        # Don't try to close again, just mark for reconnection
                         self._ws = None
-                        # Return default response instead of raising
+                        self._connection_closed_event.set()
                         return {
                             "prediction": 0,
                             "probability": 0.0,
@@ -290,87 +327,92 @@ class WebSocketSmartTurnAnalyzer(BaseSmartTurn):
                         }
                     else:
                         logger.error(f"Failed to send data: {e}")
-                        # For other errors, attempt to close
                         if self._ws and not self._ws.closed:
                             try:
                                 await self._ws.close()
                             except:
                                 pass
                         self._ws = None
+                        self._connection_closed_event.set()
                         raise
 
-                # Wait for response with timeout, handling ping messages
-                start_time = time.time()
-                while True:
-                    remaining_timeout = self._params.stop_secs - (time.time() - start_time)
-                    if remaining_timeout <= 0:
+            # Wait for response outside of lock (using traditional approach for now)
+            # Since server doesn't support request_id yet, we'll use the existing logic
+            start_time = time.time()
+            while True:
+                remaining_timeout = self._params.stop_secs - (time.time() - start_time)
+                if remaining_timeout <= 0:
+                    logger.error(
+                        f"WebSocket request timed out after {self._params.stop_secs} seconds"
+                    )
+                    raise SmartTurnTimeoutException(
+                        f"Request exceeded {self._params.stop_secs} seconds."
+                    )
+
+                try:
+                    # Use a shorter timeout to allow checking for other conditions
+                    recv_msg = await asyncio.wait_for(
+                        ws.receive(), timeout=min(remaining_timeout, 0.5)
+                    )
+                except asyncio.TimeoutError:
+                    # Check if we should continue waiting
+                    if time.time() - start_time >= self._params.stop_secs:
                         logger.error(
                             f"WebSocket request timed out after {self._params.stop_secs} seconds"
                         )
                         raise SmartTurnTimeoutException(
                             f"Request exceeded {self._params.stop_secs} seconds."
                         )
+                    continue
 
+                if recv_msg.type == aiohttp.WSMsgType.TEXT:
                     try:
-                        recv_msg = await asyncio.wait_for(ws.receive(), timeout=remaining_timeout)
-                    except asyncio.TimeoutError:
-                        logger.error(
-                            f"WebSocket request timed out after {self._params.stop_secs} seconds"
-                        )
-                        raise SmartTurnTimeoutException(
-                            f"Request exceeded {self._params.stop_secs} seconds."
-                        )
+                        result = json.loads(recv_msg.data)
 
-                    if recv_msg.type == aiohttp.WSMsgType.TEXT:
-                        try:
-                            result = json.loads(recv_msg.data)
+                        # This should not happen since server no longer sends pings
+                        if result.get("type") == "ping":
+                            logger.warning("Unexpected ping from server - ignoring")
+                            continue
 
-                            # Handle server ping messages
-                            if result.get("type") == "ping":
-                                # Send pong response
-                                try:
-                                    await ws.send_str(
-                                        json.dumps({"type": "pong", "timestamp": time.time()})
-                                    )
-                                    logger.debug("Sent pong response to smart turn web server ping")
-                                    continue  # Wait for actual response
-                                except Exception as e:
-                                    logger.error(f"Failed to send pong: {e}")
-                                    continue
+                        # Handle pong responses (shouldn't arrive here but just in case)
+                        if result.get("type") == "pong":
+                            self._last_pong_time = time.time()
+                            logger.debug("Received pong in prediction flow")
+                            continue
 
-                            # Validate that this is a prediction response
-                            if "prediction" not in result:
-                                # If it has a type field, it might be a control message
-                                if "type" in result:
-                                    # Silently ignore other control messages
-                                    continue  # Wait for actual prediction response
-                                else:
-                                    # If no type and no prediction, return a default response
-                                    logger.error("Invalid response format from Smart-Turn service")
-                                    return {
-                                        "prediction": 0,
-                                        "probability": 0.0,
-                                        "metrics": {"inference_time": 0.0, "total_time": 0.0},
-                                    }
+                        # Validate that this is a prediction response
+                        if "prediction" not in result:
+                            if "type" in result:
+                                continue  # Wait for actual prediction response
+                            else:
+                                logger.error("Invalid response format from Smart-Turn service")
+                                return {
+                                    "prediction": 0,
+                                    "probability": 0.0,
+                                    "metrics": {"inference_time": 0.0, "total_time": 0.0},
+                                }
 
-                            # Mark successful request
-                            self._last_successful_request = time.time()
-                            return result
-                        except json.JSONDecodeError as exc:
-                            logger.error(f"Smart turn service returned invalid JSON: {exc}")
-                            raise
-                    elif recv_msg.type == aiohttp.WSMsgType.ERROR:
-                        logger.error("WebSocket error received from Smart-Turn service")
-                        raise Exception(f"WebSocket error: {recv_msg.data}")
-                    elif recv_msg.type == aiohttp.WSMsgType.CLOSE:
-                        logger.warning("WebSocket close message received")
-                        raise Exception("WebSocket closed by server")
-                    else:
-                        logger.error(
-                            f"Unexpected WebSocket message type: {recv_msg.type}. Closing socket."
-                        )
-                        await ws.close()
-                        raise Exception("Unexpected WebSocket reply from Smart-Turn service.")
+                        # Mark successful request
+                        self._last_successful_request = time.time()
+                        return result
+                    except json.JSONDecodeError as exc:
+                        logger.error(f"Smart turn service returned invalid JSON: {exc}")
+                        raise
+                elif recv_msg.type == aiohttp.WSMsgType.ERROR:
+                    logger.error("WebSocket error received from Smart-Turn service")
+                    self._connection_closed_event.set()
+                    raise Exception(f"WebSocket error: {recv_msg.data}")
+                elif recv_msg.type == aiohttp.WSMsgType.CLOSE:
+                    logger.warning("WebSocket close message received")
+                    self._connection_closed_event.set()
+                    raise Exception("WebSocket closed by server")
+                else:
+                    logger.error(
+                        f"Unexpected WebSocket message type: {recv_msg.type}. Closing socket."
+                    )
+                    await ws.close()
+                    self._connection_closed_event.set()
+                    raise Exception("Unexpected WebSocket reply from Smart-Turn service.")
 
         except SmartTurnTimeoutException:
             raise
@@ -383,6 +425,7 @@ class WebSocketSmartTurnAnalyzer(BaseSmartTurn):
                 except:
                     pass
             self._ws = None
+            self._connection_closed_event.set()
             # Return default incomplete prediction so pipeline continues.
             return {
                 "prediction": 0,
@@ -394,6 +437,9 @@ class WebSocketSmartTurnAnalyzer(BaseSmartTurn):
         """Asynchronously close the WebSocket (called from pipeline cleanup)."""
         # Set closing flag first to prevent new operations
         self._closing = True
+        
+        # Trigger connection close event to wake up connection manager
+        self._connection_closed_event.set()
 
         # Use a lock to prevent concurrent close operations
         async with self._ws_lock:
