@@ -59,7 +59,6 @@ class WebSocketSmartTurnAnalyzer(BaseSmartTurn):
         # Connection management
         self._connection_task: Optional[asyncio.Task] = None
         self._heartbeat_task: Optional[asyncio.Task] = None
-        self._message_reader_task: Optional[asyncio.Task] = None
         self._reconnect_delay = 1.0  # Start with 1 second (base before jitter)
         self._max_reconnect_delay = 30.0  # Max 30 seconds
         self._closing = False
@@ -75,13 +74,7 @@ class WebSocketSmartTurnAnalyzer(BaseSmartTurn):
         # background message reader and the prediction logic will both use
         # this lock to serialize receive operations.
         # ------------------------------------------------------------------
-        self._recv_lock = asyncio.Lock()
         
-        # Message reading coordination
-        self._prediction_active = threading.Event()  # Thread-safe flag for prediction state
-        self._prediction_lock = asyncio.Lock()  # Prevent concurrent predictions
-
-        # ------------------------------------------------------------------
         # Warm-up: establish the WebSocket immediately if an event loop is
         # already running so the first prediction incurs no handshake latency.
         # ------------------------------------------------------------------
@@ -124,25 +117,25 @@ class WebSocketSmartTurnAnalyzer(BaseSmartTurn):
                     self._heartbeat_task.cancel()
                 self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
                 
-                # Start message reader to handle pongs
-                if self._message_reader_task:
-                    self._message_reader_task.cancel()
-                self._message_reader_task = asyncio.create_task(self._read_messages())
+                # No dedicated message reader anymore – prediction coroutine is the sole
+                # consumer of WebSocket messages.  Heartbeats are handled via native
+                # WebSocket ping/pong frames.
                 
-                # Also monitor the WebSocket state in case it closes unexpectedly
-                monitor_task = asyncio.create_task(self._monitor_connection())
-
                 # Wait for connection close event instead of polling
                 self._connection_closed_event.clear()
                 
                 try:
                     await self._connection_closed_event.wait()
                 finally:
-                    monitor_task.cancel()
-                    try:
-                        await monitor_task
-                    except asyncio.CancelledError:
-                        pass
+                    # Cancel heartbeat task
+                    if self._heartbeat_task and not self._heartbeat_task.done():
+                        self._heartbeat_task.cancel()
+                        try:
+                            await self._heartbeat_task
+                        except asyncio.CancelledError:
+                            pass
+                        except Exception as e:
+                            logger.debug(f"Error canceling heartbeat task: {e}")
 
                 logger.debug("WebSocket connection closed")
 
@@ -150,23 +143,7 @@ class WebSocketSmartTurnAnalyzer(BaseSmartTurn):
                 logger.error(f"Connection manager error: {e}")
 
             finally:
-                # Cancel all tasks
-                tasks_to_cancel = []
-                
-                if self._heartbeat_task and not self._heartbeat_task.done():
-                    self._heartbeat_task.cancel()
-                    tasks_to_cancel.append(self._heartbeat_task)
-                    self._heartbeat_task = None
-                    
-                if self._message_reader_task and not self._message_reader_task.done():
-                    self._message_reader_task.cancel()
-                    tasks_to_cancel.append(self._message_reader_task)
-                    self._message_reader_task = None
-                    
-                # Wait for tasks to complete cancellation
-                if tasks_to_cancel:
-                    await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
-
+                # No _message_reader_task anymore
                 # Clean up connection
                 if self._ws and not self._ws.closed:
                     try:
@@ -251,31 +228,28 @@ class WebSocketSmartTurnAnalyzer(BaseSmartTurn):
                 )  # Aggressive ping every 2 seconds (will taper down once stable)
 
                 try:
-                    # Send JSON ping message instead of WebSocket ping frame
-                    ping_msg = json.dumps({"type": "ping", "timestamp": time.time()})
-                    async with self._ws_lock:
-                        if self._ws and not self._ws.closed:
-                            await self._ws.send_str(ping_msg)
-                            logger.debug(f"Sent ping to smart turn service")
-                        else:
-                            logger.warning("WebSocket closed when trying to send ping")
-                            self._connection_closed_event.set()
-                            break
+                    # Send a native WebSocket ping frame and wait for pong
+                    try:
+                        async with self._ws_lock:
+                            if not (self._ws and not self._ws.closed):
+                                logger.warning("WebSocket closed when trying to send ping")
+                                self._connection_closed_event.set()
+                                break
 
-                    # Check if we've received a pong recently (2 missed pings = 4 seconds)
-                    # Use 5 seconds to account for initial connection time
-                    pong_timeout = 5.0 if time.time() - self._last_pong_time < 10 else 4.0
-                    if self._last_pong_time > 0:
-                        time_since_pong = time.time() - self._last_pong_time
-                        if time_since_pong > pong_timeout:
-                            logger.warning(
-                                f"No pong received for {time_since_pong:.1f} seconds "
-                                f"(>{pong_timeout/2:.0f} missed pings), forcing reconnection"
-                            )
-                            if self._ws and not self._ws.closed:
-                                await self._ws.close()
-                            self._connection_closed_event.set()
-                            break
+                            pong_waiter = self._ws.ping()
+
+                        # Wait (outside the lock) for the pong
+                        await asyncio.wait_for(pong_waiter, timeout=3.0)
+                        self._last_pong_time = time.time()
+                        logger.debug("Received pong from smart turn service")
+
+                    except asyncio.TimeoutError:
+                        logger.warning("No pong received within timeout, forcing reconnection")
+                        if self._ws and not self._ws.closed:
+                            await self._ws.close()
+                        self._connection_closed_event.set()
+                        break
+                     
                 except Exception as e:
                     logger.warning(f"Heartbeat failed: {e}")
                     # Force reconnection
@@ -288,87 +262,6 @@ class WebSocketSmartTurnAnalyzer(BaseSmartTurn):
                     break
         except asyncio.CancelledError:
             logger.debug("Heartbeat task cancelled")
-            pass
-    
-    async def _read_messages(self) -> None:
-        """Read messages from WebSocket to handle pongs and other control messages."""
-        consecutive_errors = 0
-        try:
-            while not self._closing:
-                # Get a local reference to the WebSocket
-                ws = self._ws
-                if not ws or ws.closed:
-                    await asyncio.sleep(0.1)
-                    continue
-                    
-                # Skip reading if prediction is active
-                if self._prediction_active.is_set():
-                    await asyncio.sleep(0.1)
-                    continue
-                    
-                try:
-                    # Read messages with a timeout
-                    async with self._recv_lock:
-                        msg = await asyncio.wait_for(ws.receive(), timeout=1.0)
-                    consecutive_errors = 0  # Reset error counter on success
-                    
-                    if msg.type == aiohttp.WSMsgType.TEXT:
-                        try:
-                            data = json.loads(msg.data)
-                            
-                            # Handle pong responses
-                            if data.get("type") == "pong":
-                                old_pong_time = self._last_pong_time
-                                self._last_pong_time = time.time()
-                                if old_pong_time > 0:
-                                    pong_delay = self._last_pong_time - old_pong_time
-                                    logger.debug(f"Received pong from smart turn service (delay: {pong_delay:.2f}s)")
-                                else:
-                                    logger.debug(f"Received first pong from smart turn service")
-                                continue
-                                
-                            # If it's a prediction response, log warning
-                            if "prediction" in data:
-                                logger.warning(f"Received prediction response in message reader - this should not happen!")
-                                continue
-                                
-                            # Log unexpected messages
-                            logger.debug(f"Received unexpected message in reader: {data}")
-                            
-                        except json.JSONDecodeError:
-                            logger.error(f"Failed to decode JSON message: {msg.data}")
-                            
-                    elif msg.type == aiohttp.WSMsgType.BINARY:
-                        # Log binary messages but don't process them
-                        logger.debug(f"Received binary message in reader ({len(msg.data)} bytes) - ignoring")
-                        continue
-                        
-                    elif msg.type == aiohttp.WSMsgType.ERROR:
-                        logger.error(f"WebSocket error in message reader: {msg.data}")
-                        self._connection_closed_event.set()
-                        break
-                        
-                    elif msg.type == aiohttp.WSMsgType.CLOSE:
-                        logger.info("WebSocket closed by server in message reader")
-                        self._connection_closed_event.set()
-                        break
-                        
-                except asyncio.TimeoutError:
-                    # Timeout is normal, just check if we should continue
-                    continue
-                except asyncio.CancelledError:
-                    raise
-                except Exception as e:
-                    consecutive_errors += 1
-                    logger.error(f"Error reading messages (consecutive errors: {consecutive_errors}): {e}")
-                    if consecutive_errors >= 3:
-                        logger.error("Too many consecutive errors in message reader, triggering reconnection")
-                        self._connection_closed_event.set()
-                        break
-                    await asyncio.sleep(0.5)  # Brief pause before retry
-                    
-        except asyncio.CancelledError:
-            logger.debug("Message reader cancelled")
             pass
     
     async def _monitor_connection(self) -> None:
@@ -422,17 +315,8 @@ class WebSocketSmartTurnAnalyzer(BaseSmartTurn):
 
     async def _predict_endpoint(self, audio_array: np.ndarray) -> Dict[str, Any]:
         """Send audio and await JSON response via WebSocket."""
-        # Prevent concurrent predictions
-        async with self._prediction_lock:
-            return await self._do_predict(audio_array)
-            
-    async def _do_predict(self, audio_array: np.ndarray) -> Dict[str, Any]:
-        """Internal prediction logic with proper cleanup."""
         ws = await self._ensure_ws()
         data_bytes = self._serialize_array(audio_array)
-        
-        # Set prediction active flag
-        self._prediction_active.set()
         
         try:
             # Send request with minimal lock duration
@@ -492,10 +376,9 @@ class WebSocketSmartTurnAnalyzer(BaseSmartTurn):
 
                 try:
                     # Use a shorter timeout to allow checking for other conditions
-                    async with self._recv_lock:
-                        recv_msg = await asyncio.wait_for(
-                            ws.receive(), timeout=min(remaining_timeout, 0.5)
-                        )
+                    recv_msg = await asyncio.wait_for(
+                        ws.receive(), timeout=min(remaining_timeout, 0.5)
+                    )
                 except asyncio.TimeoutError:
                     # Check if we should continue waiting
                     if time.time() - start_time >= self._params.stop_secs:
@@ -576,7 +459,7 @@ class WebSocketSmartTurnAnalyzer(BaseSmartTurn):
             }
         finally:
             # Resume message reader
-            self._prediction_active.clear()
+            pass
 
     async def close(self):
         """Asynchronously close the WebSocket (called from pipeline cleanup)."""
@@ -608,16 +491,6 @@ class WebSocketSmartTurnAnalyzer(BaseSmartTurn):
                 except Exception as e:
                     logger.debug(f"Error canceling heartbeat task: {e}")
                     
-            # Cancel message reader
-            if self._message_reader_task and not self._message_reader_task.done():
-                self._message_reader_task.cancel()
-                try:
-                    await self._message_reader_task
-                except asyncio.CancelledError:
-                    pass
-                except Exception as e:
-                    logger.debug(f"Error canceling message reader task: {e}")
-
             # Close WebSocket with proper error handling
             if self._ws:
                 try:
