@@ -69,6 +69,13 @@ class WebSocketSmartTurnAnalyzer(BaseSmartTurn):
         self._last_successful_request = 0.0
         self._connection_attempts = 0
         self._last_pong_time = 0.0
+        # ------------------------------------------------------------------
+        # Ensure only one coroutine calls `ws.receive()` at any time to avoid
+        # aiohttp's "Concurrent call to receive()" runtime error.  The
+        # background message reader and the prediction logic will both use
+        # this lock to serialize receive operations.
+        # ------------------------------------------------------------------
+        self._recv_lock = asyncio.Lock()
         
         # Message reading coordination
         self._prediction_active = threading.Event()  # Thread-safe flag for prediction state
@@ -301,7 +308,8 @@ class WebSocketSmartTurnAnalyzer(BaseSmartTurn):
                     
                 try:
                     # Read messages with a timeout
-                    msg = await asyncio.wait_for(ws.receive(), timeout=1.0)
+                    async with self._recv_lock:
+                        msg = await asyncio.wait_for(ws.receive(), timeout=1.0)
                     consecutive_errors = 0  # Reset error counter on success
                     
                     if msg.type == aiohttp.WSMsgType.TEXT:
@@ -484,9 +492,10 @@ class WebSocketSmartTurnAnalyzer(BaseSmartTurn):
 
                 try:
                     # Use a shorter timeout to allow checking for other conditions
-                    recv_msg = await asyncio.wait_for(
-                        ws.receive(), timeout=min(remaining_timeout, 0.5)
-                    )
+                    async with self._recv_lock:
+                        recv_msg = await asyncio.wait_for(
+                            ws.receive(), timeout=min(remaining_timeout, 0.5)
+                        )
                 except asyncio.TimeoutError:
                     # Check if we should continue waiting
                     if time.time() - start_time >= self._params.stop_secs:
