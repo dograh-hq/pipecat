@@ -241,7 +241,6 @@ class WebSocketSmartTurnAnalyzer(BaseSmartTurn):
                         # Wait (outside the lock) for the pong
                         await asyncio.wait_for(pong_waiter, timeout=3.0)
                         self._last_pong_time = time.time()
-                        logger.debug("Received pong from smart turn service")
 
                     except asyncio.TimeoutError:
                         logger.warning("No pong received within timeout, forcing reconnection")
