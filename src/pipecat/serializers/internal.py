@@ -41,9 +41,9 @@ class InternalFrameSerializer(FrameSerializer):
             # Use a fixed-size header to avoid parsing issues with binary data
             # Format: "AUDIO" (5 bytes) + sample_rate (4 bytes) + num_channels (2 bytes) + audio data
             header = b"AUDIO"
-            sample_rate_bytes = frame.sample_rate.to_bytes(4, byteorder='big')
-            num_channels_bytes = frame.num_channels.to_bytes(2, byteorder='big')
-            
+            sample_rate_bytes = frame.sample_rate.to_bytes(4, byteorder="big")
+            num_channels_bytes = frame.num_channels.to_bytes(2, byteorder="big")
+
             serialized = header + sample_rate_bytes + num_channels_bytes + frame.audio
             return serialized
 
@@ -57,20 +57,24 @@ class InternalFrameSerializer(FrameSerializer):
                 # Fixed-size header parsing
                 # Header: "AUDIO" (5 bytes) + sample_rate (4 bytes) + num_channels (2 bytes)
                 if len(data) < 11:  # Minimum size for header
-                    logger.error(f"InternalSerializer: Data too short for header: {len(data)} bytes")
+                    logger.error(
+                        f"InternalSerializer: Data too short for header: {len(data)} bytes"
+                    )
                     return None
-                
+
                 # Extract fixed-size fields
                 # Skip header validation - we already checked startswith(b"AUDIO")
-                sample_rate = int.from_bytes(data[5:9], byteorder='big')
-                num_channels = int.from_bytes(data[9:11], byteorder='big')
-                
+                sample_rate = int.from_bytes(data[5:9], byteorder="big")
+                num_channels = int.from_bytes(data[9:11], byteorder="big")
+
                 # Extract audio data - everything after the header
                 audio_data = data[11:]
-                
+
                 # Check if audio data length is valid
                 if len(audio_data) % 2 != 0:
-                    logger.warning(f"InternalSerializer: Audio data has odd length: {len(audio_data)}")
+                    logger.warning(
+                        f"InternalSerializer: Audio data has odd length: {len(audio_data)}"
+                    )
 
                 # Convert to InputAudioRawFrame for the receiving agent
                 return InputAudioRawFrame(

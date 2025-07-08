@@ -14,8 +14,8 @@ from pipecat.frames.frames import (
     BotStoppedSpeakingFrame,
     CancelFrame,
     EndFrame,
-    STTMuteFrame,
     StartFrame,
+    STTMuteFrame,
     UserStartedSpeakingFrame,
 )
 from pipecat.observers.base_observer import BaseObserver, FramePushed
@@ -115,7 +115,7 @@ class TurnTrackingObserver(BaseObserver):
         if self._stt_muted:
             logger.debug("Ignoring UserStartedSpeaking while STT is muted")
             return
-            
+
         if self._is_bot_speaking:
             # Handle interruption - end current turn and start a new one
             self._cancel_turn_end_timer()  # Cancel any pending end turn timer

@@ -114,7 +114,7 @@ class DeepgramSTTService(STTService):
         self.set_model_name(merged_options["model"])
         self._settings = merged_options
         self._addons = addons
-        
+
         # Track session timing for STT usage metrics
         self._session_start_time: Optional[float] = None
 
@@ -138,20 +138,20 @@ class DeepgramSTTService(STTService):
             True if VAD events are enabled in the current settings.
         """
         return self._settings["vad_events"]
-    
+
     async def _emit_stt_usage_metrics(self):
         """Emit STT usage metrics for the session."""
         if self._session_start_time is not None:
             duration = time.time() - self._session_start_time
             if duration > 0:
                 metrics_data = STTUsageMetricsData(
-                    processor=f"{self.__class__.__name__}#0",
-                    model=self.model_name,
-                    value=duration
+                    processor=f"{self.__class__.__name__}#0", model=self.model_name, value=duration
                 )
                 frame = MetricsFrame(data=[metrics_data])
                 await self.push_frame(frame)
-                logger.debug(f"Emitted STT usage metrics: {duration:.2f} seconds for model {self.model_name}")
+                logger.debug(
+                    f"Emitted STT usage metrics: {duration:.2f} seconds for model {self.model_name}"
+                )
 
     def can_generate_metrics(self) -> bool:
         """Check if this service can generate processing metrics.

@@ -34,6 +34,7 @@ class TTSUsageMetricsData(MetricsData):
 
 class STTUsageMetricsData(MetricsData):
     """Metrics data for Speech-to-Text usage in seconds."""
+
     value: float
 
 

@@ -151,18 +151,18 @@ class SileroVADAnalyzer(VADAnalyzer):
         try:
             # Debug: Check incoming buffer
             # logger.debug(f"VAD: Analyzing buffer - size: {len(buffer)} bytes, sample_rate: {self.sample_rate}")
-            
+
             audio_int16 = np.frombuffer(buffer, np.int16)
             # logger.debug(f"VAD: audio_int16 shape: {audio_int16.shape}, min: {audio_int16.min()}, max: {audio_int16.max()}")
-            
+
             # Check if audio is silence (all zeros or very low values)
             # if np.abs(audio_int16).max() < 100:  # Threshold for silence
-                # logger.debug(f"VAD: Audio appears to be silence (max amplitude: {np.abs(audio_int16).max()})")
-            
+            # logger.debug(f"VAD: Audio appears to be silence (max amplitude: {np.abs(audio_int16).max()})")
+
             # Divide by 32768 because we have signed 16-bit data.
             audio_float32 = np.frombuffer(audio_int16, dtype=np.int16).astype(np.float32) / 32768.0
             # logger.debug(f"VAD: audio_float32 shape: {audio_float32.shape}, min: {audio_float32.min():.4f}, max: {audio_float32.max():.4f}")
-            
+
             new_confidence = self._model(audio_float32, self.sample_rate)[0]
             # logger.debug(f"VAD: Confidence score: {float(new_confidence):.4f} (threshold: {self.params.confidence})")
 

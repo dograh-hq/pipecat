@@ -10,7 +10,7 @@ from pipecat.frames.frames import MixerControlFrame
 
 class SilenceAudioMixer(BaseAudioMixer):
     """A simple audio mixer that just passes through audio unchanged.
-    
+
     This mixer is used to enable continuous audio streaming in the output transport.
     When a mixer is present, the BaseOutputTransport will continuously send audio
     frames even when there's no TTS audio, by mixing silence.

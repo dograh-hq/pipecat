@@ -400,12 +400,12 @@ class ElevenLabsTTSService(AudioContextWordTTSService):
                 )
             except Exception as e:
                 logger.error(f"Error closing context on interruption: {e}")
-            
+
             # Send accumulated usage metrics before resetting
             if self._accumulated_text:
                 await self.start_tts_usage_metrics(self._accumulated_text)
                 self._accumulated_text = ""
-            
+
             self._context_id = None
             self._started = False
 
@@ -613,7 +613,7 @@ class ElevenLabsHttpTTSService(WordTTSService):
         if self._accumulated_text:
             await self.start_tts_usage_metrics(self._accumulated_text)
             self._accumulated_text = ""
-        
+
         self._cumulative_time = 0
         self._started = False
         self._previous_text = ""

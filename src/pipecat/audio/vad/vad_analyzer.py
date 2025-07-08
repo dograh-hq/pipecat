@@ -83,11 +83,11 @@ class VADAnalyzer(ABC):
         self._vad_starting_count = 0
         self._vad_stopping_count = 0
         self._vad_state: VADState = VADState.QUIET
-        
+
         # logger.debug(f"VAD config: frames={self._vad_frames}, bytes_required={self._vad_frames_num_bytes}, "
         #             f"start_frames={self._vad_start_frames}, stop_frames={self._vad_stop_frames}, "
         #             f"sample_rate={self.sample_rate}")
-        
+
         # Check the actual default parameter values
         # logger.debug(f"VAD thresholds: confidence={self._params.confidence}, min_volume={self._params.min_volume}")
 
@@ -110,9 +110,9 @@ class VADAnalyzer(ABC):
 
         volume = self._get_smoothed_volume(audio_frames)
         self._prev_volume = volume
-        
+
         # Convert numpy array to float if needed
-        confidence_value = float(confidence) if hasattr(confidence, '__float__') else confidence
+        confidence_value = float(confidence) if hasattr(confidence, "__float__") else confidence
         # logger.debug(f"VADAnalyzer: Confidence: {confidence_value:.4f} (threshold: {self._params.confidence}), Volume: {volume:.4f} (min: {self._params.min_volume})")
 
         speaking = confidence_value >= self._params.confidence and volume >= self._params.min_volume
@@ -156,5 +156,5 @@ class VADAnalyzer(ABC):
 
         # if speaking:
         #     logger.debug(f"VADAnalyzer: Speaking detected, state: {self._vad_state}")
-        
+
         return self._vad_state

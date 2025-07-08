@@ -35,7 +35,7 @@ class InternalInputTransport(BaseInputTransport):
     def __init__(self, transport: Optional["InternalTransport"], params: TransportParams, **kwargs):
         # Extract latency configuration before passing to parent
         self._latency_seconds = kwargs.pop("latency_seconds", 0.0)
-        
+
         super().__init__(params, **kwargs)
         self._transport = transport
         self._queue: asyncio.Queue[bytes] = asyncio.Queue()
@@ -85,7 +85,7 @@ class InternalInputTransport(BaseInputTransport):
     async def stop(self, frame: EndFrame | StopFrame | None = None):
         """Stop the input transport."""
         self._running = False
-        
+
         # Stop latency processor
         if self._latency_task:
             self._latency_task.cancel()
@@ -94,7 +94,7 @@ class InternalInputTransport(BaseInputTransport):
             except asyncio.CancelledError:
                 pass
             self._latency_task = None
-            
+
         await super().stop(frame)
 
         # Trigger on_client_disconnected event for InternalTransport
@@ -114,9 +114,12 @@ class InternalInputTransport(BaseInputTransport):
                         # Debug received audio
                         try:
                             import numpy as np
+
                             # Check if audio length is valid for int16
                             if len(frame.audio) % 2 != 0:
-                                logger.error(f"InternalInput: Audio buffer has odd length: {len(frame.audio)}")
+                                logger.error(
+                                    f"InternalInput: Audio buffer has odd length: {len(frame.audio)}"
+                                )
                             else:
                                 audio_array = np.frombuffer(frame.audio, dtype=np.int16)
                                 # logger.debug(f"InternalInput: Received audio - size: {len(frame.audio)} bytes, "
@@ -124,7 +127,7 @@ class InternalInputTransport(BaseInputTransport):
                                 #            f"sample_rate: {frame.sample_rate}")
                         except Exception as e:
                             logger.error(f"InternalInput: Error analyzing audio: {e}")
-                        
+
                         # Use the base class's audio processing which includes VAD
                         await self.push_audio_frame(frame)
                     else:
@@ -135,14 +138,14 @@ class InternalInputTransport(BaseInputTransport):
                 continue
             except Exception as e:
                 logger.error(f"Error in internal input transport: {e}")
-    
+
     async def _latency_processor(self):
         """Process delayed packets and deliver them after the configured latency."""
         logger.info(f"InternalInput: Started latency processor with {self._latency_seconds}s delay")
-        
+
         # Use a list to maintain order (we'll process in FIFO order)
         pending_packets = []
-        
+
         while self._running:
             try:
                 # Get all new packets from the delayed queue (non-blocking)
@@ -152,24 +155,24 @@ class InternalInputTransport(BaseInputTransport):
                         pending_packets.append(packet)
                     except asyncio.QueueEmpty:
                         break
-                
+
                 # Process packets that are ready
                 current_time = time.monotonic()
                 delivered = []
-                
+
                 for i, (delivery_time, data) in enumerate(pending_packets):
                     if current_time >= delivery_time:
                         # Time to deliver this packet
                         await self._queue.put(data)
                         delivered.append(i)
-                
+
                 # Remove delivered packets (in reverse order to maintain indices)
                 for i in reversed(delivered):
                     pending_packets.pop(i)
-                
+
                 # Sleep briefly before next check
                 await asyncio.sleep(0.005)  # 5ms for more responsive delivery
-                    
+
             except asyncio.CancelledError:
                 # Deliver any remaining packets immediately on shutdown
                 for _, data in pending_packets:
@@ -178,7 +181,7 @@ class InternalInputTransport(BaseInputTransport):
             except Exception as e:
                 logger.error(f"Error in latency processor: {e}")
                 await asyncio.sleep(0.01)
-        
+
         logger.info("InternalInput: Stopped latency processor")
 
 
@@ -189,7 +192,7 @@ class InternalOutputTransport(BaseOutputTransport):
         super().__init__(params, **kwargs)
         self._partner: Optional[InternalInputTransport] = None
         self._serializer = InternalFrameSerializer()
-        
+
         # Audio timing synchronization (similar to WebsocketServerOutputTransport)
         # _send_interval is the time interval between audio chunks in seconds
         self._send_interval = 0
@@ -204,7 +207,9 @@ class InternalOutputTransport(BaseOutputTransport):
         await super().start(frame)
         await self._serializer.setup(frame)
         # Calculate the send interval based on audio chunk size (like WebsocketServerOutputTransport)
-        self._send_interval = self._params.audio_out_10ms_chunks * 10 / 1000  # Convert ms to seconds
+        self._send_interval = (
+            self._params.audio_out_10ms_chunks * 10 / 1000
+        )  # Convert ms to seconds
         await self.set_transport_ready(frame)
 
     async def write_audio_frame(self, frame: OutputAudioRawFrame):
@@ -215,14 +220,14 @@ class InternalOutputTransport(BaseOutputTransport):
         # logger.debug(f"InternalOutput: Sending audio - type: {type(frame).__name__}, size: {len(frame.audio)} bytes, "
         #             f"samples: {len(audio_array)}, min: {audio_array.min()}, max: {audio_array.max()}, "
         #             f"sample_rate: {frame.sample_rate}")
-        
+
         # Serialize and send the audio first
         data = await self._serializer.serialize(frame)
         if data and self._partner:
             await self._partner.receive_data(data)
-            
+
         # logger.debug(f"InternalOutput: Sent audio frame to partner")
-        
+
         # Then simulate audio playback timing (following WebsocketServerOutputTransport pattern)
         await self._write_audio_sleep()
 
@@ -233,17 +238,17 @@ class InternalOutputTransport(BaseOutputTransport):
     async def write_dtmf(self, _frame: OutputDTMFFrame | OutputDTMFUrgentFrame):
         """Internal transport doesn't support DTMF."""
         pass
-    
+
     async def stop(self, frame: EndFrame):
         """Stop the output transport and reset timing."""
         await super().stop(frame)
         self._next_send_time = 0
-    
+
     async def cancel(self, frame: CancelFrame):
         """Cancel the output transport and reset timing."""
         await super().cancel(frame)
         self._next_send_time = 0
-    
+
     async def _write_audio_sleep(self):
         """Simulate audio playback timing (following WebsocketServerOutputTransport pattern)."""
         # Simulate a clock to ensure audio is sent at real-time pace
@@ -262,14 +267,16 @@ class InternalTransport(BaseTransport):
     def __init__(self, params: TransportParams, **kwargs):
         # Extract latency configuration before passing to parent
         self._latency_seconds = kwargs.pop("latency_seconds", 0.0)
-        
+
         super().__init__(**kwargs)
         self._params = params
 
         # Create input and output transports
         self._input = InternalInputTransport(
-            self, params, name=self._input_name or f"{self.name}#input",
-            latency_seconds=self._latency_seconds
+            self,
+            params,
+            name=self._input_name or f"{self.name}#input",
+            latency_seconds=self._latency_seconds,
         )
         self._output = InternalOutputTransport(
             params, name=self._output_name or f"{self.name}#output"
@@ -302,11 +309,14 @@ class InternalTransportManager:
         self._transport_pairs: Dict[str, Tuple[InternalTransport, InternalTransport]] = {}
 
     def create_transport_pair(
-        self, test_session_id: str, actor_params: TransportParams, adversary_params: TransportParams,
-        latency_seconds: float = 0.0
+        self,
+        test_session_id: str,
+        actor_params: TransportParams,
+        adversary_params: TransportParams,
+        latency_seconds: float = 0.0,
     ) -> Tuple[InternalTransport, InternalTransport]:
         """Create a connected pair of internal transports.
-        
+
         Args:
             test_session_id: Unique identifier for the test session
             actor_params: Transport parameters for the actor
@@ -316,16 +326,14 @@ class InternalTransportManager:
 
         # Create actor transport with latency
         actor_transport = InternalTransport(
-            params=actor_params, 
-            name=f"actor-{test_session_id}",
-            latency_seconds=latency_seconds
+            params=actor_params, name=f"actor-{test_session_id}", latency_seconds=latency_seconds
         )
 
         # Create adversary transport with latency
         adversary_transport = InternalTransport(
-            params=adversary_params, 
+            params=adversary_params,
             name=f"adversary-{test_session_id}",
-            latency_seconds=latency_seconds
+            latency_seconds=latency_seconds,
         )
 
         # Connect them
@@ -334,7 +342,9 @@ class InternalTransportManager:
         # Store the pair
         self._transport_pairs[test_session_id] = (actor_transport, adversary_transport)
 
-        logger.info(f"Created internal transport pair for test session: {test_session_id} with {latency_seconds}s latency")
+        logger.info(
+            f"Created internal transport pair for test session: {test_session_id} with {latency_seconds}s latency"
+        )
 
         return actor_transport, adversary_transport
 
