@@ -383,7 +383,6 @@ class BaseInputTransport(FrameProcessor):
                 hasattr(self._params.turn_analyzer, "_timeout_metrics")
                 and self._params.turn_analyzer._timeout_metrics
             ):
-                logger.debug("Sending event _timeout_metrics")
                 await self._handle_prediction_result(self._params.turn_analyzer._timeout_metrics)
                 self._params.turn_analyzer._timeout_metrics = None
             await self._handle_end_of_turn_complete(end_of_turn_state)
