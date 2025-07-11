@@ -3,6 +3,7 @@ from enum import Enum
 
 class EndTaskReason(Enum):
     CALL_DURATION_EXCEEDED = "call_duration_exceeded"
+    VOICEMAIL_DETECTED = "voicemail_detected"
     USER_IDLE_MAX_DURATION_EXCEEDED = "user_idle_max_duration_exceeded"
     USER_HANGUP = "user_hangup"
     USER_QUALIFIED = "user_qualified"
