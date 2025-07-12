@@ -65,10 +65,6 @@ class BaseInputTransport(FrameProcessor):
         # a thread. Therefore, only one thread should be necessary.
         self._executor = ThreadPoolExecutor(max_workers=1)
 
-        # Till we figure out how to solve for task cancelled error, lets keep a flag
-        # to determine whether we have received EndFrame or is it client disconnect
-        self._received_end_frame = None
-
         # Task to process incoming audio (VAD) and push audio frames downstream
         # if passthrough is enabled.
         self._audio_task = None
@@ -162,13 +158,10 @@ class BaseInputTransport(FrameProcessor):
             await self._params.audio_in_filter.start(self._sample_rate)
 
     async def stop(self, frame: EndFrame):
-        # Cancel and wait for the audio input task to finish.
-        logger.debug(f"Stopping audio input task in BaseInputTransport")
         await self._cancel_audio_task()
         # Stop audio filter.
         if self._params.audio_in_filter:
             await self._params.audio_in_filter.stop()
-        logger.debug(f"Audio input task stopped in BaseInputTransport")
 
     async def pause(self, frame: StopFrame):
         self._paused = True
@@ -178,8 +171,10 @@ class BaseInputTransport(FrameProcessor):
         self._create_audio_task()
 
     async def cancel(self, frame: CancelFrame):
-        # Cancel and wait for the audio input task to finish.
         await self._cancel_audio_task()
+        # Stop audio filter.
+        if self._params.audio_in_filter:
+            await self._params.audio_in_filter.stop()
 
     async def set_transport_ready(self, frame: StartFrame):
         """To be called when the transport is ready to stream."""
@@ -219,14 +214,9 @@ class BaseInputTransport(FrameProcessor):
             await self._handle_bot_stopped_speaking(frame)
             await self.push_frame(frame, direction)
         elif isinstance(frame, EmulateUserStartedSpeakingFrame):
-            # If we've already received an EndFrame (i.e. the pipeline is shutting down),
-            # ignore any late emulated VAD events so we don't spuriously restart the
-            # interruption logic.
-            if self._received_end_frame:
-                logger.debug("Ignoring EmulateUserStartedSpeakingFrame received after EndFrame")
-            else:
-                logger.debug("Emulating user started speaking")
-                await self._handle_user_interruption(UserStartedSpeakingFrame(emulated=True))
+            # Emulate user started speaking
+            logger.debug("Emulating user started speaking")
+            await self._handle_user_interruption(UserStartedSpeakingFrame(emulated=True))
         elif isinstance(frame, EmulateUserStoppedSpeakingFrame):
             logger.debug("Emulating user stopped speaking")
             await self._handle_user_interruption(UserStoppedSpeakingFrame(emulated=True))
@@ -236,12 +226,8 @@ class BaseInputTransport(FrameProcessor):
         # Control frames
         elif isinstance(frame, EndFrame):
             logger.debug(f"Received EndFrame, stopping {self}")
-            self._received_end_frame = frame
-
-            # Push EndFrame before stop(), because stop() waits on the task to
-            # finish and the task finishes when EndFrame is processed.
-            await self.push_frame(frame, direction)
             await self.stop(frame)
+            await self.push_frame(frame, direction)
         elif isinstance(frame, StopFrame):
             await self.push_frame(frame, direction)
             await self.pause(frame)

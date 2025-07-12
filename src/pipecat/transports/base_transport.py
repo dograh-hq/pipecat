@@ -70,9 +70,6 @@ class BaseTransport(BaseObject):
         self._input_name = input_name
         self._output_name = output_name
 
-    def fetch_received_end_frame(self) -> EndFrame:
-        return self.input()._received_end_frame
-
     @abstractmethod
     def input(self) -> FrameProcessor:
         pass

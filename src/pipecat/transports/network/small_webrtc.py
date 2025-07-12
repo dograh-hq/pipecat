@@ -3,7 +3,6 @@
 #
 # SPDX-License-Identifier: BSD 2-Clause License
 #
-
 import asyncio
 import fractions
 import time
@@ -34,6 +33,7 @@ from pipecat.transports.base_output import BaseOutputTransport
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.transports.network.webrtc_connection import SmallWebRTCConnection
 from pipecat.utils.asyncio.watchdog_async_iterator import WatchdogAsyncIterator
+from pipecat.utils.enums import EndTaskReason
 
 try:
     import cv2
@@ -49,7 +49,9 @@ except ModuleNotFoundError as e:
 class SmallWebRTCCallbacks(BaseModel):
     on_app_message: Callable[[Any], Awaitable[None]]
     on_client_connected: Callable[[SmallWebRTCConnection], Awaitable[None]]
-    on_client_disconnected: Callable[[SmallWebRTCConnection], Awaitable[None]]
+    on_client_disconnected: Callable[
+        [SmallWebRTCConnection, Optional[str]], Awaitable[None]
+    ]  # Added optional disconnect reason
 
 
 class RawAudioTrack(AudioStreamTrack):
@@ -155,6 +157,7 @@ class SmallWebRTCClient:
         self._audio_in_channels = None
         self._in_sample_rate = None
         self._out_sample_rate = None
+        self._leave_counter = 0  # Track input/output transport usage
 
         # We are always resampling it for 16000 if the sample_rate that we receive is bigger than that.
         # otherwise we face issues with Silero VAD
@@ -162,17 +165,14 @@ class SmallWebRTCClient:
 
         @self._webrtc_connection.event_handler("connected")
         async def on_connected(connection: SmallWebRTCConnection):
-            logger.debug("Peer connection established.")
             await self._handle_client_connected()
 
         @self._webrtc_connection.event_handler("disconnected")
         async def on_disconnected(connection: SmallWebRTCConnection):
-            logger.debug("Peer connection lost.")
             await self._handle_peer_disconnected()
 
         @self._webrtc_connection.event_handler("closed")
         async def on_closed(connection: SmallWebRTCConnection):
-            logger.debug("Client connection closed.")
             await self._handle_client_closed()
 
         @self._webrtc_connection.event_handler("app-message")
@@ -293,6 +293,7 @@ class SmallWebRTCClient:
             self._video_output_track.add_video_frame(frame)
 
     async def setup(self, _params: TransportParams, frame):
+        self._leave_counter += 1
         self._audio_in_channels = _params.audio_in_channels
         self._in_sample_rate = _params.audio_in_sample_rate or frame.audio_in_sample_rate
         self._out_sample_rate = _params.audio_out_sample_rate or frame.audio_out_sample_rate
@@ -307,6 +308,12 @@ class SmallWebRTCClient:
         await self._webrtc_connection.connect()
 
     async def disconnect(self):
+        # We typically end up here in case of local disconnect. The event handler
+        # is called when we get the signal from the remote and is handled in _handle_client_closed
+        self._leave_counter -= 1
+        if self._leave_counter > 0:
+            return
+
         if self.is_connected and not self.is_closing:
             logger.info(f"Disconnecting the Small WebRTC client")
             self._closing = True
@@ -347,7 +354,11 @@ class SmallWebRTCClient:
         self._video_input_track = None
         self._audio_output_track = None
         self._video_output_track = None
-        await self._callbacks.on_client_disconnected(self._webrtc_connection)
+
+        # For WebRTC, closed event typically means user hangup
+        await self._callbacks.on_client_disconnected(
+            self._webrtc_connection, EndTaskReason.USER_HANGUP.value
+        )
 
     async def _handle_app_message(self, message: Any):
         await self._callbacks.on_app_message(message)
@@ -404,27 +415,22 @@ class SmallWebRTCInputTransport(BaseInputTransport):
         await self.set_transport_ready(frame)
 
     async def _stop_tasks(self):
-        logger.debug(f"Stopping tasks in SmallWebRTCInputTransport in _stop_tasks")
         if self._receive_audio_task:
             await self.cancel_task(self._receive_audio_task)
             self._receive_audio_task = None
         if self._receive_video_task:
             await self.cancel_task(self._receive_video_task)
             self._receive_video_task = None
-        logger.debug(f"Tasks stopped in SmallWebRTCInputTransport in _stop_tasks")
 
     async def stop(self, frame: EndFrame):
-        logger.debug(f"Stopping SmallWebRTCInputTransport in stop")
         await super().stop(frame)
         await self._stop_tasks()
-        logger.debug(f"Tasks stopped in SmallWebRTCInputTransport after stop")
+        await self._client.disconnect()
 
     async def cancel(self, frame: CancelFrame):
-        logger.debug(f"Cancelling SmallWebRTCInputTransport in cancel")
         await super().cancel(frame)
         await self._stop_tasks()
         await self._client.disconnect()
-        logger.debug(f"SmallWebRTCInputTransport disconnected after cancel")
 
     async def _receive_audio(self):
         try:
@@ -592,5 +598,5 @@ class SmallWebRTCTransport(BaseTransport):
     async def _on_client_connected(self, webrtc_connection):
         await self._call_event_handler("on_client_connected", webrtc_connection)
 
-    async def _on_client_disconnected(self, webrtc_connection):
-        await self._call_event_handler("on_client_disconnected", webrtc_connection)
+    async def _on_client_disconnected(self, webrtc_connection, reason: Optional[str] = None):
+        await self._call_event_handler("on_client_disconnected", webrtc_connection, reason)

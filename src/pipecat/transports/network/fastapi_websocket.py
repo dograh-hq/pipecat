@@ -32,6 +32,7 @@ from pipecat.transports.base_input import BaseInputTransport
 from pipecat.transports.base_output import BaseOutputTransport
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.utils.asyncio.watchdog_async_iterator import WatchdogAsyncIterator
+from pipecat.utils.enums import EndTaskReason
 
 try:
     from fastapi import WebSocket
@@ -52,7 +53,7 @@ class FastAPIWebsocketParams(TransportParams):
 
 class FastAPIWebsocketCallbacks(BaseModel):
     on_client_connected: Callable[[WebSocket], Awaitable[None]]
-    on_client_disconnected: Callable[[WebSocket], Awaitable[None]]
+    on_client_disconnected: Callable[[WebSocket, Optional[str]], Awaitable[None]]
     on_session_timeout: Callable[[WebSocket], Awaitable[None]]
 
 
@@ -81,12 +82,9 @@ class FastAPIWebsocketClient:
             logger.error(
                 f"{self} exception sending data: {e.__class__.__name__} ({e}), application_state: {self._websocket.application_state}"
             )
-            # For some reason the websocket is disconnected, and we are not able to send data
-            # So let's properly handle it and disconnect the transport
             if self._websocket.application_state == WebSocketState.DISCONNECTED:
-                logger.warning("Closing already disconnected websocket!")
                 self._closing = True
-                await self.trigger_client_disconnected()
+                await self.trigger_client_disconnected(EndTaskReason.SYSTEM_CONNECT_ERROR.value)
 
     async def disconnect(self):
         self._leave_counter -= 1
@@ -98,8 +96,10 @@ class FastAPIWebsocketClient:
             await self._websocket.close()
             await self.trigger_client_disconnected()
 
-    async def trigger_client_disconnected(self):
-        await self._callbacks.on_client_disconnected(self._websocket)
+    async def trigger_client_disconnected(self, reason: Optional[str] = None):
+        # Default to user hangup if no reason provided
+        reason = reason or EndTaskReason.USER_HANGUP.value
+        await self._callbacks.on_client_disconnected(self._websocket, reason)
 
     async def trigger_client_connected(self):
         await self._callbacks.on_client_connected(self._websocket)
@@ -195,9 +195,10 @@ class FastAPIWebsocketInputTransport(BaseInputTransport):
                 else:
                     await self.push_frame(frame)
         except Exception as e:
-            logger.error(f"{self} exception receiving data: {e.__class__.__name__} ({e})")
+            logger.warning(
+                f"{self} exception receiving data: {e.__class__.__name__} ({e}). Will trigger disconnect"
+            )
 
-        logger.debug(f"In _receive_messages - triggering client disconnected")
         await self._client.trigger_client_disconnected()
 
     async def _monitor_websocket(self):
@@ -373,8 +374,8 @@ class FastAPIWebsocketTransport(BaseTransport):
     async def _on_client_connected(self, websocket):
         await self._call_event_handler("on_client_connected", websocket)
 
-    async def _on_client_disconnected(self, websocket):
-        await self._call_event_handler("on_client_disconnected", websocket)
+    async def _on_client_disconnected(self, websocket, reason: Optional[str] = None):
+        await self._call_event_handler("on_client_disconnected", websocket, reason)
 
     async def _on_session_timeout(self, websocket):
         await self._call_event_handler("on_session_timeout", websocket)

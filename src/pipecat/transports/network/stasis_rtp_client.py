@@ -13,11 +13,15 @@ import asyncio
 import secrets
 import socket
 import struct
-from typing import AsyncIterator, Optional
+from typing import TYPE_CHECKING, AsyncIterator, Optional
 
 from loguru import logger
 
 from pipecat.utils.enums import EndTaskReason
+
+if TYPE_CHECKING:
+    from pipecat.transports.network.stasis_rtp import StasisRTPCallbacks
+    from pipecat.transports.network.stasis_rtp_connection import StasisRTPConnection
 
 # ─────────────────────────────────────────────────────────────────── helpers
 
@@ -89,8 +93,8 @@ class StasisRTPClient:
 
     def __init__(
         self,
-        connection,  # StasisRTPConnection
-        callbacks,  # StasisRTPCallbacks
+        connection: "StasisRTPConnection",
+        callbacks: "StasisRTPCallbacks",
     ):
         from typing import Any
 
@@ -104,6 +108,7 @@ class StasisRTPClient:
         self._closing = False
         self._disconnect_lock = asyncio.Lock()  # Prevent concurrent disconnection
         self._recv_sock_ready = asyncio.Event()  # Signal when recv socket is ready
+        self._leave_counter = 0  # Track input/output transport usage
 
         # ── wire event handlers to the connection ────────────────
         @self._connection.event_handler("connected")
@@ -113,13 +118,13 @@ class StasisRTPClient:
 
         @self._connection.event_handler("disconnected")
         async def _on_disconnected(_: Any, reason: str):
-            await self._callbacks.on_client_disconnected(self._connection.caller_channel.id)
+            await self._callbacks.on_client_disconnected(self._connection.caller_channel.id, reason)
             await self.disconnect(reason)
 
     # ─── public helpers ──────────────────────────────────────────
 
     async def setup(self, _):
-        pass  # API compatibility
+        self._leave_counter += 1
 
     async def connect(self):
         if self._connection.is_connected():
@@ -158,6 +163,11 @@ class StasisRTPClient:
             client twice.
 
         """
+        # Decrement leave counter when disconnect is called
+        self._leave_counter -= 1
+        if self._leave_counter > 0:
+            return
+
         async with self._disconnect_lock:
             if self._closing:
                 return

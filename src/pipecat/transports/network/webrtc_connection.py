@@ -316,10 +316,13 @@ class SmallWebRTCConnection(BaseObject):
 
     async def _handle_new_connection_state(self):
         state = self._pc.connectionState
+        logger.debug(f"connectionstatechange changed to: {state}")
         if state == "connected" and not self._connect_invoked:
             # We are going to wait until the pipeline is ready before triggering the event
             return
-        logger.debug(f"Connection state changed to: {state}")
+
+        # remote hangup happens when the state is turned to closed, so we fire
+        # closed event from here. Client is listening to the event in on_closed
         await self._call_event_handler(state)
         if state == "failed":
             logger.warning("Connection failed, closing peer connection.")

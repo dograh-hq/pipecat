@@ -34,7 +34,9 @@ class StasisRTPTransportParams(TransportParams):
 
 class StasisRTPCallbacks(BaseModel):
     on_client_connected: Callable[[str], Awaitable[None]]
-    on_client_disconnected: Callable[[str], Awaitable[None]]
+    on_client_disconnected: Callable[
+        [str, Optional[str]], Awaitable[None]
+    ]  # Added optional disconnect reason
     on_client_closed: Callable[[str], Awaitable[None]]
 
 
@@ -96,6 +98,10 @@ class StasisRTPInputTransport(BaseInputTransport):
     async def stop(self, frame: EndFrame):
         await super().stop(frame)
         await self._stop_tasks()
+        await self._client.disconnect(
+            frame.metadata.get("reason", EndTaskReason.UNKNOWN.value),
+            frame.metadata.get("extracted_variables", {}),
+        )
 
     async def cancel(self, frame: CancelFrame):
         await super().cancel(frame)
@@ -278,8 +284,8 @@ class StasisRTPTransport(BaseTransport):
     async def _on_client_connected(self, chan_id: str):
         await self._call_event_handler("on_client_connected", chan_id)
 
-    async def _on_client_disconnected(self, chan_id: str):
-        await self._call_event_handler("on_client_disconnected", chan_id)
+    async def _on_client_disconnected(self, chan_id: str, reason: Optional[str] = None):
+        await self._call_event_handler("on_client_disconnected", chan_id, reason)
 
     async def _on_client_closed(self, chan_id: str):
         await self._call_event_handler("on_client_closed", chan_id)
