@@ -70,12 +70,9 @@ class StasisRTPConnection(BaseObject):
         self.remote_addr = None
 
         # Internal state.
-        self._closed: bool = (
-            False  # Means that the channels are hung up, either remotely or locally
-        )
+        self._closed: bool = False  # Means that the channels are hung up remotely
         self._connect_invoked: bool = False  # Mirrors SmallWebRTCConnection
         self._is_connected: bool = False  # True once bridge created & channels bridged
-        self._disconnect_lock = asyncio.Lock()  # Prevent concurrent disconnection
 
         # Register supported event handler names so that client code can
         # register callbacks via `add_event_handler` / `@event_handler`.
@@ -89,38 +86,42 @@ class StasisRTPConnection(BaseObject):
     # Public helpers – similar surface as SmallWebRTCConnection
     # ---------------------------------------------------------------------
 
-    async def disconnect(self, reason: str, extracted_variables: dict):
+    async def disconnect(self, reason: str):
         """Instruct Asterisk to hang-up the call and perform cleanup."""
-        # If self._closed is set, then we have already called _handle_disconnect. We might
-        # have called _handle_disconnect upon remote hangup, and hence we should not
-        # call hangup on the channels
+        # If self._closed is set, it means there has been a remote hangup
         if self._closed:
             return
 
-        # Decide whether to hangup or continue in dialplan based on the reason
+        # Hangup the caller channel
         try:
             if self.caller_channel:
-                if reason == EndTaskReason.USER_QUALIFIED.value:
-                    # User qualified - continue in dialplan
-                    logger.debug(
-                        f"User qualified, continuing in dialplan for channel {self.caller_channel.id} REMOTE_DISPO_CALL_VARIABLES: {json.dumps(extracted_variables)}"
-                    )
-                    # Set variable REMOTE_DISPO_CALL_VARIABLES before continuing in dialplan
-                    await self.caller_channel.setChannelVar(
-                        variable="REMOTE_DISPO_CALL_VARIABLES",
-                        value=json.dumps(extracted_variables),
-                    )
-                    await self.caller_channel.continueInDialplan()
-                else:
-                    # Other reasons - hangup the channel
-                    logger.debug(
-                        f"Hanging up caller channel {self.caller_channel.id} due to reason: {reason}"
-                    )
-                    await self.caller_channel.hangup()
+                logger.debug(
+                    f"Hanging up caller channel {self.caller_channel.id} due to reason: {reason}"
+                )
+                await self.caller_channel.hangup()
         except Exception:
-            logger.exception("Failed to handle caller channel based on disconnect reason")
+            logger.exception("Failed to hangup caller channel")
 
-        await self._handle_disconnect(reason)
+    async def transfer(self, extracted_variables: dict):
+        """Transfer the call by continuing in dialplan with extracted variables."""
+        # If self._closed is set, it means there has been a remote hangup
+        if self._closed:
+            return
+
+        # Continue in dialplan with extracted variables
+        try:
+            if self.caller_channel:
+                logger.debug(
+                    f"User qualified, continuing in dialplan for channel {self.caller_channel.id} REMOTE_DISPO_CALL_VARIABLES: {json.dumps(extracted_variables)}"
+                )
+                # Set variable REMOTE_DISPO_CALL_VARIABLES before continuing in dialplan
+                await self.caller_channel.setChannelVar(
+                    variable="REMOTE_DISPO_CALL_VARIABLES",
+                    value=json.dumps(extracted_variables),
+                )
+                await self.caller_channel.continueInDialplan()
+        except Exception:
+            logger.exception("Failed to transfer caller channel")
 
     async def connect(self):
         """Signal that the user is ready to start the call.
@@ -228,10 +229,9 @@ class StasisRTPConnection(BaseObject):
 
     async def _handle_disconnect(self, reason: str = EndTaskReason.UNKNOWN.value):
         """Common logic for both remote and local hang-up."""
-        async with self._disconnect_lock:
-            if self._closed:
-                return
-            self._closed = True
+        if self._closed:
+            return
+        self._closed = True
 
         # Emit disconnected **only** if the call had actually reached the
         # connected state. This will propagate the disconnected to the

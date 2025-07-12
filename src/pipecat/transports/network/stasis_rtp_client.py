@@ -106,7 +106,6 @@ class StasisRTPClient:
         self._recv_sock: Optional[socket.socket] = None
         self._send_sock: Optional[socket.socket] = None
         self._closing = False
-        self._disconnect_lock = asyncio.Lock()  # Prevent concurrent disconnection
         self._recv_sock_ready = asyncio.Event()  # Signal when recv socket is ready
         self._leave_counter = 0  # Track input/output transport usage
 
@@ -119,7 +118,6 @@ class StasisRTPClient:
         @self._connection.event_handler("disconnected")
         async def _on_disconnected(_: Any, reason: str):
             await self._callbacks.on_client_disconnected(self._connection.caller_channel.id, reason)
-            await self.disconnect(reason)
 
     # ─── public helpers ──────────────────────────────────────────
 
@@ -134,57 +132,34 @@ class StasisRTPClient:
     async def disconnect(
         self, reason: str = EndTaskReason.UNKNOWN.value, extracted_variables: dict = {}
     ):
-        """
-        This can either be called from the transport when the transport encounters EndFrame or from
-        connection when the connection disconnect handler is called (e.g. when the call is ended by the user).
-
-        Flow when the transport encounters EndFrame:
-        - Transport calls stop()
-        - stop() calls _client.disconnect()
-        - _client.disconnect() closes the sockets and calls _connection.disconnect()
-        - _connection.disconnect() hangs up the call
-        - _connection.disconnect() calls the _handle_disconnect
-        - _handle_disconnect() invokes _connection.event_handler("disconnected")
-        - _connection.event_handler("disconnected") invokes transport's disconnected callback "on_client_disconnected"
-        - tt also calls client disconnect, but since we have set _closing to True, it will return
-        - The pipeline is listening to the "on_client_disconnected" callback and ends the pipeline and does any post processing like
-            sending disposition code on slack etc.
-
-        Flow when the _connection disconnects (e.g. when the call is ended by the user):
-        - _connection.disconnect() calls _handle_disconnect
-        - _handle_disconnect() invokes _connection.event_handler("disconnected")
-        - _connection.event_handler("disconnected") invokes transport's disconnected callback "on_client_disconnected"
-        - _client.disconnect() is called and the sockets are cleaned up
-        - The pipeline is listening to the "on_client_disconnected" callback and ends the pipeline and does any post processing like
-            sending disposition code on slack etc.
-
-        Potential race condition:
-        - If the transport calls stop() and simultaneously the _connection disconnects, we can potentially call _handle_disconnect of the
-            client twice.
-
-        """
         # Decrement leave counter when disconnect is called
         self._leave_counter -= 1
         if self._leave_counter > 0:
             return
 
-        async with self._disconnect_lock:
-            if self._closing:
-                return
-            self._closing = True
+        if self._closing:
+            logger.warning(
+                "In StasisRTPClient disconnect, but already closing. Figure out "
+                "where is this double disconnect getting called from"
+            )
+            return
+        self._closing = True
 
         # Close local sockets first - this will cause receive() to break
         await self._close_sockets()
 
-        # Disconnect the underlying RTP connection to hang up the call
+        # Decide whether to call connection's transfer or disconnect based on the reason
         try:
-            await asyncio.wait_for(
-                self._connection.disconnect(reason, extracted_variables), timeout=5.0
-            )
+            if reason == EndTaskReason.USER_QUALIFIED.value:
+                # User qualified - call transfer method
+                await asyncio.wait_for(self._connection.transfer(extracted_variables), timeout=5.0)
+            else:
+                # Other reasons - call disconnect method
+                await asyncio.wait_for(self._connection.disconnect(reason), timeout=5.0)
         except asyncio.TimeoutError:
-            logger.warning("RTP connection disconnect timed out")
+            logger.warning("RTP connection disconnect/transfer timed out")
         except Exception as exc:
-            logger.error(f"Failed to disconnect RTP connection: {exc}")
+            logger.error(f"Failed to disconnect/transfer RTP connection: {exc}")
 
     # ─── socket management ──────────────────────────────────────
 

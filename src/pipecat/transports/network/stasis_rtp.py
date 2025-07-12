@@ -98,6 +98,7 @@ class StasisRTPInputTransport(BaseInputTransport):
     async def stop(self, frame: EndFrame):
         await super().stop(frame)
         await self._stop_tasks()
+        # Call disconnect on the client when EndFrame is encountered
         await self._client.disconnect(
             frame.metadata.get("reason", EndTaskReason.UNKNOWN.value),
             frame.metadata.get("extracted_variables", {}),
@@ -106,6 +107,7 @@ class StasisRTPInputTransport(BaseInputTransport):
     async def cancel(self, frame: CancelFrame):
         await super().cancel(frame)
         await self._stop_tasks()
+        # Call disconnect on the client when CancelFrame is encountered
         await self._client.disconnect(
             frame.metadata.get("reason", EndTaskReason.SYSTEM_CANCELLED.value),
             frame.metadata.get("extracted_variables", {}),
@@ -164,8 +166,8 @@ class StasisRTPOutputTransport(BaseOutputTransport):
     async def stop(self, frame: EndFrame):
         await super().stop(frame)
 
-        # _client.disconnect triggers socket close and then _connection.disconnect
-        # depending on the reason, we either hangup or continue in dialer
+        # Call disconnect on the client when EndFrame is encountered
+        # The client will check its _leave_counter and decide whether to close sockets
         await self._client.disconnect(
             frame.metadata.get("reason", EndTaskReason.UNKNOWN.value),
             frame.metadata.get("extracted_variables", {}),
@@ -173,35 +175,17 @@ class StasisRTPOutputTransport(BaseOutputTransport):
 
     async def cancel(self, frame: CancelFrame):
         await super().cancel(frame)
-        await self._client.disconnect()
+        # Call disconnect on the client when CancelFrame is encountered
+        await self._client.disconnect(
+            frame.metadata.get("reason", EndTaskReason.SYSTEM_CANCELLED.value),
+            frame.metadata.get("extracted_variables", {}),
+        )
 
     async def send_message(self, frame: TransportMessageFrame | TransportMessageUrgentFrame):
         # RTP path has no generic message channel; ignore.
         pass
 
     async def write_audio_frame(self, frame: OutputAudioRawFrame):
-        """
-        Writes raw audio frames to the RTP transport after they've been processed through
-        the BaseOutputTransport pipeline.
-
-        Audio Frame Processing Flow:
-        1. OutputAudioRawFrame enters BaseOutputTransport.process_frame()
-        2. process_frame() calls _handle_frame() for OutputAudioRawFrame
-        3. _handle_frame() routes frame to appropriate MediaSender.handle_audio_frame()
-        4. MediaSender.handle_audio_frame():
-           - Resamples audio if needed to match transport sample rate
-           - Buffers audio in _audio_buffer
-           - Chunks audio into _audio_chunk_size pieces (typically 10ms * audio_out_10ms_chunks chunks)
-           - Puts audio chunks into _audio_queue
-        5. MediaSender._audio_task_handler() processes frames from _audio_queue:
-           - Iterates through frames via _next_frame() generator
-           - For OutputAudioRawFrame, calls transport.write_audio_frame()
-           - This is where we arrive at this method
-
-        Args:
-            frames: Raw audio bytes (16-bit PCM) ready for RTP transmission
-            destination: Optional destination identifier (not used in RTP transport)
-        """
         if self._client.is_closing:
             return
 
