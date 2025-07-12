@@ -108,6 +108,7 @@ class StasisRTPClient:
         self._closing = False
         self._recv_sock_ready = asyncio.Event()  # Signal when recv socket is ready
         self._leave_counter = 0  # Track input/output transport usage
+        self._fallback_disconnect_timer: Optional[asyncio.Task] = None  # Safety timer for disconnect
 
         # ── wire event handlers to the connection ────────────────
         @self._connection.event_handler("connected")
@@ -117,6 +118,10 @@ class StasisRTPClient:
 
         @self._connection.event_handler("disconnected")
         async def _on_disconnected(_: Any, reason: str):
+            # Cancel the safety timer if it exists
+            if self._fallback_disconnect_timer and not self._fallback_disconnect_timer.done():
+                self._fallback_disconnect_timer.cancel()
+                self._fallback_disconnect_timer = None
             await self._callbacks.on_client_disconnected(self._connection.caller_channel.id, reason)
 
     # ─── public helpers ──────────────────────────────────────────
@@ -147,6 +152,14 @@ class StasisRTPClient:
 
         # Close local sockets first - this will cause receive() to break
         await self._close_sockets()
+
+        # Create a safety timer that will call on_client_disconnected if we don't hear from the connection
+        async def _fallback_disconnect_timeout():
+            await asyncio.sleep(5.0)
+            logger.warning("Disconnect event not received within 5 seconds, calling on_client_disconnected as fallback")
+            await self._callbacks.on_client_disconnected(self._connection.caller_channel.id)
+
+        self._fallback_disconnect_timer = asyncio.create_task(_fallback_disconnect_timeout())
 
         # Decide whether to call connection's transfer or disconnect based on the reason
         try:
