@@ -102,7 +102,7 @@ class StasisRTPConnection(BaseObject):
         except Exception:
             logger.exception("Failed to hangup caller channel")
 
-    async def transfer(self, extracted_variables: dict):
+    async def transfer(self, call_transfer_context: dict):
         """Transfer the call by continuing in dialplan with extracted variables."""
         # If self._closed is set, it means there has been a remote hangup
         if self._closed:
@@ -112,12 +112,12 @@ class StasisRTPConnection(BaseObject):
         try:
             if self.caller_channel:
                 logger.debug(
-                    f"User qualified, continuing in dialplan for channel {self.caller_channel.id} REMOTE_DISPO_CALL_VARIABLES: {json.dumps(extracted_variables)}"
+                    f"User qualified, continuing in dialplan for channel {self.caller_channel.id} REMOTE_DISPO_CALL_VARIABLES: {json.dumps(call_transfer_context)}"
                 )
                 # Set variable REMOTE_DISPO_CALL_VARIABLES before continuing in dialplan
                 await self.caller_channel.setChannelVar(
                     variable="REMOTE_DISPO_CALL_VARIABLES",
-                    value=json.dumps(extracted_variables),
+                    value=json.dumps(call_transfer_context),
                 )
                 await self.caller_channel.continueInDialplan()
         except Exception:

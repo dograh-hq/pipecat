@@ -101,7 +101,7 @@ class StasisRTPInputTransport(BaseInputTransport):
         # Call disconnect on the client when EndFrame is encountered
         await self._client.disconnect(
             frame.metadata.get("reason", EndTaskReason.UNKNOWN.value),
-            frame.metadata.get("extracted_variables", {}),
+            frame.metadata.get("call_transfer_context", {}),
         )
 
     async def cancel(self, frame: CancelFrame):
@@ -110,7 +110,7 @@ class StasisRTPInputTransport(BaseInputTransport):
         # Call disconnect on the client when CancelFrame is encountered
         await self._client.disconnect(
             frame.metadata.get("reason", EndTaskReason.SYSTEM_CANCELLED.value),
-            frame.metadata.get("extracted_variables", {}),
+            frame.metadata.get("call_transfer_context", {}),
         )
 
     async def _receive_audio(self):
@@ -170,7 +170,7 @@ class StasisRTPOutputTransport(BaseOutputTransport):
         # The client will check its _leave_counter and decide whether to close sockets
         await self._client.disconnect(
             frame.metadata.get("reason", EndTaskReason.UNKNOWN.value),
-            frame.metadata.get("extracted_variables", {}),
+            frame.metadata.get("call_transfer_context", {}),
         )
 
     async def cancel(self, frame: CancelFrame):
@@ -178,7 +178,7 @@ class StasisRTPOutputTransport(BaseOutputTransport):
         # Call disconnect on the client when CancelFrame is encountered
         await self._client.disconnect(
             frame.metadata.get("reason", EndTaskReason.SYSTEM_CANCELLED.value),
-            frame.metadata.get("extracted_variables", {}),
+            frame.metadata.get("call_transfer_context", {}),
         )
 
     async def send_message(self, frame: TransportMessageFrame | TransportMessageUrgentFrame):

@@ -108,7 +108,9 @@ class StasisRTPClient:
         self._closing = False
         self._recv_sock_ready = asyncio.Event()  # Signal when recv socket is ready
         self._leave_counter = 0  # Track input/output transport usage
-        self._fallback_disconnect_timer: Optional[asyncio.Task] = None  # Safety timer for disconnect
+        self._fallback_disconnect_timer: Optional[asyncio.Task] = (
+            None  # Safety timer for disconnect
+        )
 
         # ── wire event handlers to the connection ────────────────
         @self._connection.event_handler("connected")
@@ -135,7 +137,7 @@ class StasisRTPClient:
         await self._connection.connect()
 
     async def disconnect(
-        self, reason: str = EndTaskReason.UNKNOWN.value, extracted_variables: dict = {}
+        self, reason: str = EndTaskReason.UNKNOWN.value, call_transfer_context: dict = {}
     ):
         # Decrement leave counter when disconnect is called
         self._leave_counter -= 1
@@ -156,7 +158,9 @@ class StasisRTPClient:
         # Create a safety timer that will call on_client_disconnected if we don't hear from the connection
         async def _fallback_disconnect_timeout():
             await asyncio.sleep(5.0)
-            logger.warning("Disconnect event not received within 5 seconds, calling on_client_disconnected as fallback")
+            logger.warning(
+                "Disconnect event not received within 5 seconds, calling on_client_disconnected as fallback"
+            )
             await self._callbacks.on_client_disconnected(self._connection.caller_channel.id)
 
         self._fallback_disconnect_timer = asyncio.create_task(_fallback_disconnect_timeout())
@@ -165,7 +169,9 @@ class StasisRTPClient:
         try:
             if reason == EndTaskReason.USER_QUALIFIED.value:
                 # User qualified - call transfer method
-                await asyncio.wait_for(self._connection.transfer(extracted_variables), timeout=5.0)
+                await asyncio.wait_for(
+                    self._connection.transfer(call_transfer_context), timeout=5.0
+                )
             else:
                 # Other reasons - call disconnect method
                 await asyncio.wait_for(self._connection.disconnect(reason), timeout=5.0)
