@@ -151,7 +151,6 @@ class FastAPIWebsocketClient:
         """Trigger the client disconnected callback."""
         reason = reason or EndTaskReason.USER_HANGUP.value
         await self._callbacks.on_client_disconnected(self._websocket, reason)
-        await self._callbacks.on_client_disconnected(self._websocket)
 
     async def trigger_client_connected(self):
         """Trigger the client connected callback."""
