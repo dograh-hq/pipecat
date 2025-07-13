@@ -55,7 +55,7 @@ from pipecat.services.llm_service import LLMService
 from pipecat.utils.tracing.service_decorators import traced_llm
 
 try:
-    import boto3
+    import aioboto3
     import httpx
     from botocore.config import Config
 except ModuleNotFoundError as e:
@@ -104,12 +104,6 @@ class AWSBedrockLLMContext(OpenAILLMContext):
     Extends OpenAI LLM context to handle AWS Bedrock's specific message format
     and system message handling. Manages conversion between OpenAI and Bedrock
     message formats.
-
-    Args:
-        messages: List of conversation messages in OpenAI format.
-        tools: List of available function calling tools.
-        tool_choice: Tool selection strategy or specific tool choice.
-        system: System message content for AWS Bedrock.
     """
 
     def __init__(
@@ -120,6 +114,14 @@ class AWSBedrockLLMContext(OpenAILLMContext):
         *,
         system: Optional[str] = None,
     ):
+        """Initialize AWS Bedrock LLM context.
+
+        Args:
+            messages: List of conversation messages in OpenAI format.
+            tools: List of available function calling tools.
+            tool_choice: Tool selection strategy or specific tool choice.
+            system: System message content for AWS Bedrock.
+        """
         super().__init__(messages=messages, tools=tools, tool_choice=tool_choice)
         self.system = system
 
@@ -205,20 +207,37 @@ class AWSBedrockLLMContext(OpenAILLMContext):
         Handles text content and function calls for both user and assistant messages.
 
         Args:
-            obj: Message in AWS Bedrock format:
-                {
-                    "role": "user/assistant",
-                    "content": [{"text": str} | {"toolUse": {...}} | {"toolResult": {...}}]
-                }
+            obj: Message in AWS Bedrock format.
 
         Returns:
-            List of messages in standard format:
-            [
+            List of messages in standard format.
+
+        Examples:
+            AWS Bedrock format input::
+
                 {
-                    "role": "user/assistant/tool",
-                    "content": [{"type": "text", "text": str}]
+                    "role": "assistant",
+                    "content": [
+                        {"text": "Hello"},
+                        {"toolUse": {"toolUseId": "123", "name": "search", "input": {"q": "test"}}}
+                    ]
                 }
-            ]
+
+            Standard format output::
+
+                [
+                    {"role": "assistant", "content": [{"type": "text", "text": "Hello"}]},
+                    {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "type": "function",
+                                "id": "123",
+                                "function": {"name": "search", "arguments": '{"q": "test"}'}
+                            }
+                        ]
+                    }
+                ]
         """
         role = obj.get("role")
         content = obj.get("content")
@@ -292,23 +311,38 @@ class AWSBedrockLLMContext(OpenAILLMContext):
         Empty text content is converted to "(empty)".
 
         Args:
-            message: Message in standard format:
-                {
-                    "role": "user/assistant/tool",
-                    "content": str | [{"type": "text", ...}],
-                    "tool_calls": [{"id": str, "function": {"name": str, "arguments": str}}]
-                }
+            message: Message in standard format.
 
         Returns:
-            Message in AWS Bedrock format:
-            {
-                "role": "user/assistant",
-                "content": [
-                    {"text": str} |
-                    {"toolUse": {"toolUseId": str, "name": str, "input": dict}} |
-                    {"toolResult": {"toolUseId": str, "content": [...], "status": str}}
-                ]
-            }
+            Message in AWS Bedrock format.
+
+        Examples:
+            Standard format input::
+
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "123",
+                            "function": {"name": "search", "arguments": '{"q": "test"}'}
+                        }
+                    ]
+                }
+
+            AWS Bedrock format output::
+
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "toolUse": {
+                                "toolUseId": "123",
+                                "name": "search",
+                                "input": {"q": "test"}
+                            }
+                        }
+                    ]
+                }
         """
         if message["role"] == "tool":
             # Try to parse the content as JSON if it looks like JSON
@@ -656,16 +690,6 @@ class AWSBedrockLLMService(LLMService):
     Provides inference capabilities for AWS Bedrock models including Amazon Nova
     and Anthropic Claude. Supports streaming responses, function calling, and
     vision capabilities.
-
-    Args:
-        model: The AWS Bedrock model identifier to use.
-        aws_access_key: AWS access key ID. If None, uses default credentials.
-        aws_secret_key: AWS secret access key. If None, uses default credentials.
-        aws_session_token: AWS session token for temporary credentials.
-        aws_region: AWS region for the Bedrock service.
-        params: Model parameters and configuration.
-        client_config: Custom boto3 client configuration.
-        **kwargs: Additional arguments passed to parent LLMService.
     """
 
     # Overriding the default adapter to use the Anthropic one.
@@ -702,6 +726,18 @@ class AWSBedrockLLMService(LLMService):
         client_config: Optional[Config] = None,
         **kwargs,
     ):
+        """Initialize the AWS Bedrock LLM service.
+
+        Args:
+            model: The AWS Bedrock model identifier to use.
+            aws_access_key: AWS access key ID. If None, uses default credentials.
+            aws_secret_key: AWS secret access key. If None, uses default credentials.
+            aws_session_token: AWS session token for temporary credentials.
+            aws_region: AWS region for the Bedrock service.
+            params: Model parameters and configuration.
+            client_config: Custom boto3 client configuration.
+            **kwargs: Additional arguments passed to parent LLMService.
+        """
         super().__init__(**kwargs)
 
         params = params or AWSBedrockLLMService.InputParams()
@@ -713,13 +749,17 @@ class AWSBedrockLLMService(LLMService):
                 read_timeout=300,  # 5 minutes
                 retries={"max_attempts": 3},
             )
-        session = boto3.Session(
-            aws_access_key_id=aws_access_key,
-            aws_secret_access_key=aws_secret_key,
-            aws_session_token=aws_session_token,
-            region_name=aws_region,
-        )
-        self._client = session.client(service_name="bedrock-runtime", config=client_config)
+
+        self._aws_session = aioboto3.Session()
+
+        # Store AWS session parameters for creating client in async context
+        self._aws_params = {
+            "aws_access_key_id": aws_access_key,
+            "aws_secret_access_key": aws_secret_key,
+            "aws_session_token": aws_session_token,
+            "region_name": aws_region,
+            "config": client_config,
+        }
 
         self.set_model_name(model)
         self._settings = {
@@ -867,70 +907,74 @@ class AWSBedrockLLMService(LLMService):
 
             logger.debug(f"Calling AWS Bedrock model with: {request_params}")
 
-            # Call AWS Bedrock with streaming
-            response = self._client.converse_stream(**request_params)
+            async with self._aws_session.client(
+                service_name="bedrock-runtime", **self._aws_params
+            ) as client:
+                # Call AWS Bedrock with streaming
+                response = await client.converse_stream(**request_params)
 
-            await self.stop_ttfb_metrics()
+                await self.stop_ttfb_metrics()
 
-            # Process the streaming response
-            tool_use_block = None
-            json_accumulator = ""
+                # Process the streaming response
+                tool_use_block = None
+                json_accumulator = ""
 
-            function_calls = []
-            for event in response["stream"]:
-                self.reset_watchdog()
+                function_calls = []
 
-                # Handle text content
-                if "contentBlockDelta" in event:
-                    delta = event["contentBlockDelta"]["delta"]
-                    if "text" in delta:
-                        await self.push_frame(LLMTextFrame(delta["text"]))
-                        completion_tokens_estimate += self._estimate_tokens(delta["text"])
-                    elif "toolUse" in delta and "input" in delta["toolUse"]:
-                        # Handle partial JSON for tool use
-                        json_accumulator += delta["toolUse"]["input"]
-                        completion_tokens_estimate += self._estimate_tokens(
-                            delta["toolUse"]["input"]
-                        )
+                async for event in response["stream"]:
+                    self.reset_watchdog()
 
-                # Handle tool use start
-                elif "contentBlockStart" in event:
-                    content_block_start = event["contentBlockStart"]["start"]
-                    if "toolUse" in content_block_start:
-                        tool_use_block = {
-                            "id": content_block_start["toolUse"].get("toolUseId", ""),
-                            "name": content_block_start["toolUse"].get("name", ""),
-                        }
-                        json_accumulator = ""
+                    # Handle text content
+                    if "contentBlockDelta" in event:
+                        delta = event["contentBlockDelta"]["delta"]
+                        if "text" in delta:
+                            await self.push_frame(LLMTextFrame(delta["text"]))
+                            completion_tokens_estimate += self._estimate_tokens(delta["text"])
+                        elif "toolUse" in delta and "input" in delta["toolUse"]:
+                            # Handle partial JSON for tool use
+                            json_accumulator += delta["toolUse"]["input"]
+                            completion_tokens_estimate += self._estimate_tokens(
+                                delta["toolUse"]["input"]
+                            )
 
-                # Handle message completion with tool use
-                elif "messageStop" in event and "stopReason" in event["messageStop"]:
-                    if event["messageStop"]["stopReason"] == "tool_use" and tool_use_block:
-                        try:
-                            arguments = json.loads(json_accumulator) if json_accumulator else {}
+                    # Handle tool use start
+                    elif "contentBlockStart" in event:
+                        content_block_start = event["contentBlockStart"]["start"]
+                        if "toolUse" in content_block_start:
+                            tool_use_block = {
+                                "id": content_block_start["toolUse"].get("toolUseId", ""),
+                                "name": content_block_start["toolUse"].get("name", ""),
+                            }
+                            json_accumulator = ""
 
-                            # Only call function if it's not the no_operation tool
-                            if not using_noop_tool:
-                                function_calls.append(
-                                    FunctionCallFromLLM(
-                                        context=context,
-                                        tool_call_id=tool_use_block["id"],
-                                        function_name=tool_use_block["name"],
-                                        arguments=arguments,
+                    # Handle message completion with tool use
+                    elif "messageStop" in event and "stopReason" in event["messageStop"]:
+                        if event["messageStop"]["stopReason"] == "tool_use" and tool_use_block:
+                            try:
+                                arguments = json.loads(json_accumulator) if json_accumulator else {}
+
+                                # Only call function if it's not the no_operation tool
+                                if not using_noop_tool:
+                                    function_calls.append(
+                                        FunctionCallFromLLM(
+                                            context=context,
+                                            tool_call_id=tool_use_block["id"],
+                                            function_name=tool_use_block["name"],
+                                            arguments=arguments,
+                                        )
                                     )
-                                )
-                            else:
-                                logger.debug("Ignoring no_operation tool call")
-                        except json.JSONDecodeError:
-                            logger.error(f"Failed to parse tool arguments: {json_accumulator}")
+                                else:
+                                    logger.debug("Ignoring no_operation tool call")
+                            except json.JSONDecodeError:
+                                logger.error(f"Failed to parse tool arguments: {json_accumulator}")
 
-                # Handle usage metrics if available
-                if "metadata" in event and "usage" in event["metadata"]:
-                    usage = event["metadata"]["usage"]
-                    prompt_tokens += usage.get("inputTokens", 0)
-                    completion_tokens += usage.get("outputTokens", 0)
-                    cache_read_input_tokens += usage.get("cacheReadInputTokens", 0)
-                    cache_creation_input_tokens += usage.get("cacheWriteInputTokens", 0)
+                    # Handle usage metrics if available
+                    if "metadata" in event and "usage" in event["metadata"]:
+                        usage = event["metadata"]["usage"]
+                        prompt_tokens += usage.get("inputTokens", 0)
+                        completion_tokens += usage.get("outputTokens", 0)
+                        cache_read_input_tokens += usage.get("cacheReadInputTokens", 0)
+                        cache_creation_input_tokens += usage.get("cacheWriteInputTokens", 0)
 
             await self.run_function_calls(function_calls)
         except asyncio.CancelledError:

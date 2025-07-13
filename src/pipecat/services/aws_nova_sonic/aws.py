@@ -62,6 +62,7 @@ from pipecat.services.aws_nova_sonic.context import (
 )
 from pipecat.services.aws_nova_sonic.frames import AWSNovaSonicFunctionCallResultFrame
 from pipecat.services.llm_service import LLMService
+from pipecat.utils.asyncio.watchdog_coroutine import watchdog_coroutine
 from pipecat.utils.time import time_now_iso8601
 
 try:
@@ -95,7 +96,13 @@ class AWSNovaSonicUnhandledFunctionException(Exception):
 
 
 class ContentType(Enum):
-    """Content types supported by AWS Nova Sonic."""
+    """Content types supported by AWS Nova Sonic.
+
+    Parameters:
+        AUDIO: Audio content type.
+        TEXT: Text content type.
+        TOOL: Tool content type.
+    """
 
     AUDIO = "AUDIO"
     TEXT = "TEXT"
@@ -103,7 +110,12 @@ class ContentType(Enum):
 
 
 class TextStage(Enum):
-    """Text generation stages in AWS Nova Sonic responses."""
+    """Text generation stages in AWS Nova Sonic responses.
+
+    Parameters:
+        FINAL: Final text that has been fully generated.
+        SPECULATIVE: Speculative text that is still being generated.
+    """
 
     FINAL = "FINAL"  # what has been said
     SPECULATIVE = "SPECULATIVE"  # what's planned to be said
@@ -126,6 +138,7 @@ class CurrentContent:
     text_content: str  # starts as None, then fills in if text
 
     def __str__(self):
+        """String representation of the current content."""
         return (
             f"CurrentContent(\n"
             f"  type={self.type.name},\n"
@@ -138,7 +151,7 @@ class CurrentContent:
 class Params(BaseModel):
     """Configuration parameters for AWS Nova Sonic.
 
-    Attributes:
+    Parameters:
         input_sample_rate: Audio input sample rate in Hz.
         input_sample_size: Audio input sample size in bits.
         input_channel_count: Number of input audio channels.
@@ -171,18 +184,6 @@ class AWSNovaSonicLLMService(LLMService):
 
     Provides bidirectional audio streaming, real-time transcription, text generation,
     and function calling capabilities using AWS Nova Sonic model.
-
-    Args:
-        secret_access_key: AWS secret access key for authentication.
-        access_key_id: AWS access key ID for authentication.
-        region: AWS region where the service is hosted.
-        model: Model identifier. Defaults to "amazon.nova-sonic-v1:0".
-        voice_id: Voice ID for speech synthesis. Options: matthew, tiffany, amy.
-        params: Model parameters for audio configuration and inference.
-        system_instruction: System-level instruction for the model.
-        tools: Available tools/functions for the model to use.
-        send_transcription_frames: Whether to emit transcription frames.
-        **kwargs: Additional arguments passed to the parent LLMService.
     """
 
     # Override the default adapter to use the AWSNovaSonicLLMAdapter one
@@ -193,6 +194,7 @@ class AWSNovaSonicLLMService(LLMService):
         *,
         secret_access_key: str,
         access_key_id: str,
+        session_token: Optional[str] = None,
         region: str,
         model: str = "amazon.nova-sonic-v1:0",
         voice_id: str = "matthew",  # matthew, tiffany, amy
@@ -202,9 +204,25 @@ class AWSNovaSonicLLMService(LLMService):
         send_transcription_frames: bool = True,
         **kwargs,
     ):
+        """Initializes the AWS Nova Sonic LLM service.
+
+        Args:
+            secret_access_key: AWS secret access key for authentication.
+            access_key_id: AWS access key ID for authentication.
+            session_token: AWS session token for authentication.
+            region: AWS region where the service is hosted.
+            model: Model identifier. Defaults to "amazon.nova-sonic-v1:0".
+            voice_id: Voice ID for speech synthesis. Options: matthew, tiffany, amy.
+            params: Model parameters for audio configuration and inference.
+            system_instruction: System-level instruction for the model.
+            tools: Available tools/functions for the model to use.
+            send_transcription_frames: Whether to emit transcription frames.
+            **kwargs: Additional arguments passed to the parent LLMService.
+        """
         super().__init__(**kwargs)
         self._secret_access_key = secret_access_key
         self._access_key_id = access_key_id
+        self._session_token = session_token
         self._region = region
         self._model = model
         self._client: Optional[BedrockRuntimeClient] = None
@@ -456,7 +474,6 @@ class AWSNovaSonicLLMService(LLMService):
         # If we need to, send assistant response trigger (depends on self._connected_time)
         if self._triggering_assistant_response:
             await self._send_assistant_response_trigger()
-            self._triggering_assistant_response = False
 
     async def _disconnect(self):
         try:
@@ -508,7 +525,9 @@ class AWSNovaSonicLLMService(LLMService):
             region=self._region,
             aws_credentials_identity_resolver=StaticCredentialsResolver(
                 credentials=AWSCredentialsIdentity(
-                    access_key_id=self._access_key_id, secret_access_key=self._secret_access_key
+                    access_key_id=self._access_key_id,
+                    secret_access_key=self._secret_access_key,
+                    session_token=self._session_token,
                 )
             ),
             http_auth_scheme_resolver=HTTPAuthSchemeResolver(),
@@ -776,9 +795,7 @@ class AWSNovaSonicLLMService(LLMService):
         try:
             while self._stream and not self._disconnecting:
                 output = await self._stream.await_output()
-                result = await asyncio.wait_for(output[1].receive(), timeout=1.0)
-
-                self.reset_watchdog()
+                result = await watchdog_coroutine(output[1].receive(), manager=self.task_manager)
 
                 if result.value and result.value.bytes_:
                     response_data = result.value.bytes_.decode("utf-8")
@@ -807,8 +824,6 @@ class AWSNovaSonicLLMService(LLMService):
                         elif "completionEnd" in event_json:
                             # Handle the LLM completion ending
                             await self._handle_completion_end_event(event_json)
-        except asyncio.TimeoutError:
-            self.reset_watchdog()
         except Exception as e:
             logger.error(f"{self} error processing responses: {e}")
             if self._wants_connection:
@@ -1089,7 +1104,6 @@ class AWSNovaSonicLLMService(LLMService):
         # Send the trigger audio, if we're fully connected and set up
         if self._connected_time is not None:
             await self._send_assistant_response_trigger()
-            self._triggering_assistant_response = False
 
     async def _send_assistant_response_trigger(self):
         if (
@@ -1097,46 +1111,51 @@ class AWSNovaSonicLLMService(LLMService):
         ):  # should never happen
             return
 
-        logger.debug("Sending assistant response trigger...")
+        try:
+            logger.debug("Sending assistant response trigger...")
 
-        chunk_duration = 0.02  # what we might get from InputAudioRawFrame
-        chunk_size = int(
-            chunk_duration
-            * self._params.input_sample_rate
-            * self._params.input_channel_count
-            * (self._params.input_sample_size / 8)
-        )  # e.g. 0.02 seconds of 16-bit (2-byte) PCM mono audio at 16kHz is 640 bytes
+            chunk_duration = 0.02  # what we might get from InputAudioRawFrame
+            chunk_size = int(
+                chunk_duration
+                * self._params.input_sample_rate
+                * self._params.input_channel_count
+                * (self._params.input_sample_size / 8)
+            )  # e.g. 0.02 seconds of 16-bit (2-byte) PCM mono audio at 16kHz is 640 bytes
 
-        # Lead with a bit of blank audio, if needed.
-        # It seems like the LLM can't quite "hear" the first little bit of audio sent on a
-        # connection.
-        current_time = time.time()
-        max_blank_audio_duration = 0.5
-        blank_audio_duration = (
-            max_blank_audio_duration - (current_time - self._connected_time)
-            if self._connected_time is not None
-            and (current_time - self._connected_time) < max_blank_audio_duration
-            else None
-        )
-        if blank_audio_duration:
-            logger.debug(
-                f"Leading assistant response trigger with {blank_audio_duration}s of blank audio"
+            # Lead with a bit of blank audio, if needed.
+            # It seems like the LLM can't quite "hear" the first little bit of audio sent on a
+            # connection.
+            current_time = time.time()
+            max_blank_audio_duration = 0.5
+            blank_audio_duration = (
+                max_blank_audio_duration - (current_time - self._connected_time)
+                if self._connected_time is not None
+                and (current_time - self._connected_time) < max_blank_audio_duration
+                else None
             )
-            blank_audio_chunk = b"\x00" * chunk_size
-            num_chunks = int(blank_audio_duration / chunk_duration)
-            for _ in range(num_chunks):
-                await self._send_user_audio_event(blank_audio_chunk)
-                await asyncio.sleep(chunk_duration)
+            if blank_audio_duration:
+                logger.debug(
+                    f"Leading assistant response trigger with {blank_audio_duration}s of blank audio"
+                )
+                blank_audio_chunk = b"\x00" * chunk_size
+                num_chunks = int(blank_audio_duration / chunk_duration)
+                for _ in range(num_chunks):
+                    await self._send_user_audio_event(blank_audio_chunk)
+                    await asyncio.sleep(chunk_duration)
 
-        # Send trigger audio
-        # NOTE: this audio *will* be transcribed and eventually make it into the context. That's OK:
-        # if we ever need to seed this service again with context it would make sense to include it
-        # since the instruction (i.e. the "wait for the trigger" instruction) will be part of the
-        # context as well.
-        audio_chunks = [
-            self._assistant_response_trigger_audio[i : i + chunk_size]
-            for i in range(0, len(self._assistant_response_trigger_audio), chunk_size)
-        ]
-        for chunk in audio_chunks:
-            await self._send_user_audio_event(chunk)
-            await asyncio.sleep(chunk_duration)
+            # Send trigger audio
+            # NOTE: this audio *will* be transcribed and eventually make it into the context. That's OK:
+            # if we ever need to seed this service again with context it would make sense to include it
+            # since the instruction (i.e. the "wait for the trigger" instruction) will be part of the
+            # context as well.
+            audio_chunks = [
+                self._assistant_response_trigger_audio[i : i + chunk_size]
+                for i in range(0, len(self._assistant_response_trigger_audio), chunk_size)
+            ]
+            for chunk in audio_chunks:
+                await self._send_user_audio_event(chunk)
+                await asyncio.sleep(chunk_duration)
+        finally:
+            # We need to clean up in case sending the trigger was cancelled, e.g. in the case of a user interruption.
+            # (An asyncio.CancelledError would be raised in that case.)
+            self._triggering_assistant_response = False
