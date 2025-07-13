@@ -421,11 +421,13 @@ class FastAPIWebsocketOutputTransport(BaseOutputTransport):
             await self._write_audio_sleep()
             return
 
+        metadata = frame.metadata
         frame = OutputAudioRawFrame(
             audio=frame.audio,
             sample_rate=self.sample_rate,
             num_channels=self._params.audio_out_channels,
         )
+        frame.metadata = metadata
 
         if self._params.add_wav_header:
             with io.BytesIO() as buffer:

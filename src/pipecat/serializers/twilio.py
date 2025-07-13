@@ -128,10 +128,14 @@ class TwilioFrameSerializer(FrameSerializer):
         elif isinstance(frame, AudioRawFrame):
             data = frame.audio
 
-            # Output: Convert PCM at frame's rate to 8kHz μ-law for Twilio
-            serialized_data = await pcm_to_ulaw(
-                data, frame.sample_rate, self._twilio_sample_rate, self._output_resampler
-            )
+            # If we have ulaw in output, don't convert
+            if getattr(frame, "metadata", {}).get("audio_encoding") == "ulaw":
+                serialized_data = data
+            else:
+                # Output: Convert PCM at frame's rate to 8kHz μ-law for Twilio
+                serialized_data = await pcm_to_ulaw(
+                    data, frame.sample_rate, self._twilio_sample_rate, self._output_resampler
+                )
             if serialized_data is None or len(serialized_data) == 0:
                 # Ignoring in case we don't have audio
                 return None
