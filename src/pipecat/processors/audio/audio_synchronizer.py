@@ -4,6 +4,8 @@
 # SPDX-License-Identifier: BSD 2-Clause License
 #
 
+"""Audio synchronizer for merging input and output audio streams."""
+
 import asyncio
 from typing import Callable, Dict, List
 
@@ -33,6 +35,13 @@ class AudioSynchronizer:
         buffer_size: int = 8000,  # 0.5 seconds at 16kHz
         num_channels: int = 1,
     ):
+        """Initialize audio synchronizer.
+
+        Args:
+            sample_rate: The sample rate for audio processing in Hz.
+            buffer_size: Size of buffer before triggering merged audio events.
+            num_channels: Number of channels for merged output (1 for mono, 2 for stereo).
+        """
         self._sample_rate = sample_rate
         self._buffer_size = buffer_size
         self._num_channels = num_channels

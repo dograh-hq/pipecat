@@ -4,6 +4,8 @@
 # SPDX-License-Identifier: BSD 2-Clause License
 #
 
+"""Audio buffer input processor for managing input audio streams."""
+
 import time
 from typing import Optional
 
@@ -47,6 +49,14 @@ class AudioBufferInputProcessor(FrameProcessor):
         enable_turn_audio: bool = False,
         **kwargs,
     ):
+        """Initialize the audio buffer input processor.
+
+        Args:
+            sample_rate: Desired output sample rate. If None, uses source rate.
+            buffer_size: Size of buffer before triggering events. 0 for no buffering.
+            enable_turn_audio: Whether turn audio event handlers should be triggered.
+            **kwargs: Additional keyword arguments passed to FrameProcessor.
+        """
         super().__init__(**kwargs)
         self._init_sample_rate = sample_rate
         self._sample_rate = 0

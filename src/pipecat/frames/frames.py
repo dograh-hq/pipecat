@@ -1259,9 +1259,11 @@ class LLMFullResponseEndFrame(ControlFrame):
 
 @dataclass
 class LLMGeneratedTextFrame(ControlFrame):
-    """Indicates that the LLM has generated some text in the
-    current generation. This can help distinguish between cases when
-    there is content generated along with function call by the LLM."""
+    """Indicates that the LLM has generated some text in the current generation.
+
+    This can help distinguish between cases when there is content generated
+    along with function call by the LLM.
+    """
 
     pass
 

@@ -1,7 +1,7 @@
-"""
+"""Low-level RTP transport for Asterisk externalMedia sessions.
+
 stasis_rtp_client.py
 ~~~~~~~~~~~~~~~~~~~~
-Low-level RTP transport for Asterisk *externalMedia* sessions.
 
 * Sends and receives **proper RTP/UDP** (PT 0 PCMU/μ-law).
 * Uses 20 ms frames (160 bytes payload) by default; automatically
@@ -48,8 +48,9 @@ class _RTPEncoder:
 
 
 class _RTPDecoder:
-    """
-    Very forgiving: latches on the first valid packet and then insists
+    """Very forgiving RTP decoder.
+
+    Latches on the first valid packet and then insists
     that SSRC & PT match afterwards.  Returns *None* if the packet
     should be ignored.
     """
@@ -76,8 +77,7 @@ class _RTPDecoder:
 
 
 class StasisRTPClient:
-    """
-    Low-level wrapper around StasisRTPConnection.
+    """Low-level wrapper around StasisRTPConnection.
 
     Public API
     ──────────
@@ -96,6 +96,12 @@ class StasisRTPClient:
         connection: "StasisRTPConnection",
         callbacks: "StasisRTPCallbacks",
     ):
+        """Initialize Stasis RTP client.
+
+        Args:
+            connection: RTP connection parameters.
+            callbacks: Callback handlers for transport events.
+        """
         from typing import Any
 
         self._connection = connection
@@ -129,9 +135,11 @@ class StasisRTPClient:
     # ─── public helpers ──────────────────────────────────────────
 
     async def setup(self, _):
+        """Setup method for compatibility."""
         self._leave_counter += 1
 
     async def connect(self):
+        """Connect to the RTP socket."""
         if self._connection.is_connected():
             return
         await self._connection.connect()
@@ -139,6 +147,7 @@ class StasisRTPClient:
     async def disconnect(
         self, reason: str = EndTaskReason.UNKNOWN.value, call_transfer_context: dict = {}
     ):
+        """Disconnect from the RTP socket."""
         # Decrement leave counter when disconnect is called
         self._leave_counter -= 1
         if self._leave_counter > 0:
@@ -229,8 +238,8 @@ class StasisRTPClient:
     # ─── receive path ────────────────────────────────────────────
 
     async def receive(self) -> AsyncIterator[bytes]:
-        """
-        Async generator yielding μ-law frames (exactly 160 bytes each).
+        """Async generator yielding μ-law frames (exactly 160 bytes each).
+
         Silently drops any packet whose RTP header does not match our SSRC/PT.
         """
         loop = asyncio.get_running_loop()
@@ -269,8 +278,8 @@ class StasisRTPClient:
     # ─── send path ───────────────────────────────────────────────
 
     async def send(self, data: bytes):
-        """
-        Send μ-law data of arbitrary length.
+        """Send μ-law data of arbitrary length.
+
         Splits/aggregates into 160-byte chunks before RTP-wrapping.
         """
         if self._closing or not self._send_sock:
@@ -292,8 +301,7 @@ class StasisRTPClient:
                 break
 
     def _chunk_ulaw(self, buf: bytes, size: int) -> list[bytes]:
-        """
-        Split / aggregate μ-law bytes to exact *size* multiples.
+        """Split / aggregate μ-law bytes to exact *size* multiples.
 
         • If buf length is not a multiple of *size*, pad the last chunk with 0xFF
         (silence).  That keeps timestamps monotonic.
@@ -309,8 +317,10 @@ class StasisRTPClient:
 
     @property
     def is_connected(self) -> bool:
+        """Check if client is connected."""
         return self._connection.is_connected() and not self._closing
 
     @property
     def is_closing(self) -> bool:
+        """Check if client is closing."""
         return self._closing

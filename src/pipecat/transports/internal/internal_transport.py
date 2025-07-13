@@ -4,6 +4,8 @@
 # SPDX-License-Identifier: BSD 2-Clause License
 #
 
+"""Internal transport for in-memory agent-to-agent communication."""
+
 import asyncio
 import time
 from typing import Dict, Optional, Tuple
@@ -33,6 +35,13 @@ class InternalInputTransport(BaseInputTransport):
     """Input side of internal transport for agent-to-agent communication."""
 
     def __init__(self, transport: Optional["InternalTransport"], params: TransportParams, **kwargs):
+        """Initialize internal input transport.
+
+        Args:
+            transport: The parent InternalTransport instance.
+            params: Transport parameters for configuration.
+            **kwargs: Additional keyword arguments including latency_seconds.
+        """
         # Extract latency configuration before passing to parent
         self._latency_seconds = kwargs.pop("latency_seconds", 0.0)
 
@@ -189,6 +198,12 @@ class InternalOutputTransport(BaseOutputTransport):
     """Output side of internal transport for agent-to-agent communication."""
 
     def __init__(self, params: TransportParams, **kwargs):
+        """Initialize internal output transport.
+
+        Args:
+            params: Transport parameters for configuration.
+            **kwargs: Additional keyword arguments.
+        """
         super().__init__(params, **kwargs)
         self._partner: Optional[InternalInputTransport] = None
         self._serializer = InternalFrameSerializer()
@@ -265,6 +280,12 @@ class InternalTransport(BaseTransport):
     """Internal transport for in-memory agent-to-agent communication."""
 
     def __init__(self, params: TransportParams, **kwargs):
+        """Initialize internal transport.
+
+        Args:
+            params: Transport parameters for configuration.
+            **kwargs: Additional keyword arguments including latency_seconds.
+        """
         # Extract latency configuration before passing to parent
         self._latency_seconds = kwargs.pop("latency_seconds", 0.0)
 
@@ -306,6 +327,7 @@ class InternalTransportManager:
     """Manages multiple internal transport pairs for load testing."""
 
     def __init__(self):
+        """Initialize internal transport manager."""
         self._transport_pairs: Dict[str, Tuple[InternalTransport, InternalTransport]] = {}
 
     def create_transport_pair(
@@ -318,12 +340,14 @@ class InternalTransportManager:
         """Create a connected pair of internal transports.
 
         Args:
-            test_session_id: Unique identifier for the test session
-            actor_params: Transport parameters for the actor
-            adversary_params: Transport parameters for the adversary
-            latency_seconds: Simulated network latency in seconds (default: 0.0)
-        """
+            test_session_id: Unique identifier for the test session.
+            actor_params: Transport parameters for the actor.
+            adversary_params: Transport parameters for the adversary.
+            latency_seconds: Simulated network latency in seconds (default: 0.0).
 
+        Returns:
+            Tuple of (actor_transport, adversary_transport).
+        """
         # Create actor transport with latency
         actor_transport = InternalTransport(
             params=actor_params, name=f"actor-{test_session_id}", latency_seconds=latency_seconds

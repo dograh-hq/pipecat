@@ -33,7 +33,7 @@ class StasisRTPFrameSerializer(FrameSerializer):
     class InputParams(BaseModel):
         """Configuration parameters.
 
-        Attributes
+        Attributes:
         ----------
         stasis_sample_rate : int, default 8000
             The sample-rate used by Stasis when sending μ-law (PCMU).
@@ -46,6 +46,11 @@ class StasisRTPFrameSerializer(FrameSerializer):
         sample_rate: Optional[int] = None
 
     def __init__(self, params: Optional[InputParams] = None):
+        """Initialize Stasis RTP frame serializer.
+
+        Args:
+            params: Optional configuration parameters for the serializer.
+        """
         self._params = params or self.InputParams()
 
         # Wire / pipeline rates
@@ -62,7 +67,6 @@ class StasisRTPFrameSerializer(FrameSerializer):
 
     async def setup(self, frame: StartFrame):
         """Remember pipeline configuration."""
-
         self._sample_rate = self._params.sample_rate or frame.audio_in_sample_rate
 
     async def serialize(self, frame: Frame) -> bytes | str | None:
@@ -72,7 +76,6 @@ class StasisRTPFrameSerializer(FrameSerializer):
         types are silently ignored, allowing higher-level transports to deal
         with them as needed.
         """
-
         if isinstance(frame, AudioRawFrame):
             try:
                 # Check if audio is already μ-law encoded
@@ -101,7 +104,6 @@ class StasisRTPFrameSerializer(FrameSerializer):
         The Stasis media socket delivers bare μ-law bytes, therefore *data*
         must be *bytes*.  Any *str* is ignored.
         """
-
         if not isinstance(data, (bytes, bytearray)):
             return None
 

@@ -1,3 +1,5 @@
+"""Audio recording utilities for debugging and testing."""
+
 import asyncio
 import os
 import tempfile

@@ -43,6 +43,7 @@ class HttpSmartTurnAnalyzer(BaseSmartTurn):
             url: HTTP endpoint URL for the smart turn ML service.
             aiohttp_session: HTTP client session for making requests.
             headers: Optional HTTP headers to include in requests.
+            service_context: Optional service context for request tracking.
             **kwargs: Additional arguments passed to BaseSmartTurn.
         """
         super().__init__(**kwargs)

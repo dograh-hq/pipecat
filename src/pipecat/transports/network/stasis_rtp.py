@@ -1,5 +1,7 @@
 # transports/ari_external_media.py  (new file)
 
+"""Stasis RTP transport for Asterisk External Media integration."""
+
 import asyncio
 import time
 from typing import Awaitable, Callable, Optional
@@ -29,10 +31,14 @@ from pipecat.utils.enums import EndTaskReason
 
 
 class StasisRTPTransportParams(TransportParams):
+    """Transport parameters for Stasis RTP transport."""
+
     serializer: FrameSerializer
 
 
 class StasisRTPCallbacks(BaseModel):
+    """Callbacks for Stasis RTP transport events."""
+
     on_client_connected: Callable[[str], Awaitable[None]]
     on_client_disconnected: Callable[
         [str, Optional[str]], Awaitable[None]
@@ -62,6 +68,8 @@ calls _client.disconnect. Transport's callbacks are sent to the client using Sta
 
 
 class StasisRTPInputTransport(BaseInputTransport):
+    """Input transport for receiving audio over Stasis RTP."""
+
     def __init__(
         self,
         transport: BaseTransport,
@@ -69,6 +77,14 @@ class StasisRTPInputTransport(BaseInputTransport):
         params: StasisRTPTransportParams,
         **kwargs,
     ):
+        """Initialize Stasis RTP input transport.
+
+        Args:
+            transport: Parent transport instance.
+            client: Stasis RTP client for socket communication.
+            params: Transport parameters including serializer.
+            **kwargs: Additional keyword arguments for BaseInputTransport.
+        """
         super().__init__(params, **kwargs)
         self._transport = transport
         self._client = client
@@ -77,6 +93,7 @@ class StasisRTPInputTransport(BaseInputTransport):
         self._receive_task: Optional[asyncio.Task] = None
 
     async def start(self, frame: StartFrame):
+        """Start the input transport."""
         await super().start(frame)
 
         await self._client.setup(frame)
@@ -96,6 +113,7 @@ class StasisRTPInputTransport(BaseInputTransport):
             self._receive_task = None
 
     async def stop(self, frame: EndFrame):
+        """Stop the input transport."""
         await super().stop(frame)
         await self._stop_tasks()
         # Call disconnect on the client when EndFrame is encountered
@@ -105,6 +123,7 @@ class StasisRTPInputTransport(BaseInputTransport):
         )
 
     async def cancel(self, frame: CancelFrame):
+        """Cancel the input transport."""
         await super().cancel(frame)
         await self._stop_tasks()
         # Call disconnect on the client when CancelFrame is encountered
@@ -129,6 +148,7 @@ class StasisRTPInputTransport(BaseInputTransport):
 
     # No app-messages in RTP path, but keep compatibility
     async def push_app_message(self, message):
+        """Push app message (not supported in RTP transport)."""
         logger.debug("StasisRTPInputTransport received app message ignored (RTP only)")
 
 
@@ -136,6 +156,8 @@ class StasisRTPInputTransport(BaseInputTransport):
 
 
 class StasisRTPOutputTransport(BaseOutputTransport):
+    """Output transport for sending audio over Stasis RTP."""
+
     def __init__(
         self,
         transport: BaseTransport,
@@ -143,6 +165,14 @@ class StasisRTPOutputTransport(BaseOutputTransport):
         params: StasisRTPTransportParams,
         **kwargs,
     ):
+        """Initialize Stasis RTP output transport.
+
+        Args:
+            transport: Parent transport instance.
+            client: Stasis RTP client for socket communication.
+            params: Transport parameters including serializer.
+            **kwargs: Additional keyword arguments for BaseOutputTransport.
+        """
         super().__init__(params, **kwargs)
 
         self._transport = transport
@@ -154,6 +184,7 @@ class StasisRTPOutputTransport(BaseOutputTransport):
         self._next_send_time: float = 0
 
     async def start(self, frame: StartFrame):
+        """Start the output transport."""
         await super().start(frame)
 
         await self._client.setup(frame)
@@ -164,6 +195,7 @@ class StasisRTPOutputTransport(BaseOutputTransport):
         await self.set_transport_ready(frame)
 
     async def stop(self, frame: EndFrame):
+        """Stop the output transport."""
         await super().stop(frame)
 
         # Call disconnect on the client when EndFrame is encountered
@@ -174,6 +206,7 @@ class StasisRTPOutputTransport(BaseOutputTransport):
         )
 
     async def cancel(self, frame: CancelFrame):
+        """Cancel the output transport."""
         await super().cancel(frame)
         # Call disconnect on the client when CancelFrame is encountered
         await self._client.disconnect(
@@ -182,10 +215,12 @@ class StasisRTPOutputTransport(BaseOutputTransport):
         )
 
     async def send_message(self, frame: TransportMessageFrame | TransportMessageUrgentFrame):
+        """Send message frame (not supported in RTP transport)."""
         # RTP path has no generic message channel; ignore.
         pass
 
     async def write_audio_frame(self, frame: OutputAudioRawFrame):
+        """Write audio frame to RTP stream."""
         if self._client.is_closing:
             return
 
@@ -201,8 +236,7 @@ class StasisRTPOutputTransport(BaseOutputTransport):
         await self._write_audio_sleep()
 
     async def _write_audio_sleep(self):
-        """
-        Simulates real-time audio playback timing by introducing controlled delays.
+        """Simulates real-time audio playback timing by introducing controlled delays.
 
         This method implements a clock simulation to pace audio transmission at realistic
         intervals. Without this pacing, audio frames would be sent as fast as possible,
@@ -227,6 +261,8 @@ class StasisRTPOutputTransport(BaseOutputTransport):
 
 
 class StasisRTPTransport(BaseTransport):
+    """Main transport class for Stasis RTP communication."""
+
     def __init__(
         self,
         stasis_connection: StasisRTPConnection,
@@ -234,6 +270,14 @@ class StasisRTPTransport(BaseTransport):
         input_name: Optional[str] = None,
         output_name: Optional[str] = None,
     ):
+        """Initialize Stasis RTP transport.
+
+        Args:
+            stasis_connection: Connection parameters for Stasis RTP.
+            params: Transport parameters including serializer.
+            input_name: Optional name for input transport.
+            output_name: Optional name for output transport.
+        """
         super().__init__(input_name=input_name, output_name=output_name)
 
         self._params = params
@@ -259,9 +303,11 @@ class StasisRTPTransport(BaseTransport):
         self._register_event_handler("on_client_closed")
 
     def input(self) -> StasisRTPInputTransport:
+        """Get the input transport."""
         return self._input
 
     def output(self) -> StasisRTPOutputTransport:
+        """Get the output transport."""
         return self._output
 
     # ------------------------------------------------ event adapters ----------

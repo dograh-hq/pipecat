@@ -4,6 +4,8 @@
 # SPDX-License-Identifier: BSD 2-Clause License
 #
 
+"""Silence audio mixer implementation."""
+
 from pipecat.audio.mixers.base_audio_mixer import BaseAudioMixer
 from pipecat.frames.frames import MixerControlFrame
 
@@ -17,6 +19,7 @@ class SilenceAudioMixer(BaseAudioMixer):
     """
 
     def __init__(self):
+        """Initialize the silence audio mixer."""
         self._enabled = True
 
     async def start(self, sample_rate: int):

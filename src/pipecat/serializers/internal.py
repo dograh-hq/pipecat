@@ -4,6 +4,8 @@
 # SPDX-License-Identifier: BSD 2-Clause License
 #
 
+"""Internal frame serializer for agent-to-agent communication."""
+
 from typing import Optional
 
 from loguru import logger

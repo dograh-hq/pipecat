@@ -794,7 +794,7 @@ class LLMAssistantContextAggregator(LLMContextResponseAggregator):
             aggregation: The aggregated assistant text to add as an assistant message.
         """
         text_msg_index = len(self._context.get_messages())
-        
+
         self._context.add_message({"role": "assistant", "content": aggregation})
 
         # IMMEDIATELY reorder if we have function messages from same response
@@ -804,8 +804,7 @@ class LLMAssistantContextAggregator(LLMContextResponseAggregator):
             self._cleanup_response_session(self._current_llm_response_id)
 
     async def _reorder_context_for_response(self, response_id: str, text_msg_index: int):
-        """Reorder context so text message comes before function messages from same response"""
-
+        """Reorder context so text message comes before function messages from same response."""
         tracked_ids = self._response_function_messages.get(response_id)
         if not tracked_ids:
             return  # Nothing to reorder
@@ -939,9 +938,8 @@ class LLMAssistantContextAggregator(LLMContextResponseAggregator):
 
     async def push_aggregation(self):
         """Push the current assistant aggregation with timestamp."""
-        
         logger.debug(f"{self} push_aggregation called, aggregation: {self._aggregation}")
-        
+
         if not self._aggregation:
             return
 
@@ -1061,7 +1059,7 @@ class LLMAssistantContextAggregator(LLMContextResponseAggregator):
         await self.push_context_frame(FrameDirection.UPSTREAM)
 
     def _cleanup_response_session(self, response_id: str):
-        """Clean up response session without relying on end frames"""
+        """Clean up response session without relying on end frames."""
         if response_id in self._response_function_messages:
             del self._response_function_messages[response_id]
         if self._current_llm_response_id == response_id:

@@ -124,13 +124,14 @@ def output_format_from_sample_rate(sample_rate: int, use_ulaw: bool = False) -> 
 
     Args:
         sample_rate: The audio sample rate in Hz.
+        use_ulaw: Whether to use μ-law encoding for 8kHz audio.
 
     Returns:
         The ElevenLabs output format string.
     """
     if use_ulaw and sample_rate == 8000:
         return "ulaw_8000"
-    
+
     match sample_rate:
         case 8000:
             return "pcm_8000"

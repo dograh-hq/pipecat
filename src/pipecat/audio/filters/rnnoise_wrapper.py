@@ -4,6 +4,8 @@
 # SPDX-License-Identifier: BSD 2-Clause License
 #
 
+"""Python wrapper for RNNoise C library."""
+
 import ctypes
 import os
 from ctypes import POINTER, c_char_p, c_float, c_int, c_void_p

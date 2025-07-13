@@ -4,6 +4,8 @@
 # SPDX-License-Identifier: BSD 2-Clause License
 #
 
+"""RNNoise filter for audio noise reduction."""
+
 import ctypes
 from ctypes import POINTER, c_float
 from typing import Optional
@@ -39,6 +41,7 @@ class RNNoiseFilter(BaseAudioFilter):
             model_path: Path to custom RNNoise model. If None, uses default model.
             library_path: Path to librnnoise.so. If None, searches common paths.
             target_sample_rate: Sample rate for RNNoise processing (should be 48000).
+            **kwargs: Additional keyword arguments passed to the parent class.
         """
         super().__init__()
 

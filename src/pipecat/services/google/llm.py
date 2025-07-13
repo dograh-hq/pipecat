@@ -237,7 +237,6 @@ class GoogleAssistantContextAggregator(OpenAIAssistantContextAggregator):
         rebuild the message list while simultaneously updating bookkeeping
         structures. This lowers both cognitive and computational complexity.
         """
-
         # Lets not reorder if interrupted, so that the last thing the model
         # sees is assistant message getting interrupted
         SHOULD_REORDER = False

@@ -409,8 +409,7 @@ class SmallWebRTCClient:
 
     async def disconnect(self):
         """Disconnect from the WebRTC peer."""
-        
-        # We typically end up here in case of local disconnect. 
+        # We typically end up here in case of local disconnect.
         self._leave_counter -= 1
         if self._leave_counter > 0:
             return
@@ -846,4 +845,3 @@ class SmallWebRTCTransport(BaseTransport):
     async def _on_client_disconnected(self, webrtc_connection, reason: Optional[str] = None):
         """Handle client disconnection events."""
         await self._call_event_handler("on_client_disconnected", webrtc_connection, reason)
-    

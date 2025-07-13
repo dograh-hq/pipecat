@@ -391,7 +391,7 @@ class SmallWebRTCConnection(BaseObject):
             track: The new audio track to use for sending.
         """
         logger.debug(f"Replacing audio track {track.kind}")
-        
+
         # Transceivers always appear in creation-order for both peers
         # For now we are only considering that we are going to have 02 transceivers,
         # one for audio and one for video

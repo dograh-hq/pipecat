@@ -15,7 +15,13 @@ import time
 from typing import Optional
 
 from loguru import logger
-from pipecat.audio.utils import create_stream_resampler, interleave_stereo_audio, mix_audio, ulaw_to_pcm
+
+from pipecat.audio.utils import (
+    create_stream_resampler,
+    interleave_stereo_audio,
+    mix_audio,
+    ulaw_to_pcm,
+)
 from pipecat.frames.frames import (
     BotStartedSpeakingFrame,
     BotStoppedSpeakingFrame,
@@ -308,15 +314,14 @@ class AudioBufferProcessor(FrameProcessor):
         self._bot_audio_buffer = bytearray()
         self._user_turn_audio_buffer = bytearray()
         self._bot_turn_audio_buffer = bytearray()
-    
+
     async def _resample_input_audio(self, frame: InputAudioRawFrame) -> bytes:
         """Resample audio frame to the target sample rate."""
-        
         # Decode μ-law if required
         target_rate = self._sample_rate or frame.sample_rate
         if getattr(frame, "metadata", {}).get("audio_encoding") == "ulaw":
             return await ulaw_to_pcm(frame.audio, frame.sample_rate, target_rate, self._resampler)
-        
+
         return await self._input_resampler.resample(
             frame.audio, frame.sample_rate, self._sample_rate
         )

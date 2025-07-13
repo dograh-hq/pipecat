@@ -1,3 +1,5 @@
+"""Stasis RTP connection management for Asterisk External Media."""
+
 import asyncio
 import json
 import os
@@ -17,8 +19,9 @@ from pipecat.utils.enums import EndTaskReason
 
 
 class StasisRTPConnection(BaseObject):
-    """Represents the server-side view of a single RTP call coming from
-    Asterisk using *externalMedia*.
+    """Represents the server-side view of a single RTP call from Asterisk.
+
+    Uses Asterisk *externalMedia* for RTP communication.
 
     Lifecycle
     =========
@@ -54,6 +57,14 @@ class StasisRTPConnection(BaseObject):
         host: str,
         port: int,
     ) -> None:
+        """Initialize Stasis RTP connection.
+
+        Args:
+            ari_client: ARI client for Asterisk communication.
+            caller_channel: The caller's channel object.
+            host: Host address for RTP transport.
+            port: Port number for RTP transport.
+        """
         super().__init__()
 
         # External dependencies.
@@ -132,7 +143,6 @@ class StasisRTPConnection(BaseObject):
         immediately if the underlying bridge has already been formed, or later
         once `_setup_call` completes).
         """
-
         self._connect_invoked = True
 
         # If the call has already reached the *connected* state we can dispatch
@@ -145,9 +155,11 @@ class StasisRTPConnection(BaseObject):
     # ------------------------------------------------------------------
 
     def is_connected(self) -> bool:
-        """Return *True* once the call is established **and** `connect()` has been
-        invoked by the user (same semantics as `SmallWebRTCConnection`)."""
+        """Check if the connection is established.
 
+        Return *True* once the call is established **and** `connect()` has been
+        invoked by the user (same semantics as `SmallWebRTCConnection`).
+        """
         return self._connect_invoked and self._is_connected and not self._closed
 
     # ------------------------------------------------------------------
@@ -156,7 +168,6 @@ class StasisRTPConnection(BaseObject):
 
     async def _setup_call(self, host: str, port: int):
         """Create externalMedia + bridge and notify that the call is connected."""
-
         try:
             em_channel_id = str(uuid.uuid4())
 
@@ -261,6 +272,7 @@ class StasisRTPConnection(BaseObject):
     # ------------------------------------------------------------------
 
     def __repr__(self):
+        """Return string representation of connection."""
         return (
             f"<StasisRTPConnection id={self.id} caller={self.caller_channel.id} "
             f"em={getattr(self.em_channel, 'id', None)} state={'closed' if self._closed else 'open'}>"

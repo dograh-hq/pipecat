@@ -4,6 +4,8 @@
 # SPDX-License-Identifier: BSD 2-Clause License
 #
 
+"""Bot idle processor for monitoring bot inactivity after user interactions."""
+
 import asyncio
 from typing import Awaitable, Callable
 
@@ -47,6 +49,14 @@ class BotIdleProcessor(FrameProcessor):
         timeout: float,
         **kwargs,
     ):
+        """Initialize bot idle processor.
+
+        Args:
+            callback: Function to call when bot is idle after user stops speaking.
+                Signature: callback(processor) -> None.
+            timeout: Seconds to wait after user stops speaking before considering bot idle.
+            **kwargs: Additional arguments passed to parent FrameProcessor.
+        """
         super().__init__(**kwargs)
         self._callback = callback
         self._timeout = timeout

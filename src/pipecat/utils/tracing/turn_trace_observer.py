@@ -12,8 +12,8 @@ turn, integrating with the turn tracking system to provide hierarchical tracing
 of conversation flows.
 """
 
-from typing import TYPE_CHECKING, Dict, Optional
 import time
+from typing import TYPE_CHECKING, Dict, Optional
 
 from loguru import logger
 
@@ -109,7 +109,6 @@ class TurnTraceObserver(BaseObserver):
         Args:
             data: The frame push event data.
         """
-
         # If tracing is not available or no active turn span, do nothing
         if not (is_tracing_available() and self._current_span and self._tracer):
             return

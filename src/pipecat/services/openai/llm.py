@@ -241,7 +241,6 @@ class OpenAIAssistantContextAggregator(LLMAssistantContextAggregator):
         2. Building the filtered message list **and** computing the remaining
            tracked ids in a single second pass.
         """
-
         # Lets not reorder if interrupted, so that the last thing the model
         # sees is assistant message getting interrupted
         SHOULD_REORDER = False
