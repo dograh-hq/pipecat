@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from opentelemetry import trace
 
 from pipecat.processors.frame_processor import FrameDirection
+from pipecat.utils.tracing.context_registry import get_current_turn_context
 from pipecat.utils.tracing.service_attributes import (
     add_gemini_live_span_attributes,
     add_llm_span_attributes,
@@ -33,7 +34,6 @@ from pipecat.utils.tracing.service_attributes import (
     add_tts_span_attributes,
 )
 from pipecat.utils.tracing.setup import is_tracing_available
-from pipecat.utils.tracing.turn_context_provider import get_current_turn_context
 
 if is_tracing_available():
     from opentelemetry import context as context_api
