@@ -5,6 +5,7 @@
 #
 
 """Local PyTorch turn analyzer for on-device ML inference using the smart-turn-v2 model.
+
 This module provides a smart turn analyzer that uses PyTorch models for
 local end-of-turn detection without requiring network connectivity.
 """
@@ -36,6 +37,7 @@ except ModuleNotFoundError as e:
 
 class LocalSmartTurnAnalyzerV2(BaseSmartTurn):
     """Local turn analyzer using the smart-turn-v2 PyTorch model.
+
     Provides end-of-turn detection using locally-stored PyTorch models,
     enabling offline operation without network dependencies. Uses
     Wav2Vec2 architecture for audio sequence classification.
@@ -43,6 +45,7 @@ class LocalSmartTurnAnalyzerV2(BaseSmartTurn):
 
     def __init__(self, *, smart_turn_model_path: str, **kwargs):
         """Initialize the local PyTorch smart-turn-v2 analyzer.
+
         Args:
             smart_turn_model_path: Path to directory containing the PyTorch model
                 and feature extractor files. If empty, uses default HuggingFace model.

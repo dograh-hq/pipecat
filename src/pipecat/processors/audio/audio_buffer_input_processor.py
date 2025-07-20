@@ -197,9 +197,13 @@ class AudioBufferInputProcessor(FrameProcessor):
 
     def _compute_silence(self, from_time: float) -> bytes:
         quiet_time = time.time() - from_time
-        # Introduce silence only if there's a big enough gap of 1s
-        if from_time == 0 or quiet_time < 1.0:
+        # Introduce silence only if there's a big enough gap of 2s
+        # Currently, smart turn analysis can sometimes block passing of audio
+        # data to pipeline and can cause delay here.
+        if from_time == 0 or quiet_time < 2.0:
             return b""
+
+        logger.warning(f"Adding silence of length {quiet_time} seconds for AudioBufferInputProcessor")
         num_bytes = int(quiet_time * self._sample_rate) * 2
         silence = b"\x00" * num_bytes
         return silence

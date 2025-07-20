@@ -48,7 +48,6 @@ class AudioSynchronizer:
 
         self._input_buffer = bytearray()
         self._output_buffer = bytearray()
-        self._lock = asyncio.Lock()
 
         self._event_handlers: Dict[str, List[Callable]] = {"on_merged_audio": []}
         self._resampler = create_default_resampler()
@@ -106,21 +105,13 @@ class AudioSynchronizer:
         if not self._recording:
             return
 
-        async with self._lock:
-            # Resample if necessary
-            if sample_rate != self._sample_rate:
-                logger.trace(
-                    f"AudioSynchronizer: Resampling input from {sample_rate}Hz to {self._sample_rate}Hz"
-                )
-                pcm = await self._resampler.resample(pcm, sample_rate, self._sample_rate)
+        # Add audio
+        self._input_buffer.extend(pcm)
+        logger.trace(f"AudioSynchronizer: Input buffer size: {len(self._input_buffer)}")
 
-            # Add audio
-            self._input_buffer.extend(pcm)
-            logger.trace(f"AudioSynchronizer: Input buffer size: {len(self._input_buffer)}")
-
-            # Check if we should emit
-            if self._buffer_size > 0 and len(self._input_buffer) > self._buffer_size:
-                await self._call_audio_handler()
+        # Check if we should emit
+        if self._buffer_size > 0 and len(self._input_buffer) > self._buffer_size:
+            await self._call_audio_handler()
 
     async def _handle_output_audio(
         self, processor, pcm: bytes, sample_rate: int, num_channels: int
@@ -129,17 +120,9 @@ class AudioSynchronizer:
         if not self._recording:
             return
 
-        async with self._lock:
-            # Resample if necessary
-            if sample_rate != self._sample_rate:
-                logger.trace(
-                    f"AudioSynchronizer: Resampling output from {sample_rate}Hz to {self._sample_rate}Hz"
-                )
-                pcm = await self._resampler.resample(pcm, sample_rate, self._sample_rate)
-
-            # Add audio
-            self._output_buffer.extend(pcm)
-            logger.trace(f"AudioSynchronizer: Output buffer size: {len(self._output_buffer)}")
+        # Add audio
+        self._output_buffer.extend(pcm)
+        logger.trace(f"AudioSynchronizer: Output buffer size: {len(self._output_buffer)}")
 
     async def _call_audio_handler(self):
         """Call the audio data event handler with merged audio."""
