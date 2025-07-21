@@ -938,10 +938,10 @@ class LLMAssistantContextAggregator(LLMContextResponseAggregator):
 
     async def push_aggregation(self):
         """Push the current assistant aggregation with timestamp."""
-        logger.debug(f"{self} push_aggregation called, aggregation: {self._aggregation}")
-
         if not self._aggregation:
             return
+        
+        logger.debug(f"{self} push_aggregation called, aggregation: {self._aggregation}")
 
         aggregation = self._aggregation.strip()
         await self.reset()
