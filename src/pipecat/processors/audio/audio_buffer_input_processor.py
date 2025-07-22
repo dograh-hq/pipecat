@@ -203,7 +203,9 @@ class AudioBufferInputProcessor(FrameProcessor):
         if from_time == 0 or quiet_time < 2.0:
             return b""
 
-        logger.warning(f"Adding silence of length {quiet_time} seconds for AudioBufferInputProcessor")
+        logger.warning(
+            f"Adding silence of length {quiet_time} seconds for AudioBufferInputProcessor"
+        )
         num_bytes = int(quiet_time * self._sample_rate) * 2
         silence = b"\x00" * num_bytes
         return silence

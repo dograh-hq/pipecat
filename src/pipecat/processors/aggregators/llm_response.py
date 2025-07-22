@@ -15,7 +15,7 @@ import asyncio
 import uuid
 from abc import abstractmethod
 from dataclasses import dataclass
-from typing import Dict, List, Literal, Optional, Set
+from typing import Callable, Dict, List, Literal, Optional, Set
 
 from loguru import logger
 
@@ -87,9 +87,12 @@ class LLMAssistantAggregatorParams:
     Parameters:
         expect_stripped_words: Whether to expect and handle stripped words
             in text frames by adding spaces between tokens.
+        correct_aggregation_callback: Optional callback to correct corrupted
+            TTS text before it's added to the conversation context.
     """
 
     expect_stripped_words: bool = True
+    correct_aggregation_callback: Optional[Callable[[str], str]] = None
 
 
 class LLMFullResponseAggregator(FrameProcessor):
@@ -940,10 +943,19 @@ class LLMAssistantContextAggregator(LLMContextResponseAggregator):
         """Push the current assistant aggregation with timestamp."""
         if not self._aggregation:
             return
-        
+
         logger.debug(f"{self} push_aggregation called, aggregation: {self._aggregation}")
 
+        # Note: self._aggregation contains text from TTS (not direct LLM output)
         aggregation = self._aggregation.strip()
+
+        # Apply correction if callback is provided
+        if aggregation and self._params.correct_aggregation_callback:
+            try:
+                aggregation = self._params.correct_aggregation_callback(aggregation)
+            except Exception as e:
+                logger.error(f"Error in aggregation correction callback: {e}")
+
         await self.reset()
 
         if aggregation:

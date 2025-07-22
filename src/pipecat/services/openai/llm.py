@@ -312,6 +312,14 @@ class OpenAIAssistantContextAggregator(LLMAssistantContextAggregator):
         # Add interruption marker & eventual reordering of remaining messages
         # ------------------------------------------------------------------
         content_to_add = self._aggregation.strip() if self._aggregation else ""
+
+        # Apply correction if callback is provided and we have content
+        if content_to_add and self._params.correct_aggregation_callback:
+            try:
+                content_to_add = self._params.correct_aggregation_callback(content_to_add)
+            except Exception as e:
+                logger.error(f"Error in aggregation correction callback during interruption: {e}")
+
         if content_to_add:
             content_to_add += " <<interrupted_by_user>>"
             text_msg_index = len(self._context.get_messages())
