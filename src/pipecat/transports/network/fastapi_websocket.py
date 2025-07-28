@@ -132,12 +132,18 @@ class FastAPIWebsocketClient:
             logger.warning(
                 f"Exception sending data: {e.__class__.__name__}, application_state: {self._websocket.application_state}"
             )
-            if self._websocket.application_state == WebSocketState.DISCONNECTED:
+            if (
+                not self.is_closing
+                and self._websocket.application_state == WebSocketState.DISCONNECTED
+            ):
                 self._closing = True
-                await self.trigger_client_disconnected(EndTaskReason.SYSTEM_CONNECT_ERROR.value)
+                await self.trigger_client_disconnected(EndTaskReason.USER_HANGUP.value)
 
     async def disconnect(self):
         """Disconnect the WebSocket client."""
+        logger.debug(
+            f"In FastAPIWebsocketClient disconnect leave_counter:{self._leave_counter} is_connected:{self.is_connected} is_closing:{self.is_closing}"
+        )
         self._leave_counter -= 1
         if self._leave_counter > 0:
             return
@@ -145,10 +151,13 @@ class FastAPIWebsocketClient:
         if self.is_connected and not self.is_closing:
             self._closing = True
             await self._websocket.close()
-            await self.trigger_client_disconnected()
+            await self.trigger_client_disconnected(EndTaskReason.SYSTEM_CANCELLED.value)
 
     async def trigger_client_disconnected(self, reason: Optional[str] = None):
         """Trigger the client disconnected callback."""
+        logger.debug(
+            f"In FastAPIWebsocketClient.trigger_client_disconnected, disconnect reason: {reason}"
+        )
         reason = reason or EndTaskReason.USER_HANGUP.value
         await self._callbacks.on_client_disconnected(self._websocket, reason)
 
@@ -295,7 +304,12 @@ class FastAPIWebsocketInputTransport(BaseInputTransport):
                 f"{self} exception receiving data: {e.__class__.__name__} ({e}). Will trigger disconnect"
             )
 
-        await self._client.trigger_client_disconnected()
+        if not self._client.is_closing:
+            logger.debug(
+                "Triggering disconnect from FastAPIWebsocketInputTransport._receive_messages"
+            )
+            self._client._closing = True
+            await self._client.trigger_client_disconnected(EndTaskReason.USER_HANGUP.value)
 
     async def _monitor_websocket(self):
         """Wait for self._params.session_timeout seconds, if the websocket is still open, trigger timeout event."""
