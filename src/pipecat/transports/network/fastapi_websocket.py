@@ -150,7 +150,12 @@ class FastAPIWebsocketClient:
 
         if self.is_connected and not self.is_closing:
             self._closing = True
-            await self._websocket.close()
+            try:
+                await asyncio.wait_for(self._websocket.close(), timeout=1.0)
+            except asyncio.TimeoutError:
+                logger.warning("Timeout while closing WebSocket connection")
+            except Exception as e:
+                logger.warning(f"Error while closing WebSocket: {e}")
             await self.trigger_client_disconnected(EndTaskReason.SYSTEM_CANCELLED.value)
 
     async def trigger_client_disconnected(self, reason: Optional[str] = None):

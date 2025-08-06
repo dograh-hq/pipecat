@@ -95,8 +95,10 @@ class RNNoiseFilter(BaseAudioFilter):
             )
             self._upsample_factor = 1
             self._need_resampling = False
-            
-        logger.debug(f"RNNOiseFilter - sample_rate: {self._input_sample_rate} upsample_factor: {self._upsample_factor}")
+
+        logger.debug(
+            f"RNNOiseFilter - sample_rate: {self._input_sample_rate} upsample_factor: {self._upsample_factor}"
+        )
 
         # Create RNNoise state
         try:
