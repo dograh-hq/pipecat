@@ -46,8 +46,15 @@ class AudioSynchronizer:
         self._buffer_size = buffer_size
         self._num_channels = num_channels
 
-        self._input_buffer = bytearray()
-        self._output_buffer = bytearray()
+        # CORE AUDIO BUFFERS: Store incoming audio data
+        self._input_buffer = bytearray()   # User microphone audio
+        self._output_buffer = bytearray()  # Bot TTS audio
+
+        # BUFFER SIZE LIMITS: Prevent memory issues from runaway accumulation
+        # Maximum allowed buffer size before emergency cleanup (10x normal buffer)
+        self._max_buffer_size = buffer_size * 10
+        # Warning threshold for detecting accumulation issues (5x normal buffer) 
+        self._warning_buffer_size = buffer_size * 5
 
         self._event_handlers: Dict[str, List[Callable]] = {"on_merged_audio": []}
         self._resampler = create_default_resampler()
@@ -55,7 +62,7 @@ class AudioSynchronizer:
         self._input_processor = None
         self._output_processor = None
 
-        # Track if we're currently recording
+        # RECORDING STATE: Track if we're currently recording audio
         self._recording = False
 
     def register_processors(self, input_processor, output_processor):
@@ -105,11 +112,14 @@ class AudioSynchronizer:
         if not self._recording:
             return
 
-        # Add audio
+        # Add audio to input buffer
         self._input_buffer.extend(pcm)
         logger.trace(f"AudioSynchronizer: Input buffer size: {len(self._input_buffer)}")
 
-        # Check if we should emit
+        # BUFFER LIMIT ENFORCEMENT: Check for emergency cleanup conditions
+        await self._check_buffer_limits()
+
+        # STANDARD PROCESSING: Check if we should emit based on normal threshold
         if self._buffer_size > 0 and len(self._input_buffer) > self._buffer_size:
             await self._call_audio_handler()
 
@@ -120,9 +130,22 @@ class AudioSynchronizer:
         if not self._recording:
             return
 
-        # Add audio
+        # Add audio to output buffer
         self._output_buffer.extend(pcm)
         logger.trace(f"AudioSynchronizer: Output buffer size: {len(self._output_buffer)}")
+
+        # BUFFER LIMIT ENFORCEMENT: Check for emergency cleanup conditions
+        await self._check_buffer_limits()
+
+        # CRITICAL FIX: Add symmetric triggering for output buffer
+        # 
+        # PROBLEM: Previously, only input buffer could trigger audio merging.
+        # Output buffer would accumulate indefinitely, causing exponential growth.
+        #
+        # SOLUTION: Now both input AND output buffers can trigger merging when they
+        # exceed the threshold, ensuring balanced processing and preventing accumulation.
+        if self._buffer_size > 0 and len(self._output_buffer) > self._buffer_size:
+            await self._call_audio_handler()
 
     async def _call_audio_handler(self):
         """Call the audio data event handler with merged audio."""
@@ -132,35 +155,83 @@ class AudioSynchronizer:
             )
             return
 
-        # Determine how much we can merge (minimum of both buffers)
-        merge_size = min(len(self._input_buffer), len(self._output_buffer))
+        # ENHANCED BUFFER PROCESSING: Prevent accumulation with better monitoring
+        #
+        # STEP 1: Capture current buffer states for analysis
+        input_size = len(self._input_buffer)
+        output_size = len(self._output_buffer)
+        
+        # STEP 2: Log buffer states to track accumulation patterns
+        # This helps identify when buffers become unbalanced
+        logger.debug(f"AudioSynchronizer: Processing buffers - input={input_size}, output={output_size}")
+        
+        # STEP 3: Calculate merge size using minimum of both buffers
+        # WHY: We can only merge audio when we have data from BOTH user and bot
+        # This is the core synchronization logic
+        merge_size = min(input_size, output_size)
 
-        # Ensure even size for 16-bit audio
+        # STEP 4: Ensure even byte alignment for 16-bit audio samples
+        # WHY: Audio samples are 2 bytes each, odd numbers would corrupt audio
         if merge_size % 2 != 0:
             merge_size -= 1
 
+        # STEP 5: Handle edge case where no merging is possible
         if merge_size == 0:
+            # EARLY WARNING SYSTEM: Detect buffer imbalances before they become critical
+            # If one buffer is much larger than normal while other is empty,
+            # this indicates the accumulation problem is occurring
+            max_buffer_size = max(input_size, output_size)
+            if max_buffer_size > self._buffer_size * 2:  # More than 2x normal buffer size
+                logger.warning(
+                    f"AudioSynchronizer: Large buffer accumulation detected! "
+                    f"input={input_size}, output={output_size}, threshold={self._buffer_size}"
+                )
             return
 
-        # Extract equal amounts from both buffers
+        # STEP 6: Extract synchronized audio chunks from both buffers
+        # We take exactly the same amount from each buffer to maintain sync
         input_chunk = bytes(self._input_buffer[:merge_size])
         output_chunk = bytes(self._output_buffer[:merge_size])
 
-        # Remove processed data from buffers
+        # STEP 7: Remove processed data from buffers (sliding window approach)
+        # CRITICAL: This is where residual data can remain if buffers are unequal
+        # After this operation, larger buffer will have leftover data
         self._input_buffer = self._input_buffer[merge_size:]
         self._output_buffer = self._output_buffer[merge_size:]
 
-        # Merge the chunks
+        # STEP 8: Merge the synchronized audio chunks based on channel configuration
+        # MONO (1 channel): Mix user and bot audio together (additive)
+        # STEREO (2 channels): User on left channel, bot on right channel
         if self._num_channels == 1:
-            merged_audio = mix_audio(input_chunk, output_chunk)
+            merged_audio = mix_audio(input_chunk, output_chunk)  # Additive mixing
         elif self._num_channels == 2:
-            merged_audio = interleave_stereo_audio(input_chunk, output_chunk)
+            merged_audio = interleave_stereo_audio(input_chunk, output_chunk)  # Stereo separation
         else:
-            merged_audio = b""
+            merged_audio = b""  # Fallback for unsupported channel configs
 
+        # STEP 9: Emit the merged audio to registered handlers
+        # This sends the synchronized audio to the InMemoryAudioBuffer for recording
         await self._emit_event(
             "on_merged_audio", merged_audio, self._sample_rate, self._num_channels
         )
+        
+        # STEP 10: POST-MERGE MONITORING - Check for continued accumulation
+        # After processing, check if buffers are still critically large
+        # This catches cases where the accumulation problem persists
+        remaining_input = len(self._input_buffer)
+        remaining_output = len(self._output_buffer)
+        
+        # RECURSIVE PROCESSING: If buffers are still very large (3x normal),
+        # attempt additional processing to drain them
+        if remaining_input > self._buffer_size * 3 or remaining_output > self._buffer_size * 3:
+            logger.warning(
+                f"AudioSynchronizer: Post-merge buffer accumulation still high! "
+                f"remaining_input={remaining_input}, remaining_output={remaining_output}"
+            )
+            # Attempt recursive processing if both buffers still have data
+            # This prevents runaway accumulation by processing multiple chunks in one cycle
+            if self._has_audio():
+                await self._call_audio_handler()
 
     def _reset_buffers(self):
         """Reset all audio buffers to empty state."""
@@ -211,6 +282,109 @@ class AudioSynchronizer:
         return decorator
 
     def clear_buffers(self):
-        """Clear all internal audio buffers."""
+        """Clear all internal audio buffers.
+        
+        PURPOSE: Complete buffer reset - used when starting new recording sessions
+        or when forced cleanup is needed.
+        """
+        logger.debug(f"AudioSynchronizer: Clearing buffers - input={len(self._input_buffer)}, output={len(self._output_buffer)}")
         self._input_buffer.clear()
         self._output_buffer.clear()
+
+    async def flush_buffers_at_turn_boundary(self):
+        """TURN BOUNDARY CLEANUP: Force flush remaining audio to prevent cross-turn contamination.
+        
+        PROBLEM: Audio data can accumulate across conversation turns, causing:
+        - Previous turn's audio bleeding into new turn's recording
+        - User and bot speech appearing to overlap when they didn't
+        - Exponential buffer growth across multiple turns
+        
+        SOLUTION: At the end of each conversation turn, this method:
+        1. Processes any remaining synchronized audio
+        2. Flushes unmatched audio with silence padding
+        3. Completely clears buffers for clean turn separation
+        
+        WHEN TO CALL: This should be called when:
+        - User stops speaking (end of user turn)
+        - Bot finishes response (end of bot turn)
+        - Call/session ends
+        """
+        if not self._recording:
+            return
+            
+        input_size = len(self._input_buffer)
+        output_size = len(self._output_buffer)
+        
+        # STEP 1: Log turn boundary flush for debugging
+        if input_size > 0 or output_size > 0:
+            logger.info(
+                f"AudioSynchronizer: Turn boundary flush - input={input_size}, output={output_size}"
+            )
+            
+            # STEP 2: Process any remaining synchronized audio first
+            # If both buffers have data, merge what we can normally
+            if self._has_audio():
+                await self._call_audio_handler()
+            
+            # STEP 3: Handle remaining unmatched audio by padding with silence
+            # This prevents audio loss while maintaining synchronization
+            remaining_input = len(self._input_buffer)
+            remaining_output = len(self._output_buffer)
+            
+            # CASE A: User audio without matching bot audio
+            # Happens when user speaks but bot hasn't responded yet
+            if remaining_input > 0 and remaining_output == 0:
+                silence_padding = b'\x00' * remaining_input  # Create matching silence
+                merged_audio = mix_audio(bytes(self._input_buffer), silence_padding)
+                await self._emit_event("on_merged_audio", merged_audio, self._sample_rate, self._num_channels)
+                self._input_buffer.clear()
+                logger.debug("AudioSynchronizer: Flushed remaining input audio with silence padding")
+                
+            # CASE B: Bot audio without matching user audio  
+            # Happens when bot is speaking but user is silent
+            elif remaining_output > 0 and remaining_input == 0:
+                silence_padding = b'\x00' * remaining_output  # Create matching silence
+                merged_audio = mix_audio(silence_padding, bytes(self._output_buffer))
+                await self._emit_event("on_merged_audio", merged_audio, self._sample_rate, self._num_channels)
+                self._output_buffer.clear()
+                logger.debug("AudioSynchronizer: Flushed remaining output audio with silence padding")
+            
+            # STEP 4: Final cleanup - ensure completely clean state for next turn
+            self.clear_buffers()
+
+    async def _check_buffer_limits(self):
+        """EMERGENCY BUFFER MONITORING: Enforce size limits to prevent memory issues.
+        
+        PURPOSE: This method acts as a safety net against runaway buffer accumulation.
+        It implements a tiered response system:
+        
+        TIER 1 - WARNING (5x normal): Log warnings to alert about growing buffers
+        TIER 2 - EMERGENCY (10x normal): Force cleanup to prevent memory exhaustion
+        
+        WHY NEEDED: Even with fixes, edge cases or bugs could still cause accumulation.
+        This provides defense-in-depth against memory issues.
+        """
+        input_size = len(self._input_buffer)
+        output_size = len(self._output_buffer)
+        
+        # TIER 1: WARNING LEVEL - Early detection of accumulation
+        if input_size > self._warning_buffer_size or output_size > self._warning_buffer_size:
+            logger.warning(
+                f"AudioSynchronizer: Buffer size warning! "
+                f"input={input_size} (limit={self._warning_buffer_size}), "
+                f"output={output_size} (limit={self._warning_buffer_size})"
+            )
+            # Attempt normal processing to reduce buffer sizes
+            if self._has_audio():
+                await self._call_audio_handler()
+        
+        # TIER 2: EMERGENCY LEVEL - Prevent memory exhaustion  
+        if input_size > self._max_buffer_size or output_size > self._max_buffer_size:
+            logger.error(
+                f"AudioSynchronizer: EMERGENCY buffer cleanup! "
+                f"input={input_size} (max={self._max_buffer_size}), "
+                f"output={output_size} (max={self._max_buffer_size}). "
+                f"Forcing buffer flush to prevent memory issues."
+            )
+            # Emergency flush with silence padding to prevent audio loss
+            await self.flush_buffers_at_turn_boundary()
