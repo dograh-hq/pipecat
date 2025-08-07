@@ -21,7 +21,7 @@ from loguru import logger
 from PIL import Image
 
 from pipecat.audio.mixers.base_audio_mixer import BaseAudioMixer
-from pipecat.audio.utils import create_stream_resampler
+from pipecat.audio.utils import create_stream_resampler, is_silence
 from pipecat.frames.frames import (
     BotSpeakingFrame,
     BotStartedSpeakingFrame,
@@ -34,6 +34,8 @@ from pipecat.frames.frames import (
     OutputDTMFFrame,
     OutputDTMFUrgentFrame,
     OutputImageRawFrame,
+    OutputTransportReadyFrame,
+    SpeechOutputAudioRawFrame,
     SpriteFrame,
     StartFrame,
     StartInterruptionFrame,
@@ -177,6 +179,9 @@ class BaseOutputTransport(FrameProcessor):
                 params=self._params,
             )
             await self._media_senders[destination].start(frame)
+
+        # Sending a frame indicating that the output transport is ready and able to receive frames.
+        await self.push_frame(OutputTransportReadyFrame(), FrameDirection.UPSTREAM)
 
     async def send_message(self, frame: TransportMessageFrame | TransportMessageUrgentFrame):
         """Send a transport message.
@@ -662,6 +667,11 @@ class BaseOutputTransport(FrameProcessor):
                             num_channels=self._params.audio_out_channels,
                         )
                         yield frame
+                        # Allow other asyncio tasks to execute by adding a small sleep
+                        # Without this sleep, in task cancellation scenarios, this loop would
+                        # continuously return without any delay, leading to 100% CPU utilization
+                        # and preventing cancel/stop signals from being processed properly
+                        await asyncio.sleep(0)
 
             if self._mixer:
                 return with_mixer(BOT_VAD_STOP_SECS)
@@ -676,10 +686,24 @@ class BaseOutputTransport(FrameProcessor):
             TOTAL_CHUNK_MS = self._params.audio_out_10ms_chunks * 10
             BOT_SPEAKING_CHUNK_PERIOD = max(int(200 / TOTAL_CHUNK_MS), 1)
             bot_speaking_counter = 0
+            speech_last_speaking_time = 0
+
             async for frame in self._next_frame():
                 # Notify the bot started speaking upstream if necessary and that
                 # it's actually speaking.
+                is_speaking = False
                 if isinstance(frame, TTSAudioRawFrame):
+                    is_speaking = True
+                elif isinstance(frame, SpeechOutputAudioRawFrame):
+                    if not is_silence(frame.audio):
+                        is_speaking = True
+                        speech_last_speaking_time = time.time()
+                    else:
+                        silence_duration = time.time() - speech_last_speaking_time
+                        if silence_duration > BOT_VAD_STOP_SECS:
+                            await self._bot_stopped_speaking()
+
+                if is_speaking:
                     await self._bot_started_speaking()
                     if bot_speaking_counter % BOT_SPEAKING_CHUNK_PERIOD == 0:
                         await self._transport.push_frame(BotSpeakingFrame())

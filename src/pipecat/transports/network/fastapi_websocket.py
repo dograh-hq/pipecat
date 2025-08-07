@@ -132,10 +132,13 @@ class FastAPIWebsocketClient:
             logger.warning(
                 f"Exception sending data: {e.__class__.__name__}, application_state: {self._websocket.application_state}"
             )
+            # For some reason the websocket is disconnected, and we are not able to send data
+            # So let's properly handle it and disconnect the transport if it is not already disconnecting
             if (
-                not self.is_closing
-                and self._websocket.application_state == WebSocketState.DISCONNECTED
+                self._websocket.application_state == WebSocketState.DISCONNECTED
+                and not self.is_closing
             ):
+                logger.warning("Closing already disconnected websocket!")
                 self._closing = True
                 await self.trigger_client_disconnected(EndTaskReason.USER_HANGUP.value)
 
@@ -155,8 +158,9 @@ class FastAPIWebsocketClient:
             except asyncio.TimeoutError:
                 logger.warning("Timeout while closing WebSocket connection")
             except Exception as e:
-                logger.warning(f"Error while closing WebSocket: {e}")
-            await self.trigger_client_disconnected(EndTaskReason.SYSTEM_CANCELLED.value)
+                logger.error(f"{self} exception while closing the websocket: {e}")
+            finally:
+                await self.trigger_client_disconnected(EndTaskReason.SYSTEM_CANCELLED.value)
 
     async def trigger_client_disconnected(self, reason: Optional[str] = None):
         """Trigger the client disconnected callback."""
@@ -432,12 +436,7 @@ class FastAPIWebsocketOutputTransport(BaseOutputTransport):
         Args:
             frame: The output audio frame to write.
         """
-        if self._client.is_closing:
-            return
-
-        if not self._client.is_connected:
-            # Simulate audio playback with a sleep.
-            await self._write_audio_sleep()
+        if self._client.is_closing or not self._client.is_connected:
             return
 
         metadata = frame.metadata

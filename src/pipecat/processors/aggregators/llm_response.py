@@ -700,7 +700,11 @@ class LLMUserContextAggregator(LLMContextResponseAggregator):
         # to emulate VAD (i.e. user start/stopped speaking), but we do it only
         # if the bot is not speaking. If the bot is speaking and we really have
         # a short utterance we don't really want to interrupt the bot.
-        if not self._user_speaking and not self._waiting_for_aggregation:
+        if (
+            not self._user_speaking
+            and not self._waiting_for_aggregation
+            and len(self._aggregation) > 0
+        ):
             if self._bot_speaking:
                 # If we reached this case and the bot is speaking, let's ignore
                 # what the user said.
@@ -1127,17 +1131,13 @@ class LLMUserResponseAggregator(LLMUserContextAggregator):
         """
         super().__init__(context=OpenAILLMContext(messages), params=params, **kwargs)
 
-    async def push_aggregation(self):
-        """Push the aggregated user input as an LLMMessagesFrame."""
-        if len(self._aggregation) > 0:
-            await self.handle_aggregation(self._aggregation)
-
-            # Reset the aggregation. Reset it before pushing it down, otherwise
-            # if the tasks gets cancelled we won't be able to clear things up.
-            await self.reset()
-
-            frame = LLMMessagesFrame(self._context.messages)
-            await self.push_frame(frame)
+    async def _process_aggregation(self):
+        """Process the current aggregation and push it downstream."""
+        aggregation = self._aggregation
+        await self.reset()
+        await self.handle_aggregation(aggregation)
+        frame = LLMMessagesFrame(self._context.messages)
+        await self.push_frame(frame)
 
 
 class LLMAssistantResponseAggregator(LLMAssistantContextAggregator):

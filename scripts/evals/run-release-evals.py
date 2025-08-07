@@ -40,6 +40,10 @@ TESTS_07 = [
     ("07-interruptible.py", PROMPT_SIMPLE_MATH, None),
     ("07-interruptible-cartesia-http.py", PROMPT_SIMPLE_MATH, None),
     ("07a-interruptible-speechmatics.py", PROMPT_SIMPLE_MATH, None),
+    ("07aa-interruptible-soniox.py", PROMPT_SIMPLE_MATH, None),
+    ("07ab-interruptible-inworld-http.py", PROMPT_SIMPLE_MATH, None),
+    ("07ac-interruptible-asyncai.py", PROMPT_SIMPLE_MATH, None),
+    ("07ac-interruptible-asyncai-http.py", PROMPT_SIMPLE_MATH, None),
     ("07b-interruptible-langchain.py", PROMPT_SIMPLE_MATH, None),
     ("07c-interruptible-deepgram.py", PROMPT_SIMPLE_MATH, None),
     ("07d-interruptible-elevenlabs.py", PROMPT_SIMPLE_MATH, None),
@@ -78,13 +82,14 @@ TESTS_14 = [
     ("14a-function-calling-anthropic.py", PROMPT_WEATHER, EVAL_WEATHER),
     ("14b-function-calling-anthropic-video.py", PROMPT_WEATHER, EVAL_WEATHER),
     ("14d-function-calling-video.py", PROMPT_WEATHER, EVAL_WEATHER),
-    ("14e-function-calling-gemini.py", PROMPT_WEATHER, EVAL_WEATHER),
+    ("14e-function-calling-google.py", PROMPT_WEATHER, EVAL_WEATHER),
     ("14f-function-calling-groq.py", PROMPT_WEATHER, EVAL_WEATHER),
     ("14g-function-calling-grok.py", PROMPT_WEATHER, EVAL_WEATHER),
     ("14h-function-calling-azure.py", PROMPT_WEATHER, EVAL_WEATHER),
     ("14i-function-calling-fireworks.py", PROMPT_WEATHER, EVAL_WEATHER),
     ("14j-function-calling-nim.py", PROMPT_WEATHER, EVAL_WEATHER),
     ("14n-function-calling-perplexity.py", PROMPT_WEATHER, EVAL_WEATHER),
+    ("14p-function-calling-gemini-vertex-ai.py", PROMPT_WEATHER, EVAL_WEATHER),
     ("14q-function-calling-qwen.py", PROMPT_WEATHER, EVAL_WEATHER),
     ("14r-function-calling-aws.py", PROMPT_WEATHER, EVAL_WEATHER),
     # Currently not working.
@@ -94,12 +99,15 @@ TESTS_14 = [
     # ("14l-function-calling-deepseek.py", PROMPT_WEATHER, EVAL_WEATHER),
     # ("14m-function-calling-openrouter.py", PROMPT_WEATHER, EVAL_WEATHER),
     # ("14o-function-calling-gemini-openai-format.py", PROMPT_WEATHER, EVAL_WEATHER),
-    # ("14p-function-calling-gemini-vertex-ai.py", PROMPT_WEATHER, EVAL_WEATHER),
 ]
 
 TESTS_19 = [
     ("19-openai-realtime-beta.py", PROMPT_WEATHER, EVAL_WEATHER),
     ("19a-azure-realtime-beta.py", PROMPT_WEATHER, EVAL_WEATHER),
+]
+
+TESTS_21 = [
+    ("21a-tavus-video-service.py", PROMPT_SIMPLE_MATH, None),
 ]
 
 TESTS_26 = [
@@ -112,16 +120,27 @@ TESTS_26 = [
     # ("26d-gemini-multimodal-live-text.py", PROMPT_SIMPLE_MATH, None),
 ]
 
+TESTS_27 = [
+    ("27-simli-layer.py", PROMPT_SIMPLE_MATH, None),
+]
+
 TESTS_40 = [
     ("40-aws-nova-sonic.py", PROMPT_SIMPLE_MATH, None),
+]
+
+TESTS_43 = [
+    ("43a-heygen-video-service.py", PROMPT_SIMPLE_MATH, None),
 ]
 
 TESTS = [
     *TESTS_07,
     *TESTS_14,
     *TESTS_19,
+    *TESTS_21,
     *TESTS_26,
+    *TESTS_27,
     *TESTS_40,
+    *TESTS_43,
 ]
 
 

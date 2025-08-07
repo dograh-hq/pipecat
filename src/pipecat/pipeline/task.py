@@ -460,12 +460,6 @@ class PipelineTask(BasePipelineTask):
             logger.debug(f"Pipeline task {self}: handling CancelledError Exception")
             pass
         finally:
-            # It's possibe that we get an asyncio.CancelledError from the
-            # outside, if so we need to make sure everything gets cancelled
-            # properly.
-            if cleanup_pipeline:
-                logger.debug(f"Cleaning up pipeline {self} in finally")
-                await self._cancel()
             await self._cancel_tasks()
             await self._cleanup(cleanup_pipeline)
             if self._check_dangling_tasks:
@@ -496,13 +490,17 @@ class PipelineTask(BasePipelineTask):
     async def _cancel(self):
         """Internal cancellation logic for the pipeline task."""
         if not self._cancelled:
-            logger.debug(f"Canceling pipeline task {self}")
+            logger.debug(f"Cancelling pipeline task {self}")
             self._cancelled = True
             # Make sure everything is cleaned up downstream. This is sent
             # out-of-band from the main streaming task which is what we want since
             # we want to cancel right away.
             await self._source.push_frame(CancelFrame())
-            # Only cancel the push task. Everything else will be cancelled in run().
+            # Wait for CancelFrame to make it throught the pipeline.
+            await self._wait_for_pipeline_end()
+            # Only cancel the push task, we don't want to be able to process any
+            # other frame after cancel. Everything else will be cancelled in
+            # run().
             if self._process_push_task:
                 await self._task_manager.cancel_task(self._process_push_task)
                 self._process_push_task = None
@@ -543,6 +541,10 @@ class PipelineTask(BasePipelineTask):
     async def _cancel_tasks(self):
         """Cancel all running pipeline tasks."""
         await self._observer.stop()
+
+        if self._process_push_task:
+            await self._task_manager.cancel_task(self._process_push_task)
+            self._process_push_task = None
 
         if self._process_up_task:
             await self._task_manager.cancel_task(self._process_up_task)
@@ -640,6 +642,7 @@ class PipelineTask(BasePipelineTask):
             audio_in_sample_rate=self._params.audio_in_sample_rate,
             audio_out_sample_rate=self._params.audio_out_sample_rate,
             enable_metrics=self._params.enable_metrics,
+            enable_tracing=self._enable_tracing,
             enable_usage_metrics=self._params.enable_usage_metrics,
             report_only_initial_ttfb=self._params.report_only_initial_ttfb,
             interruption_strategies=self._params.interruption_strategies,
@@ -655,7 +658,7 @@ class PipelineTask(BasePipelineTask):
         while running:
             frame = await self._push_queue.get()
             await self._source.queue_frame(frame, FrameDirection.DOWNSTREAM)
-            if isinstance(frame, (EndFrame, StopFrame)):
+            if isinstance(frame, (CancelFrame, EndFrame, StopFrame)):
                 await self._wait_for_pipeline_end()
             running = not isinstance(frame, (CancelFrame, EndFrame, StopFrame))
             cleanup_pipeline = not isinstance(frame, StopFrame)
@@ -730,6 +733,7 @@ class PipelineTask(BasePipelineTask):
                 self._pipeline_end_event.set()
             elif isinstance(frame, CancelFrame):
                 await self._call_event_handler("on_pipeline_cancelled", frame)
+                self._pipeline_end_event.set()
             elif isinstance(frame, HeartbeatFrame):
                 await self._heartbeat_queue.put(frame)
             self._down_queue.task_done()
