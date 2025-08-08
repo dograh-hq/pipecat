@@ -828,10 +828,12 @@ class AudioContextWordTTSService(WebsocketWordTTSService):
                 del self._contexts[context_id]
 
                 # Append some silence between sentences.
-                silence = b"\x00" * self.sample_rate
+                logger.debug(f"{self} appending the ulaw silence between sentences")
+                silence = b"\xFF" * int(self.sample_rate/2)
                 frame = TTSAudioRawFrame(
                     audio=silence, sample_rate=self.sample_rate, num_channels=1
                 )
+                frame.metadata["audio_encoding"] = "ulaw"
                 await self.push_frame(frame)
             else:
                 running = False
