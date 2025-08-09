@@ -130,6 +130,13 @@ class AudioBufferOutputProcessor(FrameProcessor):
 
         # Add audio
         resampled = await self._resample_audio(frame)
+        
+        # Log audio frame details for tracking
+        audio_encoding = getattr(frame, "metadata", {}).get("audio_encoding", "pcm")
+        logger.debug(
+            f"AudioBufferOutputProcessor: frame.audio length={len(frame.audio)} bytes, resampled audio length={len(resampled)} bytes, audio_encoding={audio_encoding}"
+        )
+        
         self._audio_buffer.extend(resampled)
 
         # Save time of frame so we can compute silence
