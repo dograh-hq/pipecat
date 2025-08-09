@@ -645,7 +645,10 @@ class BaseOutputTransport(FrameProcessor):
 
             async def with_mixer(vad_stop_secs: float) -> AsyncGenerator[Frame, None]:
                 last_frame_time = 0
-                silence = b"\x00" * self._audio_chunk_size
+                if self._params.audio_out_use_ulaw:
+                    silence = b"\xff" * self._audio_chunk_size
+                else:
+                    silence = b"\x00" * self._audio_chunk_size
                 while True:
                     try:
                         frame = self._audio_queue.get_nowait()
@@ -666,6 +669,8 @@ class BaseOutputTransport(FrameProcessor):
                             sample_rate=self._sample_rate,
                             num_channels=self._params.audio_out_channels,
                         )
+                        if self._params.audio_out_use_ulaw:
+                            frame.metadata["audio_encoding"] = "ulaw"
                         yield frame
                         # Allow other asyncio tasks to execute by adding a small sleep
                         # Without this sleep, in task cancellation scenarios, this loop would

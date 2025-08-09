@@ -714,6 +714,7 @@ class AudioContextWordTTSService(WebsocketWordTTSService):
             **kwargs: Additional arguments passed to the parent WebsocketWordTTSService.
         """
         super().__init__(**kwargs)
+        self._use_ulaw = kwargs.get("use_ulaw", False)
         self._contexts: Dict[str, asyncio.Queue] = {}
         self._audio_context_task = None
 
@@ -830,10 +831,17 @@ class AudioContextWordTTSService(WebsocketWordTTSService):
                 del self._contexts[context_id]
 
                 # Append some silence between sentences.
-                silence = b"\x00" * self.sample_rate
+                if self._use_ulaw:
+                    silence = b"\xff" * int(self.sample_rate / 2)  # 0.5 seconds worth of silence
+                else:
+                    silence = b"\x00" * self.sample_rate  # 0.5 seconds worth of silence
+
                 frame = TTSAudioRawFrame(
                     audio=silence, sample_rate=self.sample_rate, num_channels=1
                 )
+                if self._use_ulaw:
+                    frame.metadata["audio_encoding"] = "ulaw"
+
                 await self.push_frame(frame)
             else:
                 running = False

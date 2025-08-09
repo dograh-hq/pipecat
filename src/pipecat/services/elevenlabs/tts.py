@@ -306,6 +306,7 @@ class ElevenLabsTTSService(AudioContextWordTTSService):
             push_stop_frames=True,
             pause_frame_processing=True,
             sample_rate=sample_rate,
+            use_ulaw=params.use_ulaw,
             **kwargs,
         )
 

@@ -83,7 +83,6 @@ class AudioBufferOutputProcessor(FrameProcessor):
 
     async def start_recording(self):
         """Start recording audio from output."""
-        # logger.debug(f"AudioBufferOutputProcessor: Starting recording")
         self._recording = True
         self._reset_recording()
 
@@ -157,14 +156,15 @@ class AudioBufferOutputProcessor(FrameProcessor):
         if not self._buffer_has_audio() or not self._recording:
             return
 
+        audio_data = bytes(self._audio_buffer)
+        self._audio_buffer = bytearray()
+
         await self._call_event_handler(
             "on_output_audio_data",
-            bytes(self._audio_buffer),
+            audio_data,
             self._sample_rate,
             1,  # Always mono for output
         )
-
-        self._audio_buffer = bytearray()
 
     def _buffer_has_audio(self) -> bool:
         return len(self._audio_buffer) > 0
