@@ -53,6 +53,12 @@ from pipecat.utils.time import nanoseconds_to_seconds
 BOT_VAD_STOP_SECS = 0.35
 
 
+class TransportClientNotConnectedException(Exception):
+    """Exception raised when a transport client is not connected."""
+
+    pass
+
+
 class BaseOutputTransport(FrameProcessor):
     """Base class for output transport implementations.
 
@@ -730,7 +736,13 @@ class BaseOutputTransport(FrameProcessor):
 
                 # Send audio.
                 if isinstance(frame, OutputAudioRawFrame):
-                    await self._transport.write_audio_frame(frame)
+                    try:
+                        await self._transport.write_audio_frame(frame)
+                    except TransportClientNotConnectedException:
+                        # The client is not connected yet, sleep for around 20 ms instead of
+                        # going around in loop
+                        sleep_interval = self._params.audio_out_10ms_chunks * 10 / 1000  # ms
+                        await asyncio.sleep(sleep_interval)
 
         #
         # Video handling
