@@ -89,6 +89,11 @@ class BaseInputTransport(FrameProcessor):
         # if passthrough is enabled.
         self._audio_task = None
 
+        # We will set this flag if we have received EndFrame in the
+        # transport. This will enable us to stop queueing emulated
+        # user starting frame.
+        self._close_initiated = False
+
         # If the transport is stopped with `StopFrame` we might still be
         # receiving frames from the transport but we really don't want to push
         # them downstream until we get another `StartFrame`.
@@ -220,6 +225,7 @@ class BaseInputTransport(FrameProcessor):
             frame: The end frame signaling transport shutdown.
         """
         # Cancel and wait for the audio input task to finish.
+        self._close_initiated = True
         await self._cancel_audio_task()
         # Stop audio filter.
         if self._params.audio_in_filter:
@@ -243,6 +249,8 @@ class BaseInputTransport(FrameProcessor):
         Args:
             frame: The cancel frame signaling immediate cancellation.
         """
+        self._close_initiated = True
+
         # Cancel and wait for the audio input task to finish.
         await self._cancel_audio_task()
         # Stop audio filter.
@@ -307,10 +315,20 @@ class BaseInputTransport(FrameProcessor):
             await self._handle_bot_stopped_speaking(frame)
             await self.push_frame(frame, direction)
         elif isinstance(frame, EmulateUserStartedSpeakingFrame):
+            if self._close_initiated:
+                logger.debug(
+                    "Ignoring emulated user started speaking frame because transport is closing"
+                )
+                return
             # Emulate user started speaking
             logger.debug("Emulating user started speaking")
             await self._handle_user_interruption(UserStartedSpeakingFrame(emulated=True))
         elif isinstance(frame, EmulateUserStoppedSpeakingFrame):
+            if self._close_initiated:
+                logger.debug(
+                    "Ignoring emulated user stopped speaking frame because transport is closing"
+                )
+                return
             logger.debug("Emulating user stopped speaking")
             await self._handle_user_interruption(UserStoppedSpeakingFrame(emulated=True))
         # All other system frames
