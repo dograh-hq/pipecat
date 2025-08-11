@@ -22,6 +22,7 @@ from pipecat.audio.interruptions.base_interruption_strategy import BaseInterrupt
 from pipecat.clocks.base_clock import BaseClock
 from pipecat.frames.frames import (
     CancelFrame,
+    EndFrame,
     ErrorFrame,
     Frame,
     FrameProcessorPauseFrame,
@@ -585,7 +586,10 @@ class FrameProcessor(BaseObject):
         elif isinstance(frame, StopInterruptionFrame):
             self._should_report_ttfb = True
         elif isinstance(frame, CancelFrame):
+            logger.debug(f"Received CancelFrame, cancelling {self}")
             await self.__cancel(frame)
+        elif isinstance(frame, EndFrame):
+            logger.debug(f"Received EndFrame, ending {self}")
         elif isinstance(frame, (FrameProcessorPauseFrame, FrameProcessorPauseUrgentFrame)):
             await self.__pause(frame)
         elif isinstance(frame, (FrameProcessorResumeFrame, FrameProcessorResumeUrgentFrame)):
@@ -634,7 +638,6 @@ class FrameProcessor(BaseObject):
         Args:
             frame: The cancel frame.
         """
-        logger.debug(f"Received CancelFrame, cancelling {self}")
         self._cancelling = True
         await self.__cancel_process_task()
 

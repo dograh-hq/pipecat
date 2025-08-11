@@ -263,6 +263,7 @@ class DeepgramSTTService(STTService):
         if self._connection.is_connected:
             logger.debug("Disconnecting from Deepgram")
             await self._connection.finish()
+            logger.debug("Disconnected from Deepgram")
 
     async def start_metrics(self):
         """Start TTFB and processing metrics collection."""

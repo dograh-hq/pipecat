@@ -81,7 +81,7 @@ class BaseOpenAILLMService(LLMService):
         max_tokens: Optional[int] = Field(default_factory=lambda: NOT_GIVEN, ge=1)
         max_completion_tokens: Optional[int] = Field(default_factory=lambda: NOT_GIVEN, ge=1)
         extra: Optional[Dict[str, Any]] = Field(default_factory=dict)
-        
+
         # Changes for verbosity and reasoning for gpt-5
         reasoning_effort: Optional[str] = Field(default="minimal")
         verbosity: Optional[str] = Field(default="low")

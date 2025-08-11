@@ -731,18 +731,22 @@ class BaseOutputTransport(FrameProcessor):
                 # Handle frame.
                 await self._handle_frame(frame)
 
-                # Also, push frame downstream in case anyone else needs it.
-                await self._transport.push_frame(frame)
-
                 # Send audio.
                 if isinstance(frame, OutputAudioRawFrame):
                     try:
                         await self._transport.write_audio_frame(frame)
+
+                        # Lets only try push audio frame down the pipeline if the client
+                        # is connected.
+                        await self._transport.push_frame(frame)
                     except TransportClientNotConnectedException:
-                        # The client is not connected yet, sleep for around 20 ms instead of
-                        # going around in loop
-                        sleep_interval = self._params.audio_out_10ms_chunks * 10 / 1000  # ms
+                        # The client is not connected yet, sleep for around 100 ms instead of
+                        # going around in continuous loop
+                        sleep_interval = self._params.audio_out_10ms_chunks * 5 * 10 / 1000  # 20 ms * 5
                         await asyncio.sleep(sleep_interval)
+                else:
+                    # Lets push any other frame downstream in case anyone else needs it.
+                    await self._transport.push_frame(frame)
 
         #
         # Video handling
