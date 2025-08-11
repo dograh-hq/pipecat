@@ -81,6 +81,10 @@ class BaseOpenAILLMService(LLMService):
         max_tokens: Optional[int] = Field(default_factory=lambda: NOT_GIVEN, ge=1)
         max_completion_tokens: Optional[int] = Field(default_factory=lambda: NOT_GIVEN, ge=1)
         extra: Optional[Dict[str, Any]] = Field(default_factory=dict)
+        
+        # Changes for verbosity and reasoning for gpt-5
+        reasoning_effort: Optional[str] = Field(default="minimal")
+        verbosity: Optional[str] = Field(default="low")
 
     def __init__(
         self,
@@ -119,6 +123,8 @@ class BaseOpenAILLMService(LLMService):
             "max_tokens": params.max_tokens,
             "max_completion_tokens": params.max_completion_tokens,
             "extra": params.extra if isinstance(params.extra, dict) else {},
+            "reasoning_effort": params.reasoning_effort,
+            "verbosity": params.verbosity,
         }
         self.set_model_name(model)
         self._client = self.create_client(
@@ -195,11 +201,16 @@ class BaseOpenAILLMService(LLMService):
             "frequency_penalty": self._settings["frequency_penalty"],
             "presence_penalty": self._settings["presence_penalty"],
             "seed": self._settings["seed"],
-            "temperature": self._settings["temperature"],
             "top_p": self._settings["top_p"],
             "max_tokens": self._settings["max_tokens"],
             "max_completion_tokens": self._settings["max_completion_tokens"],
         }
+
+        if "gpt-5" in self.model_name:
+            params["reasoning_effort"] = self._settings["reasoning_effort"]
+            params["verbosity"] = self._settings["verbosity"]
+        else:
+            params["temperature"] = self._settings["temperature"]
 
         params.update(self._settings["extra"])
 
