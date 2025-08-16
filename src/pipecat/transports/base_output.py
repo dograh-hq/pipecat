@@ -650,7 +650,6 @@ class BaseOutputTransport(FrameProcessor):
                         await self._bot_stopped_speaking()
 
             async def with_mixer(vad_stop_secs: float) -> AsyncGenerator[Frame, None]:
-                last_frame_time = 0
                 if self._params.audio_out_use_ulaw:
                     silence = b"\xff" * self._audio_chunk_size
                 else:
@@ -661,14 +660,10 @@ class BaseOutputTransport(FrameProcessor):
                         self._transport.reset_watchdog()
                         if isinstance(frame, OutputAudioRawFrame):
                             frame.audio = await self._mixer.mix(frame.audio)
-                        last_frame_time = time.time()
                         yield frame
                     except asyncio.QueueEmpty:
                         self._transport.reset_watchdog()
-                        # Notify the bot stopped speaking upstream if necessary.
-                        diff_time = time.time() - last_frame_time
-                        if diff_time > vad_stop_secs:
-                            await self._bot_stopped_speaking()
+                        await self._bot_stopped_speaking()
                         # Generate an audio frame with only the mixer's part.
                         frame = OutputAudioRawFrame(
                             audio=await self._mixer.mix(silence),
@@ -722,7 +717,7 @@ class BaseOutputTransport(FrameProcessor):
                             BotSpeakingFrame(), FrameDirection.UPSTREAM
                         )
                         bot_speaking_counter = 0
-                    bot_speaking_counter += 1
+                    bot_speaking_counter += 1 # +1 every 20 ms, so per 10 counter, its 200ms
 
                 # No need to push EndFrame, it's pushed from process_frame().
                 if isinstance(frame, EndFrame):
