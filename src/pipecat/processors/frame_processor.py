@@ -502,7 +502,7 @@ class FrameProcessor(BaseObject):
         """
         self._next = processor
         processor._prev = self
-        logger.debug(f"Linking {self} -> {self._next}")
+        # logger.debug(f"Linking {self} -> {self._next}")
 
     def get_event_loop(self) -> asyncio.AbstractEventLoop:
         """Get the event loop used by this processor.
@@ -586,10 +586,7 @@ class FrameProcessor(BaseObject):
         elif isinstance(frame, StopInterruptionFrame):
             self._should_report_ttfb = True
         elif isinstance(frame, CancelFrame):
-            logger.debug(f"Received CancelFrame, cancelling {self}")
             await self.__cancel(frame)
-        elif isinstance(frame, EndFrame):
-            logger.debug(f"Received EndFrame, ending {self}")
         elif isinstance(frame, (FrameProcessorPauseFrame, FrameProcessorPauseUrgentFrame)):
             await self.__pause(frame)
         elif isinstance(frame, (FrameProcessorResumeFrame, FrameProcessorResumeUrgentFrame)):
