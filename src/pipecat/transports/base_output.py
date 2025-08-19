@@ -124,7 +124,7 @@ class BaseOutputTransport(FrameProcessor):
         audio_bytes_10ms = (
             int(self._sample_rate / 100)
             * self._params.audio_out_channels
-            * self._params.audio_out_bytes_per_sample
+            * 2  # We are assuming 2 bytes per sample since we are handling pcm data. The data is serialized post chunking
         )
         self._audio_chunk_size = audio_bytes_10ms * self._params.audio_out_10ms_chunks
 
@@ -511,8 +511,6 @@ class BaseOutputTransport(FrameProcessor):
                     num_channels=frame.num_channels,
                 )
                 chunk.transport_destination = self._destination
-                # Preserve metadata from the original frame
-                chunk.metadata = frame.metadata.copy()
 
                 # Debug: Log chunk info
                 # logger.debug(f"BaseOutput: Creating chunk - type: {type(chunk).__name__}, size: {self._audio_chunk_size} bytes, "
@@ -650,10 +648,7 @@ class BaseOutputTransport(FrameProcessor):
                         await self._bot_stopped_speaking()
 
             async def with_mixer(vad_stop_secs: float) -> AsyncGenerator[Frame, None]:
-                if self._params.audio_out_use_ulaw:
-                    silence = b"\xff" * self._audio_chunk_size
-                else:
-                    silence = b"\x00" * self._audio_chunk_size
+                silence = b"\x00" * self._audio_chunk_size
                 while True:
                     try:
                         frame = self._audio_queue.get_nowait()
@@ -670,8 +665,6 @@ class BaseOutputTransport(FrameProcessor):
                             sample_rate=self._sample_rate,
                             num_channels=self._params.audio_out_channels,
                         )
-                        if self._params.audio_out_use_ulaw:
-                            frame.metadata["audio_encoding"] = "ulaw"
                         yield frame
                         # Allow other asyncio tasks to execute by adding a small sleep
                         # Without this sleep, in task cancellation scenarios, this loop would
@@ -717,7 +710,7 @@ class BaseOutputTransport(FrameProcessor):
                             BotSpeakingFrame(), FrameDirection.UPSTREAM
                         )
                         bot_speaking_counter = 0
-                    bot_speaking_counter += 1 # +1 every 20 ms, so per 10 counter, its 200ms
+                    bot_speaking_counter += 1  # +1 every 20 ms, so per 10 counter, its 200ms
 
                 # No need to push EndFrame, it's pushed from process_frame().
                 if isinstance(frame, EndFrame):

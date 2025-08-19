@@ -318,11 +318,6 @@ class AudioBufferProcessor(FrameProcessor):
 
     async def _resample_input_audio(self, frame: InputAudioRawFrame) -> bytes:
         """Resample audio frame to the target sample rate."""
-        # Decode μ-law if required
-        target_rate = self._sample_rate or frame.sample_rate
-        if getattr(frame, "metadata", {}).get("audio_encoding") == "ulaw":
-            return await ulaw_to_pcm(frame.audio, frame.sample_rate, target_rate, self._resampler)
-
         return await self._input_resampler.resample(
             frame.audio, frame.sample_rate, self._sample_rate
         )

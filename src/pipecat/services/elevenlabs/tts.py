@@ -121,19 +121,15 @@ def language_to_elevenlabs_language(language: Language) -> Optional[str]:
     return result
 
 
-def output_format_from_sample_rate(sample_rate: int, use_ulaw: bool = False) -> str:
+def output_format_from_sample_rate(sample_rate: int) -> str:
     """Get the appropriate output format string for a given sample rate.
 
     Args:
         sample_rate: The audio sample rate in Hz.
-        use_ulaw: Whether to use μ-law encoding for 8kHz audio.
 
     Returns:
         The ElevenLabs output format string.
     """
-    if use_ulaw and sample_rate == 8000:
-        return "ulaw_8000"
-
     match sample_rate:
         case 8000:
             return "pcm_8000"
@@ -260,7 +256,6 @@ class ElevenLabsTTSService(AudioContextWordTTSService):
         auto_mode: Optional[bool] = True
         enable_ssml_parsing: Optional[bool] = None
         enable_logging: Optional[bool] = None
-        use_ulaw: Optional[bool] = False
 
     def __init__(
         self,
@@ -306,7 +301,6 @@ class ElevenLabsTTSService(AudioContextWordTTSService):
             push_stop_frames=True,
             pause_frame_processing=True,
             sample_rate=sample_rate,
-            use_ulaw=params.use_ulaw,
             **kwargs,
         )
 
@@ -331,7 +325,6 @@ class ElevenLabsTTSService(AudioContextWordTTSService):
         self.set_voice(voice_id)
         self._output_format = ""  # initialized in start()
         self._voice_settings = self._set_voice_settings()
-        self._use_ulaw = params.use_ulaw
 
         # Indicates if we have sent TTSStartedFrame. It will reset to False when
         # there's an interruption or TTSStoppedFrame.
@@ -393,7 +386,7 @@ class ElevenLabsTTSService(AudioContextWordTTSService):
             frame: The start frame containing initialization parameters.
         """
         await super().start(frame)
-        self._output_format = output_format_from_sample_rate(self.sample_rate, self._use_ulaw)
+        self._output_format = output_format_from_sample_rate(self.sample_rate)
         await self._connect()
 
     async def stop(self, frame: EndFrame):
@@ -589,10 +582,6 @@ class ElevenLabsTTSService(AudioContextWordTTSService):
                 # logger.debug(f"ElevenLabs TTS: Generated audio - size: {len(audio)} bytes, samples: {len(audio_array)}, "
                 #            f"min: {audio_array.min()}, max: {audio_array.max()}, sample_rate: {self.sample_rate}")
                 frame = TTSAudioRawFrame(audio, self.sample_rate, 1)
-                # Mark the frame with encoding information if using μ-law
-
-                if self._use_ulaw and self.sample_rate == 8000:
-                    frame.metadata["audio_encoding"] = "ulaw"
                 await self.append_to_audio_context(received_ctx_id, frame)
 
             if msg.get("alignment"):
@@ -733,7 +722,6 @@ class ElevenLabsHttpTTSService(WordTTSService):
         style: Optional[float] = None
         use_speaker_boost: Optional[bool] = None
         speed: Optional[float] = None
-        use_ulaw: Optional[bool] = False
 
     def __init__(
         self,
@@ -789,7 +777,6 @@ class ElevenLabsHttpTTSService(WordTTSService):
         self.set_voice(voice_id)
         self._output_format = ""  # initialized in start()
         self._voice_settings = self._set_voice_settings()
-        self._use_ulaw = params.use_ulaw
 
         # Track cumulative time to properly sequence word timestamps across utterances
         self._cumulative_time = 0
@@ -840,7 +827,7 @@ class ElevenLabsHttpTTSService(WordTTSService):
             frame: The start frame containing initialization parameters.
         """
         await super().start(frame)
-        self._output_format = output_format_from_sample_rate(self.sample_rate, self._use_ulaw)
+        self._output_format = output_format_from_sample_rate(self.sample_rate)
         await self._reset_state()
 
     async def push_frame(self, frame: Frame, direction: FrameDirection = FrameDirection.DOWNSTREAM):
@@ -1011,9 +998,6 @@ class ElevenLabsHttpTTSService(WordTTSService):
                             await self.stop_ttfb_metrics()
                             audio = base64.b64decode(data["audio_base64"])
                             frame = TTSAudioRawFrame(audio, self.sample_rate, 1)
-                            # Mark the frame with encoding information if using μ-law
-                            if self._use_ulaw and self.sample_rate == 8000:
-                                frame.metadata["audio_encoding"] = "ulaw"
                             yield frame
 
                         # Process alignment if present
