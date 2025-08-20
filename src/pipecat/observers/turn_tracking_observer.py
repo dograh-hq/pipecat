@@ -179,8 +179,12 @@ class TurnTrackingObserver(BaseObserver):
         if self._is_turn_active:
             # Cancel any pending turn end timer
             self._cancel_turn_end_timer()
-            # End the current turn
-            await self._end_turn(data, was_interrupted=True)
+            
+            # Lets not end the current turn here, since the observers
+            # get notified of the end frame first, and it will
+            # prematurely set current context as None, leading to 
+            # floating spans in the observability tools
+            # await self._end_turn(data, was_interrupted=True)
 
     async def _start_turn(self, data: FramePushed):
         """Start a new turn."""
