@@ -71,6 +71,8 @@ class AudioBufferInputProcessor(FrameProcessor):
         # For handling intermittent audio streams
         self._last_frame_at = 0
 
+        self._reported_first_frame_time = False
+
         self._recording = False
         self._resampler = create_default_resampler()
 
@@ -133,6 +135,10 @@ class AudioBufferInputProcessor(FrameProcessor):
         # Add audio
         resampled = await self._resample_audio(frame)
         self._audio_buffer.extend(resampled)
+
+        if not self._reported_first_frame_time:
+            self._reported_first_frame_time = True
+            logger.debug(f"AudioBufferInputProcessor: First frame time: {self._last_frame_at}")
 
         # Save time of frame so we can compute silence
         self._last_frame_at = time.time()

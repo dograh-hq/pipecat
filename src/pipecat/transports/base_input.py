@@ -81,6 +81,8 @@ class BaseInputTransport(FrameProcessor):
         # Track user speaking state for interruption logic
         self._user_speaking = False
 
+        self._reported_first_frame = False
+
         # We read audio from a single queue one at a time and we then run VAD in
         # a thread. Therefore, only one thread should be necessary.
         self._executor = ThreadPoolExecutor(max_workers=1)
@@ -282,6 +284,9 @@ class BaseInputTransport(FrameProcessor):
             frame: The input audio frame to process.
         """
         if self._params.audio_in_enabled and not self._paused:
+            if not self._reported_first_frame:
+                self._reported_first_frame = True
+                logger.debug(f"BaseInputTransport: Reporting first frame")
             await self._audio_in_queue.put(frame)
 
     #

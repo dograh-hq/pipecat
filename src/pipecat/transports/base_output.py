@@ -375,6 +375,8 @@ class BaseOutputTransport(FrameProcessor):
             # This will be used to resample incoming audio to the output sample rate.
             self._resampler = create_stream_resampler()
 
+            self._reported_first_frame = False
+
             # The user can provide a single mixer, to be used by the default
             # destination, or a destination/mixer mapping.
             self._mixer: Optional[BaseAudioMixer] = None
@@ -722,6 +724,10 @@ class BaseOutputTransport(FrameProcessor):
                 # Send audio.
                 if isinstance(frame, OutputAudioRawFrame):
                     try:
+                        if not self._reported_first_frame:
+                            self._reported_first_frame = True
+                            logger.debug(f"BaseOutputTransport: Reporting first frame")
+
                         await self._transport.write_audio_frame(frame)
 
                         # Lets only try push audio frame down the pipeline if the client
