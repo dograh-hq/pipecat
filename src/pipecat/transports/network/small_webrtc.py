@@ -405,7 +405,6 @@ class SmallWebRTCClient:
             _params: Transport configuration parameters.
             frame: The initialization frame containing setup data.
         """
-        self._leave_counter += 1
         self._audio_in_channels = _params.audio_in_channels
         self._in_sample_rate = _params.audio_in_sample_rate or frame.audio_in_sample_rate
         self._out_sample_rate = _params.audio_out_sample_rate or frame.audio_out_sample_rate

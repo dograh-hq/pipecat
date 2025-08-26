@@ -57,7 +57,7 @@ class AudioSynchronizer:
 
         # Track if we're currently recording
         self._recording = False
-        
+
         # Track total bytes received
         self._total_input_bytes = 0
         self._total_output_bytes = 0
@@ -121,7 +121,7 @@ class AudioSynchronizer:
         # Track total bytes received
         bytes_received = len(pcm)
         self._total_input_bytes += bytes_received
-        
+
         # Add audio
         self._input_buffer.extend(pcm)
         logger.debug(
@@ -144,7 +144,7 @@ class AudioSynchronizer:
         # Track total bytes received
         bytes_received = len(pcm)
         self._total_output_bytes += bytes_received
-        
+
         # Add audio
         self._output_buffer.extend(pcm)
         logger.debug(
