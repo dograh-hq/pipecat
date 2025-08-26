@@ -947,7 +947,9 @@ class LLMAssistantContextAggregator(LLMContextResponseAggregator):
 
     async def push_aggregation(self, caller: str = "push_aggregation"):
         """Push the current assistant aggregation with timestamp."""
-        logger.debug(f"{self} push_aggregation called by {caller}, aggregation: {self._aggregation}")
+        logger.debug(
+            f"{self} push_aggregation called by {caller}, aggregation: {self._aggregation}"
+        )
 
         if not self._aggregation:
             return
@@ -989,7 +991,9 @@ class LLMAssistantContextAggregator(LLMContextResponseAggregator):
             await self.push_context_frame(FrameDirection.UPSTREAM)
 
     async def _handle_interruptions(self, frame: StartInterruptionFrame):
-        await self.push_aggregation(caller="_handle_interruptions")  # This will trigger reordering if needed
+        await self.push_aggregation(
+            caller="_handle_interruptions"
+        )  # This will trigger reordering if needed
         self._started = 0
         await self.reset()  # This will clean up response session tracking
 
@@ -1101,8 +1105,10 @@ class LLMAssistantContextAggregator(LLMContextResponseAggregator):
             self._aggregation += f" {frame.text}" if self._aggregation else frame.text
         else:
             self._aggregation += frame.text
-            
-        logger.debug(f"{self} _handle_text Started: {self._started} TextFrame: {frame.text} Aggregation: {self._aggregation}")
+
+        logger.debug(
+            f"{self} _handle_text Started: {self._started} TextFrame: {frame.text} Aggregation: {self._aggregation}"
+        )
 
     def _context_updated_task_finished(self, task: asyncio.Task):
         self._context_updated_tasks.discard(task)

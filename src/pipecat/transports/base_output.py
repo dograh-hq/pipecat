@@ -727,16 +727,22 @@ class BaseOutputTransport(FrameProcessor):
                             logger.debug(f"BaseOutputTransport: Reporting first frame")
 
                         await self._transport.write_audio_frame(frame)
+
+                        # Lets not push audio frame downstream if there is a connection
+                        # error, or we might see unbounded growth in the AudioInputBuffer
+                        # for recording
+                        await self._transport.push_frame(frame)
                     except TransportClientNotConnectedException:
-                        # The client is not connected yet, sleep instead of going around 
+                        # The client is not connected yet, sleep instead of going around
                         # in continuous loop
                         sleep_interval = self._params.audio_out_10ms_chunks * 5 * 10 / 1000
                         logger.warning(
                             f"TransportClientNotConnectedException - Sleeping for {sleep_interval} ms"
                         )
                         await asyncio.sleep(sleep_interval)
-
-                await self._transport.push_frame(frame)
+                else:
+                    # Lets push any other frame downstream in case anyone else needs it.
+                    await self._transport.push_frame(frame)
 
         #
         # Video handling
