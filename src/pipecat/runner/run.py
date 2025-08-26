@@ -53,7 +53,7 @@ Supported transports:
 
 - Daily - Creates rooms and tokens, runs bot as participant
 - WebRTC - Provides local WebRTC interface with prebuilt UI
-- Telephony - Handles webhook and WebSocket connections for Twilio, Telnyx, Plivo
+- Telephony - Handles webhook and WebSocket connections for Twilio, Telnyx, Plivo, Exotel
 
 To run locally:
 
@@ -62,6 +62,7 @@ To run locally:
 - Daily (server): `python bot.py -t daily`
 - Daily (direct, testing only): `python bot.py -d`
 - Telephony: `python bot.py -t twilio -x your_username.ngrok.io`
+- Exotel: `python bot.py -t exotel` (no proxy needed, but ngrok connection to HTTP 7860 is required)
 """
 
 import argparse
@@ -145,7 +146,6 @@ async def _run_telephony_bot(websocket: WebSocket):
 
     # Just pass the WebSocket - let the bot handle parsing
     runner_args = WebSocketRunnerArguments(websocket=websocket)
-    runner_args.handle_sigint = False
 
     await bot_module.bot(runner_args)
 
@@ -169,7 +169,7 @@ def _create_server_app(
         _setup_webrtc_routes(app, esp32_mode=esp32_mode, host=host)
     elif transport_type == "daily":
         _setup_daily_routes(app)
-    elif transport_type in ["twilio", "telnyx", "plivo"]:
+    elif transport_type in ["twilio", "telnyx", "plivo", "exotel"]:
         _setup_telephony_routes(app, transport_type, proxy)
     else:
         logger.warning(f"Unknown transport type: {transport_type}")
@@ -223,7 +223,6 @@ def _setup_webrtc_routes(app: FastAPI, esp32_mode: bool = False, host: str = "lo
 
             bot_module = _get_bot_module()
             runner_args = SmallWebRTCRunnerArguments(webrtc_connection=pipecat_connection)
-            runner_args.handle_sigint = False
             background_tasks.add_task(bot_module.bot, runner_args)
 
         answer = pipecat_connection.get_answer()
@@ -266,7 +265,6 @@ def _setup_daily_routes(app: FastAPI):
             # Start the bot in the background with empty body for GET requests
             bot_module = _get_bot_module()
             runner_args = DailyRunnerArguments(room_url=room_url, token=token)
-            runner_args.handle_sigint = False
             asyncio.create_task(bot_module.bot(runner_args))
             return RedirectResponse(room_url)
 
@@ -311,7 +309,6 @@ def _setup_daily_routes(app: FastAPI):
             # Start the bot in the background with extracted body data
             bot_module = _get_bot_module()
             runner_args = DailyRunnerArguments(room_url=room_url, token=token, body=bot_body)
-            runner_args.handle_sigint = False
             asyncio.create_task(bot_module.bot(runner_args))
             # Match PCC /start endpoint response format:
             return {"dailyRoom": room_url, "dailyToken": token}
@@ -337,7 +334,7 @@ def _setup_daily_routes(app: FastAPI):
 
 def _setup_telephony_routes(app: FastAPI, transport_type: str, proxy: str):
     """Set up telephony-specific routes."""
-    # XML response templates
+    # XML response templates (Exotel doesn't use XML webhooks)
     XML_TEMPLATES = {
         "twilio": f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -362,9 +359,18 @@ def _setup_telephony_routes(app: FastAPI, transport_type: str, proxy: str):
     @app.post("/")
     async def start_call():
         """Handle telephony webhook and return XML response."""
-        logger.debug(f"POST {transport_type.upper()} XML")
-        xml_content = XML_TEMPLATES.get(transport_type, "<Response></Response>")
-        return HTMLResponse(content=xml_content, media_type="application/xml")
+        if transport_type == "exotel":
+            # Exotel doesn't use POST webhooks - redirect to proper documentation
+            logger.debug("POST Exotel endpoint - not used")
+            return {
+                "error": "Exotel doesn't use POST webhooks",
+                "websocket_url": f"wss://{proxy}/ws",
+                "note": "Configure the WebSocket URL above in your Exotel App Bazaar Voicebot Applet",
+            }
+        else:
+            logger.debug(f"POST {transport_type.upper()} XML")
+            xml_content = XML_TEMPLATES.get(transport_type, "<Response></Response>")
+            return HTMLResponse(content=xml_content, media_type="application/xml")
 
     @app.websocket("/ws")
     async def websocket_endpoint(websocket: WebSocket):
@@ -396,6 +402,7 @@ async def _run_daily_direct():
 
         # Direct connections have no request body, so use empty dict
         runner_args = DailyRunnerArguments(room_url=room_url, token=token)
+        runner_args.handle_sigint = True
 
         # Get the bot module and run it directly
         bot_module = _get_bot_module()
@@ -440,7 +447,7 @@ def main():
     Args:
         --host: Server host address (default: localhost)
         --port: Server port (default: 7860)
-        -t/--transport: Transport type (daily, webrtc, twilio, telnyx, plivo)
+        -t/--transport: Transport type (daily, webrtc, twilio, telnyx, plivo, exotel)
         -x/--proxy: Public proxy hostname for telephony webhooks
         --esp32: Enable SDP munging for ESP32 compatibility (requires --host with IP address)
         -d/--direct: Connect directly to Daily room (automatically sets transport to daily)
@@ -455,7 +462,7 @@ def main():
         "-t",
         "--transport",
         type=str,
-        choices=["daily", "webrtc", "twilio", "telnyx", "plivo"],
+        choices=["daily", "webrtc", "twilio", "telnyx", "plivo", "exotel"],
         default="webrtc",
         help="Transport type",
     )

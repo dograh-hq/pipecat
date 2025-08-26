@@ -228,7 +228,7 @@ class OutputImageRawFrame(DataFrame, ImageRawFrame):
 
     def __str__(self):
         pts = format_pts(self.pts)
-        return f"{self.name}(pts: {pts}, size: {self.size}, format: {self.format})"
+        return f"{self.name}(pts: {pts}, destination: {self.transport_destination}, size: {self.size}, format: {self.format})"
 
 
 @dataclass
@@ -478,6 +478,12 @@ class TranscriptionUpdateFrame(DataFrame):
 class LLMMessagesFrame(DataFrame):
     """Frame containing LLM messages for chat completion.
 
+    .. deprecated:: 0.0.79
+        This class is deprecated and will be removed in a future version.
+        Instead, use either:
+        - `LLMMessagesUpdateFrame` with `run_llm=True`
+        - `OpenAILLMContextFrame` with desired messages in a new context
+
     A frame containing a list of LLM messages. Used to signal that an LLM
     service should run a chat completion and emit an LLMFullResponseStartFrame,
     TextFrames and an LLMFullResponseEndFrame. Note that the `messages`
@@ -489,6 +495,20 @@ class LLMMessagesFrame(DataFrame):
     """
 
     messages: List[dict]
+
+    def __post_init__(self):
+        super().__post_init__()
+        import warnings
+
+        warnings.simplefilter("always")
+        warnings.warn(
+            "LLMMessagesFrame is deprecated and will be removed in a future version. "
+            "Instead, use either "
+            "`LLMMessagesUpdateFrame` with `run_llm=True`, or "
+            "`OpenAILLMContextFrame` with desired messages in a new context",
+            DeprecationWarning,
+            stacklevel=2,
+        )
 
 
 @dataclass

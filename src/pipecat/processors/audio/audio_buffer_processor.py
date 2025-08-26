@@ -187,6 +187,7 @@ class AudioBufferProcessor(FrameProcessor):
         Calls audio handlers with any remaining buffered audio before stopping.
         """
         await self._call_on_audio_data_handler()
+        self._reset_recording()
         self._recording = False
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
@@ -239,6 +240,7 @@ class AudioBufferProcessor(FrameProcessor):
 
         if self._buffer_size > 0 and len(self._user_audio_buffer) > self._buffer_size:
             await self._call_on_audio_data_handler()
+            self._reset_recording()
 
         # Process turn recording with preprocessed data.
         if self._enable_turn_audio:
@@ -296,8 +298,6 @@ class AudioBufferProcessor(FrameProcessor):
             self._sample_rate,
             self._num_channels,
         )
-
-        self._reset_audio_buffers()
 
     def _buffer_has_audio(self, buffer: bytearray) -> bool:
         """Check if a buffer contains audio data."""

@@ -19,6 +19,7 @@ from loguru import logger
 
 from pipecat.audio.utils import create_stream_resampler
 from pipecat.frames.frames import (
+    BotStartedSpeakingFrame,
     CancelFrame,
     EndFrame,
     Frame,
@@ -29,11 +30,11 @@ from pipecat.frames.frames import (
     StartFrame,
     StartInterruptionFrame,
     TTSAudioRawFrame,
+    TTSStartedFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessorSetup
 from pipecat.services.ai_service import AIService
 from pipecat.transports.services.tavus import TavusCallbacks, TavusParams, TavusTransportClient
-from pipecat.utils.asyncio.watchdog_queue import WatchdogQueue
 
 
 class TavusVideoService(AIService):
@@ -229,6 +230,13 @@ class TavusVideoService(AIService):
         elif isinstance(frame, OutputTransportReadyFrame):
             self._transport_ready = True
             await self.push_frame(frame, direction)
+        elif isinstance(frame, TTSStartedFrame):
+            await self.start_ttfb_metrics()
+        elif isinstance(frame, BotStartedSpeakingFrame):
+            # We constantly receive audio through WebRTC, but most of the time it is silence.
+            # As soon as we receive actual audio, the base output transport will create a
+            # BotStartedSpeakingFrame, which we can use as a signal for the TTFB metrics.
+            await self.stop_ttfb_metrics()
         else:
             await self.push_frame(frame, direction)
 
@@ -246,13 +254,12 @@ class TavusVideoService(AIService):
     async def _create_send_task(self):
         """Create the audio sending task if it doesn't exist."""
         if not self._send_task:
-            self._queue = WatchdogQueue(self.task_manager)
+            self._queue = asyncio.Queue()
             self._send_task = self.create_task(self._send_task_handler())
 
     async def _cancel_send_task(self):
         """Cancel the audio sending task if it exists."""
         if self._send_task:
-            self._queue.cancel()
             await self.cancel_task(self._send_task)
             self._send_task = None
 

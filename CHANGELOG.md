@@ -7,7 +7,239 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed a `CartesiaTTSService` issue that was causing the application to hang
+  after Cartesia's 5 minutes timed out.
+
+## [0.0.81] - 2025-08-25
+
 ### Added
+
+- Added `pipecat.extensions.voicemail`, a module for detecting voicemail vs.
+  live conversation, primarily intended for use in outbound calling scenarios.
+  The voicemail module is optimized for text LLMs only.
+
+- Added new frames to the `idle_timeout_frames` arg: `TranscriptionFrame`,
+  `InterimTranscriptionFrame`, `UserStartedSpeakingFrame`, and
+  `UserStoppedSpeakingFrame`. These additions serve as indicators of user
+  activity in the pipeline idle detection logic.
+
+- Allow passing custom pipeline sink and source processors to a
+  `Pipeline`. Pipeline source and sink processors are used to know and control
+  what's coming in and out of a `Pipeline` processor.
+
+- Added `FrameProcessor.pause_processing_system_frames()` and
+  `FrameProcessor.resume_processing_system_frames()`. These allow to pause and
+  resume the processing of system frame.
+
+- Added new `on_process_frame()` observer method which makes it possible to know
+  when a frame is being processed.
+
+- Added new `FrameProcessor.entry_processor()` method. This allows you to access
+  the first non-compound processor in a pipeline.
+
+- Added `FrameProcessor` properties `processors`, `next` and `previous`.
+
+- `ElevenLabsTTSService` now supports additional runtime changes to the `model`,
+  `language`, and `voice_settings` parameters.
+
+- Added `apply_text_normalization` support to `ElevenLabsTTSService` and
+  `ElevenLabsHttpTTSService`.
+
+- Added `MistralLLMService`, using Mistral's chat completion API.
+
+- Added the ability to retry executing a chat completion after a timeout period
+  for `OpenAILLMService` and its subclasses, `AnthropicLLMService`, and
+  `AWSBedrockLLMService`. The LLM services accept new args:
+  `retry_timeout_secs` and `retry_on_timeout`. This feature is disabled by
+  default.
+
+### Changed
+
+- Updated `daily-python` to 0.19.7.
+
+### Deprecated
+
+- `FrameProcessor.wait_for_task()` is deprecated. Use `await task` or `await
+  asyncio.wait_for(task, timeout)` instead.
+
+### Removed
+
+- Watchdog timers have been removed. They were introduced in 0.0.72 to help
+  diagnose pipeline freezes. Unfortunately, they proved ineffective since they
+  required developers to use Pipecat-specific queues, iterators, and events to
+  correctly reset the timer, which limited their usefulness and added friction.
+
+- Removed unused `FrameProcessor.set_parent()` and
+  `FrameProcessor.get_parent()`.
+
+### Fixed
+
+- Fixed an issue that would cause `PipelineRunner` and `PipelineTask` to not
+  handle external asyncio task cancellation properly.
+
+- Added `SpeechmaticsSTTService` exception handling on connection and sending.
+
+- Replaced `asyncio.wait_for()` for `wait_for2.wait_for()` for Python <
+  3.12. because of issues regarding task cancellation (i.e. cancellation is
+  never propagated).
+  See https://bugs.python.org/issue42130
+
+- Fixed an `AudioBufferProcessor` issues that would cause audio overlap when
+  setting a max buffer size.
+
+- Fixed an issue where `AsyncAITTSService` had very high latency in responding
+  by adding `force=true` when sending the flush command.
+
+### Performance
+
+- Improve `PipelineTask` performance by using direct mode processors and by
+  removing unnecessary tasks.
+
+- Improve `ParallelPipeline` performance by using direct mode, by not
+  creating a task for each frame and every sub-pipeline and also by removing
+  other unnecessary tasks.
+
+- `Pipeline` performance improvements by using direct mode.
+
+### Other
+
+- Added `14w-function-calling-mistal.py` using `MistralLLMService`.
+
+- Added `13j-azure-transcription.py` using `AzureSTTService`.
+
+## [0.0.80] - 2025-08-13
+
+### Added
+
+- Added `GeminiTTSService` which uses Google Gemini to generate TTS output. The
+  Gemini model can be prompted to insert styled speech to control the TTS
+  output.
+
+- Added Exotel support to Pipecat's development runner. You can now connect
+  using the runner with `uv run bot.py -t exotel` and an ngrok connection to
+  HTTP port 7860.
+
+- Added `enable_direct_mode` argument to `FrameProcessor`. The direct mode is
+  for processors which require very little I/O or compute resources, that is
+  processors that can perform their task almost immediately. These type of
+  processors don't need any of the internal tasks and queues usually created by
+  frame processors which means overall application performance might be slightly
+  increased. Use with care.
+
+- Added TTFB metrics for `HeyGenVideoService` and `TavusVideoService`.
+
+- Added `endpoint_id` parameter to `AzureSTTService`. ([Custom EndpointId](https://docs.azure.cn/en-us/ai-services/speech-service/how-to-recognize-speech?pivots=programming-language-python#use-a-custom-endpoint))
+
+### Changed
+
+- `WatchdogPriorityQueue` now requires the items to be inserted to always be
+  tuples and the size of the tuple needs to be specified in the constructor when
+  creating the queue with the `tuple_size` argument.
+
+- Updated Moondream to revision `2025-01-09`.
+
+- Updated `PlayHTHttpTTSService` to no longer use the `pyht` client to remove
+  compatibility issues with other packages. Now you can use the PlayHT HTTP
+  service with other services, like GoogleLLMService.
+
+- Updated `pyproject.toml` to once again pin `numba` to `>=0.61.2` in order to
+  resolve package versioning issues.
+
+- Updated the `STTMuteFilter` to include `VADUserStartedSpeakingFrame` and
+  `VADUserStoppedSpeakingFrame` in the list of frames to filter when the
+  filtering is on.
+
+### Performance
+
+- Improving the latency of the `HeyGenVideoService`.
+
+- Improved some frame processors performance by using the new frame processor
+  direct mode. In direct mode a frame processor will process frames right away
+  avoiding the need for internal queues and tasks. This is useful for some
+  simple processors. For example, in processors that wrap other processors
+  (e.g. `Pipeline`, `ParallelPipeline`), we add one processor before and one
+  after the wrapped processors (internally, you will see them as sources and
+  sinks). These sources and sinks don't do any special processing and they
+  basically forward frames. So, for these simple processors we now enable the
+  new direct mode which avoids creating any internal tasks (and queues) and
+  therefore improves performance.
+
+### Fixed
+
+- Fixed an issue with the `BaseWhisperSTTService` where the language was
+  specified as an enum and not a string.
+
+- Fixed an issue where `SmallWebRTCTransport` ended before TTS finished.
+
+- Fixed an issue in `OpenAIRealtimeBetaLLMService` where specifying a `text`
+  `modalities` didn't result in text being outputted from the model.
+
+- Added SSML reserved character escaping to `AzureBaseTTSService` to properly
+  handle special characters in text sent to Azure TTS. This fixes an issue
+  where characters like `&`, `<`, `>`, `"`, and `'` in LLM-generated text would
+  cause TTS failures.
+
+- Fixed a `WatchdogPriorityQueue` issue that could cause an exception when
+  compating watchdog cancel sentinel items with other items in the queue.
+
+- Fixed an issue that would cause system frames to not be processed with higher
+  priority than other frames. This could cause slower interruption times.
+
+- Fixed an issue where retrying a websocket connection error would result in an
+  error.
+
+### Other
+
+- Add foundation example `19b-openai-realtime-beta-text.py`, showing how to use
+  `OpenAIRealtimeBetaLLMService` to output text to a TTS service.
+
+- Add vision support to release evals so we can run the foundational examples 12
+  series.
+
+- Added foundational example `15a-switch-languages.py` to release evals. It is
+  able to detect if we switched the language properly.
+
+- Updated foundational examples to show how to enclose complex logic
+  (e.g. `ParallelPipeline`) into a single processor so the main pipeline becomes
+  simpler.
+
+- Added `07n-interruptible-gemini.py`, demonstrating how to use
+  `GeminiTTSService`.
+
+## [0.0.79] - 2025-08-07
+
+### Changed
+
+- Changed `pipecat-ai`'s `openai` dependency to `>=1.74.0,<=1.99.1` due to a
+  breaking change in `openai` 1.99.2 ([commit](https://github.com/openai/openai-python/commit/657f551dbe583ffb259d987dafae12c6211fba06))
+
+### Deprecated
+
+- `TTSService.say()` is deprecated, push a `TTSSpeakFrame` instead. Calling
+  functions directly is a discouraged pattern in Pipecat because, for example,
+  it might cause issues with frame ordering.
+
+- `LLMMessagesFrame` is deprecated, in favor of either:
+
+  - `LLMMessagesUpdateFrame` with `run_llm=True`
+  - `OpenAILLMContextFrame` with desired messages in a new context
+
+- `LLMUserResponseAggregator` and `LLMAssistantResponseAggregator` are
+  deprecated, as they depended on the now-deprecated `LLMMessagesFrame`. Use
+  `LLMUserContextAggregator` and `LLMAssistantResponseAggregator` (or
+  LLM-specific subclasses thereof) instead.
+
+## [0.0.78] - 2025-08-07
+
+### Added
+
+- Added `enable_emulated_vad_interruptions` to `LLMUserAggregatorParams`.
+  When user speech is emulated (e.g. when a transcription is received but
+  VAD doesn't detect speech), this parameter controls whether the emulated
+  speech can interrupt the bot. Default is False (emulated speech is ignored
+  while the bot is speaking).
 
 - Added new `handle_sigint` and `handle_sigterm` to `RunnerArguments`. This
   allows applications to know what settings they should use for the environment
@@ -47,7 +279,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added Chinese, Japanese, Korean word timestamp support to
   `CartesiaTTSService`.
 
-- Added `region` parameter to `GladiaSTTService`. Accepted values: eu-west (default), us-west.
+- Added `region` parameter to `GladiaSTTService`. Accepted values: eu-west
+  (default), us-west.
 
 ### Changed
 
@@ -79,6 +312,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The development runner now strips any provided protocol (e.g. https://) from
   the proxy address and issues a warning. It also strips trailing `/`.
+
+### Deprecated
+
+- In the `pipecat.runner.daily`, the `configure_with_args()` function is
+  deprecated. Use the `configure()` function instead.
+
+- The development runner's `/connect` endpoint is deprecated and will be
+  removed in a future version. Use the `/start` endpoint in its place. In the
+  meantime, both endpoints work and deliver equivalent functionality.
 
 ### Fixed
 
@@ -113,15 +355,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Fixed an issue in `TaskObserver` (a proxy to all observers) that was degrading
   global performance.
-
-### Deprecated
-
-- In the `pipecat.runner.daily`, the `configure_with_args()` function is
-  deprecated. Use the `configure()` function instead.
-
-- The development runner's `/connect` endpoint is deprecated and will be
-  removed in a future version. Use the `/start` endpoint in its place. In the
-  meantime, both endpoints work and deliver equivalent functionality.
 
 ### Other
 

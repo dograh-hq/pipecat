@@ -20,7 +20,6 @@ from pipecat.metrics.metrics import LLMTokenUsage
 from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
 from pipecat.services.llm_service import FunctionCallFromLLM
 from pipecat.services.openai.llm import OpenAILLMService
-from pipecat.utils.asyncio.watchdog_async_iterator import WatchdogAsyncIterator
 from pipecat.utils.tracing.service_decorators import traced_llm
 
 
@@ -68,17 +67,20 @@ class SambaNovaLLMService(OpenAILLMService):  # type: ignore
         logger.debug(f"Creating SambaNova client with API {base_url}")
         return super().create_client(api_key, base_url, **kwargs)
 
-    async def get_chat_completions(
+    def build_chat_completion_params(
         self, context: OpenAILLMContext, messages: List[ChatCompletionMessageParam]
-    ) -> Any:
-        """Get chat completions from SambaNova API endpoint.
+    ) -> dict:
+        """Build parameters for SambaNova chat completion request.
+
+        SambaNova doesn't support some OpenAI parameters like frequency_penalty,
+        presence_penalty, and seed.
 
         Args:
-            context: OpenAI LLM context containing tools and configuration.
-            messages: List of chat completion message parameters.
+            context: The LLM context containing tools and configuration.
+            messages: List of chat completion messages to send.
 
         Returns:
-            Chat completion response stream from SambaNova API.
+            Dictionary of parameters for the chat completion request.
         """
         params = {
             "model": self.model_name,
@@ -94,9 +96,7 @@ class SambaNovaLLMService(OpenAILLMService):  # type: ignore
         }
 
         params.update(self._settings["extra"])
-
-        chunks = await self._client.chat.completions.create(**params)
-        return chunks
+        return params
 
     @traced_llm  # type: ignore
     async def _process_context(self, context: OpenAILLMContext) -> AsyncStream[ChatCompletionChunk]:
@@ -126,7 +126,7 @@ class SambaNovaLLMService(OpenAILLMService):  # type: ignore
             context
         )
 
-        async for chunk in WatchdogAsyncIterator(chunk_stream, manager=self.task_manager):
+        async for chunk in chunk_stream:
             if chunk.usage:
                 tokens = LLMTokenUsage(
                     prompt_tokens=chunk.usage.prompt_tokens,

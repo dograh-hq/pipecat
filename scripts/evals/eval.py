@@ -4,7 +4,6 @@
 # SPDX-License-Identifier: BSD 2-Clause License
 #
 
-import argparse
 import asyncio
 import io
 import os
@@ -13,11 +12,12 @@ import time
 import wave
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import aiofiles
 from deepgram import LiveOptions
 from loguru import logger
+from PIL.ImageFile import ImageFile
 from utils import (
     EvalResult,
     load_module_from_path,
@@ -30,7 +30,7 @@ from pipecat.adapters.schemas.function_schema import FunctionSchema
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams
-from pipecat.frames.frames import EndTaskFrame
+from pipecat.frames.frames import EndTaskFrame, OutputImageRawFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
@@ -48,6 +48,8 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 
 PIPELINE_IDLE_TIMEOUT_SECS = 60
 EVAL_TIMEOUT_SECS = 90
+
+EvalPrompt = str | Tuple[str, ImageFile]
 
 
 class EvalRunner:
@@ -87,7 +89,13 @@ class EvalRunner:
     async def assert_eval_false(self):
         await self._queue.put(False)
 
-    async def run_eval(self, example_file: str, prompt: str, eval: Optional[str] = None):
+    async def run_eval(
+        self,
+        example_file: str,
+        prompt: EvalPrompt,
+        eval: str,
+        user_speaks_first: bool = False,
+    ):
         if not re.match(self._pattern, example_file):
             return
 
@@ -104,7 +112,9 @@ class EvalRunner:
         try:
             tasks = [
                 asyncio.create_task(run_example_pipeline(script_path)),
-                asyncio.create_task(run_eval_pipeline(self, example_file, prompt, eval)),
+                asyncio.create_task(
+                    run_eval_pipeline(self, example_file, prompt, eval, user_speaks_first)
+                ),
             ]
             _, pending = await asyncio.wait(tasks, timeout=EVAL_TIMEOUT_SECS)
             if pending:
@@ -178,6 +188,7 @@ async def run_example_pipeline(script_path: Path):
         DailyParams(
             audio_in_enabled=True,
             audio_out_enabled=True,
+            video_in_enabled=True,
             vad_analyzer=SileroVADAnalyzer(),
         ),
     )
@@ -189,7 +200,11 @@ async def run_example_pipeline(script_path: Path):
 
 
 async def run_eval_pipeline(
-    eval_runner: EvalRunner, example_file: str, prompt: str, eval: Optional[str]
+    eval_runner: EvalRunner,
+    example_file: str,
+    prompt: EvalPrompt,
+    eval: str,
+    user_speaks_first: bool = False,
 ):
     logger.info(f"Starting eval bot")
 
@@ -202,6 +217,7 @@ async def run_eval_pipeline(
         DailyParams(
             audio_in_enabled=True,
             audio_out_enabled=True,
+            video_out_enabled=True,
             vad_analyzer=SileroVADAnalyzer(params=VADParams(stop_secs=2.0)),
         ),
     )
@@ -210,12 +226,15 @@ async def run_eval_pipeline(
     # 5" (in audio) this can be converted to "32 is 5".
     stt = DeepgramSTTService(
         api_key=os.getenv("DEEPGRAM_API_KEY"),
-        live_options=LiveOptions(smart_format=False),
+        live_options=LiveOptions(
+            language="multi",
+            smart_format=False,
+        ),
     )
 
     tts = CartesiaTTSService(
         api_key=os.getenv("CARTESIA_API_KEY"),
-        voice_id="71a7ad14-091c-4e8e-a314-022ece01c121",  # British Reading Lady
+        voice_id="97f4b8fb-f2fe-444b-bb9a-c109783a857a",  # Nathan
     )
 
     llm = OpenAILLMService(api_key=os.getenv("OPENAI_API_KEY"))
@@ -239,15 +258,25 @@ async def run_eval_pipeline(
     )
     tools = ToolsSchema(standard_tools=[eval_function])
 
-    # See if we need to include an eval prompt.
-    eval_prompt = ""
-    if eval:
-        eval_prompt = f"The answer is correct if the user says [{eval}]."
+    # Load example prompt depending on image.
+    example_prompt = ""
+    example_image: Optional[ImageFile] = None
+    if isinstance(prompt, str):
+        example_prompt = prompt
+    elif isinstance(prompt, tuple):
+        example_prompt, example_image = prompt
+
+    eval_prompt = f"The answer is correct if it's appropriate for the context and matches: {eval}."
+    common_system_prompt = f"Call the eval function with your assessment only if the user answers the question. {eval_prompt}"
+    if user_speaks_first:
+        system_prompt = f"You are an LLM eval, be extremly brief. You will start the conversation by saying: '{example_prompt}'. {common_system_prompt}"
+    else:
+        system_prompt = f"You are an LLM eval, be extremly brief. Your goal is to first ask one question: {example_prompt}. {common_system_prompt}"
 
     messages = [
         {
             "role": "system",
-            "content": f"You are an LLM eval, be extremly brief. Your goal is to only ask one question: {prompt}. Call the eval function only if the user answers the question and check if the answer is correct (words as numbers are valid). {eval_prompt}",
+            "content": system_prompt,
         },
     ]
 
@@ -285,7 +314,23 @@ async def run_eval_pipeline(
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
         logger.info(f"Client connected")
+        if example_image:
+            await task.queue_frame(
+                OutputImageRawFrame(
+                    image=example_image.tobytes(),
+                    size=example_image.size,
+                    format="RGB",
+                )
+            )
         await audio_buffer.start_recording()
+
+        # Default behavior is for the bot to speak first
+        # If the eval bot speaks first, we append the prompt to the messages
+        if user_speaks_first:
+            messages.append(
+                {"role": "user", "content": f"Start by saying this exactly: '{prompt}'"}
+            )
+            await task.queue_frames([context_aggregator.user().get_context_frame()])
 
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport, client):
@@ -296,6 +341,8 @@ async def run_eval_pipeline(
     async def on_pipeline_idle_timeout(task):
         await eval_runner.assert_eval_false()
 
-    runner = PipelineRunner()
+    # TODO(aleix): We should handle SIGINT and SIGTERM so we can cancel both the
+    # eval and the example.
+    runner = PipelineRunner(handle_sigint=False)
 
     await runner.run(task)
