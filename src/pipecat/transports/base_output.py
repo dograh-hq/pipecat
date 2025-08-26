@@ -688,7 +688,11 @@ class BaseOutputTransport(FrameProcessor):
                 # it's actually speaking.
                 is_speaking = False
                 if isinstance(frame, TTSAudioRawFrame):
-                    is_speaking = True
+                    # Lets handle the case where we are adding silence between
+                    # sentences in AudioContextWordTTSService. We don't want to
+                    # trigger another BotStartedSpeaking in case of silence.
+                    has_sound = any(byte != 0 for byte in frame.audio)
+                    is_speaking = has_sound
                 elif isinstance(frame, SpeechOutputAudioRawFrame):
                     if not is_silence(frame.audio):
                         is_speaking = True
@@ -724,9 +728,9 @@ class BaseOutputTransport(FrameProcessor):
 
                         await self._transport.write_audio_frame(frame)
                     except TransportClientNotConnectedException:
-                        # The client is not connected yet, sleep for around 20 ms instead of
-                        # going around in continuous loop
-                        sleep_interval = self._params.audio_out_10ms_chunks * 10 / 1000
+                        # The client is not connected yet, sleep instead of going around 
+                        # in continuous loop
+                        sleep_interval = self._params.audio_out_10ms_chunks * 5 * 10 / 1000
                         logger.warning(
                             f"TransportClientNotConnectedException - Sleeping for {sleep_interval} ms"
                         )

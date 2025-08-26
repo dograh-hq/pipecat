@@ -940,17 +940,17 @@ class LLMAssistantContextAggregator(LLMContextResponseAggregator):
         elif isinstance(frame, UserImageRawFrame) and frame.request and frame.request.tool_call_id:
             await self._handle_user_image_frame(frame)
         elif isinstance(frame, BotStoppedSpeakingFrame):
-            await self.push_aggregation()
+            await self.push_aggregation(caller="_handle_bot_stopped_speaking")
             await self.push_frame(frame, direction)
         else:
             await self.push_frame(frame, direction)
 
-    async def push_aggregation(self):
+    async def push_aggregation(self, caller: str = "push_aggregation"):
         """Push the current assistant aggregation with timestamp."""
+        logger.debug(f"{self} push_aggregation called by {caller}, aggregation: {self._aggregation}")
+
         if not self._aggregation:
             return
-
-        logger.debug(f"{self} push_aggregation called, aggregation: {self._aggregation}")
 
         # Note: self._aggregation contains text from TTS (not direct LLM output)
         aggregation = self._aggregation.strip()
@@ -989,7 +989,7 @@ class LLMAssistantContextAggregator(LLMContextResponseAggregator):
             await self.push_context_frame(FrameDirection.UPSTREAM)
 
     async def _handle_interruptions(self, frame: StartInterruptionFrame):
-        await self.push_aggregation()  # This will trigger reordering if needed
+        await self.push_aggregation(caller="_handle_interruptions")  # This will trigger reordering if needed
         self._started = 0
         await self.reset()  # This will clean up response session tracking
 
@@ -1073,7 +1073,7 @@ class LLMAssistantContextAggregator(LLMContextResponseAggregator):
         del self._function_calls_in_progress[frame.request.tool_call_id]
 
         await self.handle_user_image_frame(frame)
-        await self.push_aggregation()
+        await self.push_aggregation(caller="_handle_user_image_frame")
         await self.push_context_frame(FrameDirection.UPSTREAM)
 
     def _cleanup_response_session(self, response_id: str):
@@ -1090,16 +1090,19 @@ class LLMAssistantContextAggregator(LLMContextResponseAggregator):
 
     async def _handle_llm_end(self, _: LLMFullResponseEndFrame):
         self._started -= 1
-        await self.push_aggregation()
+        await self.push_aggregation(caller="_handle_llm_end")
 
     async def _handle_text(self, frame: TextFrame):
         if not self._started:
+            logger.warning(f"{self} _handle_text Started is 0, skipping text frame: {frame.text}")
             return
 
         if self._params.expect_stripped_words:
             self._aggregation += f" {frame.text}" if self._aggregation else frame.text
         else:
             self._aggregation += frame.text
+            
+        logger.debug(f"{self} _handle_text Started: {self._started} TextFrame: {frame.text} Aggregation: {self._aggregation}")
 
     def _context_updated_task_finished(self, task: asyncio.Task):
         self._context_updated_tasks.discard(task)
