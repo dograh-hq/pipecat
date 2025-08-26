@@ -57,6 +57,10 @@ class AudioSynchronizer:
 
         # Track if we're currently recording
         self._recording = False
+        
+        # Track total bytes received
+        self._total_input_bytes = 0
+        self._total_output_bytes = 0
 
     def register_processors(self, input_processor, output_processor):
         """Register input and output processors to synchronize.
@@ -84,11 +88,20 @@ class AudioSynchronizer:
         """Start recording and synchronizing audio."""
         self._recording = True
         self._reset_buffers()
+        # Reset byte counters on new recording
+        self._total_input_bytes = 0
+        self._total_output_bytes = 0
+        logger.info("AudioSynchronizer: Started recording, reset byte counters")
 
     async def stop_recording(self):
         """Stop recording and flush remaining audio."""
         await self._call_audio_handler()
         self._recording = False
+        logger.info(
+            f"AudioSynchronizer: Stopped recording - "
+            f"total_input_bytes={self._total_input_bytes}, "
+            f"total_output_bytes={self._total_output_bytes}"
+        )
 
     def _has_audio(self) -> bool:
         """Check if both buffers contain audio data."""
@@ -105,9 +118,17 @@ class AudioSynchronizer:
         if not self._recording:
             return
 
+        # Track total bytes received
+        bytes_received = len(pcm)
+        self._total_input_bytes += bytes_received
+        
         # Add audio
         self._input_buffer.extend(pcm)
-        logger.debug(f"AudioSynchronizer: Input buffer size: {len(self._input_buffer)}")
+        logger.debug(
+            f"AudioSynchronizer: Input - bytes_received={bytes_received}, "
+            f"total_input_bytes={self._total_input_bytes}, "
+            f"buffer_size={len(self._input_buffer)}"
+        )
 
         # Check if we should emit
         if self._buffer_size > 0 and len(self._input_buffer) > self._buffer_size:
@@ -120,9 +141,17 @@ class AudioSynchronizer:
         if not self._recording:
             return
 
+        # Track total bytes received
+        bytes_received = len(pcm)
+        self._total_output_bytes += bytes_received
+        
         # Add audio
         self._output_buffer.extend(pcm)
-        logger.debug(f"AudioSynchronizer: Output buffer size: {len(self._output_buffer)}")
+        logger.debug(
+            f"AudioSynchronizer: Output - bytes_received={bytes_received}, "
+            f"total_output_bytes={self._total_output_bytes}, "
+            f"buffer_size={len(self._output_buffer)}"
+        )
 
     async def _call_audio_handler(self):
         """Call the audio data event handler with merged audio."""
