@@ -750,7 +750,7 @@ class BaseOutputTransport(FrameProcessor):
                             # Check if we've exceeded the timeout
                             elapsed_time = time.time() - exception_start_time
                             if elapsed_time > EXCEPTION_TIMEOUT_SECONDS:
-                                logger.error(
+                                logger.warning(
                                     f"TransportClientNotConnectedException persisted for {elapsed_time:.2f}s - breaking audio loop"
                                 )
                                 break
