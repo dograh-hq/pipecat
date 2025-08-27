@@ -683,6 +683,10 @@ class BaseOutputTransport(FrameProcessor):
             bot_speaking_counter = 0
             speech_last_speaking_time = 0
 
+            # Track continuous TransportClientNotConnectedException
+            exception_start_time = None
+            EXCEPTION_TIMEOUT_SECONDS = 2.0
+
             async for frame in self._next_frame():
                 # Notify the bot started speaking upstream if necessary and that
                 # it's actually speaking.
@@ -732,7 +736,25 @@ class BaseOutputTransport(FrameProcessor):
                         # error, or we might see unbounded growth in the AudioInputBuffer
                         # for recording
                         await self._transport.push_frame(frame)
+
+                        # Reset exception tracking on successful write
+                        exception_start_time = None
                     except TransportClientNotConnectedException:
+                        # Track the first occurrence of the exception
+                        if exception_start_time is None:
+                            exception_start_time = time.time()
+                            logger.warning(
+                                f"TransportClientNotConnectedException started - will break if persists for {EXCEPTION_TIMEOUT_SECONDS}s"
+                            )
+                        else:
+                            # Check if we've exceeded the timeout
+                            elapsed_time = time.time() - exception_start_time
+                            if elapsed_time > EXCEPTION_TIMEOUT_SECONDS:
+                                logger.error(
+                                    f"TransportClientNotConnectedException persisted for {elapsed_time:.2f}s - breaking audio loop"
+                                )
+                                break
+
                         # The client is not connected yet, sleep instead of going around
                         # in continuous loop
                         sleep_interval = self._params.audio_out_10ms_chunks * 5 * 10 / 1000

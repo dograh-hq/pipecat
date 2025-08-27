@@ -589,6 +589,7 @@ class FrameProcessor(BaseObject):
         elif isinstance(frame, StopInterruptionFrame):
             self._should_report_ttfb = True
         elif isinstance(frame, CancelFrame):
+            logger.debug(f"{self} Received CancelFrame")
             await self.__cancel(frame)
         elif isinstance(frame, (FrameProcessorPauseFrame, FrameProcessorPauseUrgentFrame)):
             await self.__pause(frame)

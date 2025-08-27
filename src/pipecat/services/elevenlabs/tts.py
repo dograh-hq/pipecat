@@ -480,13 +480,18 @@ class ElevenLabsTTSService(AudioContextWordTTSService):
             self._keepalive_task = self.create_task(self._keepalive_task_handler())
 
     async def _disconnect(self):
+        logger.debug(f"{self}: disconnecting")
         if self._receive_task:
             await self.cancel_task(self._receive_task)
             self._receive_task = None
 
+        logger.debug(f"{self}: receive_task cancelled")
+
         if self._keepalive_task:
             await self.cancel_task(self._keepalive_task)
             self._keepalive_task = None
+
+        logger.debug(f"{self}: keepalive_task cancelled")
 
         await self._disconnect_websocket()
 

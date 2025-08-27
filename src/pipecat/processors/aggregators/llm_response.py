@@ -1098,17 +1098,12 @@ class LLMAssistantContextAggregator(LLMContextResponseAggregator):
 
     async def _handle_text(self, frame: TextFrame):
         if not self._started:
-            logger.warning(f"{self} _handle_text Started is 0, skipping text frame: {frame.text}")
             return
 
         if self._params.expect_stripped_words:
             self._aggregation += f" {frame.text}" if self._aggregation else frame.text
         else:
             self._aggregation += frame.text
-
-        logger.debug(
-            f"{self} _handle_text Started: {self._started} TextFrame: {frame.text} Aggregation: {self._aggregation}"
-        )
 
     def _context_updated_task_finished(self, task: asyncio.Task):
         self._context_updated_tasks.discard(task)
