@@ -124,11 +124,11 @@ class AudioSynchronizer:
 
         # Add audio
         self._input_buffer.extend(pcm)
-        logger.debug(
-            f"AudioSynchronizer: Input - bytes_received={bytes_received}, "
-            f"total_input_bytes={self._total_input_bytes}, "
-            f"buffer_size={len(self._input_buffer)}"
-        )
+        # logger.debug(
+        #     f"AudioSynchronizer: Input - bytes_received={bytes_received}, "
+        #     f"total_input_bytes={self._total_input_bytes}, "
+        #     f"buffer_size={len(self._input_buffer)}"
+        # )
 
         # Check if we should emit
         if self._buffer_size > 0 and len(self._input_buffer) > self._buffer_size:
@@ -147,11 +147,11 @@ class AudioSynchronizer:
 
         # Add audio
         self._output_buffer.extend(pcm)
-        logger.debug(
-            f"AudioSynchronizer: Output - bytes_received={bytes_received}, "
-            f"total_output_bytes={self._total_output_bytes}, "
-            f"buffer_size={len(self._output_buffer)}"
-        )
+        # logger.debug(
+        #     f"AudioSynchronizer: Output - bytes_received={bytes_received}, "
+        #     f"total_output_bytes={self._total_output_bytes}, "
+        #     f"buffer_size={len(self._output_buffer)}"
+        # )
 
     async def _call_audio_handler(self):
         """Call the audio data event handler with merged audio."""
