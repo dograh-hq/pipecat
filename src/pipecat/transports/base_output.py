@@ -685,7 +685,7 @@ class BaseOutputTransport(FrameProcessor):
 
             # Track continuous TransportClientNotConnectedException
             exception_start_time = None
-            EXCEPTION_TIMEOUT_SECONDS = 2.0
+            EXCEPTION_TIMEOUT_SECONDS = 3.0
 
             async for frame in self._next_frame():
                 # Notify the bot started speaking upstream if necessary and that
@@ -757,7 +757,7 @@ class BaseOutputTransport(FrameProcessor):
 
                         # The client is not connected yet, sleep instead of going around
                         # in continuous loop
-                        sleep_interval = self._params.audio_out_10ms_chunks * 5 * 10 / 1000
+                        sleep_interval = 1 # 1 second
                         logger.warning(
                             f"TransportClientNotConnectedException - Sleeping for {sleep_interval} ms"
                         )
