@@ -740,6 +740,12 @@ class BaseOutputTransport(FrameProcessor):
                         # Reset exception tracking on successful write
                         exception_start_time = None
                     except TransportClientNotConnectedException:
+                        # Lets push bot stopped speaking frame if the
+                        # bot was speaking to let the processors in pipeline
+                        # know (especially TTS which pauses processing until 
+                        # BotSpeakingFrame is seen in the pipeline)
+                        await self._bot_stopped_speaking()
+                        
                         # Track the first occurrence of the exception
                         if exception_start_time is None:
                             exception_start_time = time.time()
