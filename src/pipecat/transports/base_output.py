@@ -759,7 +759,7 @@ class BaseOutputTransport(FrameProcessor):
                         # in continuous loop
                         sleep_interval = 1 # 1 second
                         logger.warning(
-                            f"TransportClientNotConnectedException - Sleeping for {sleep_interval} ms"
+                            f"TransportClientNotConnectedException - Sleeping for {sleep_interval}s"
                         )
                         await asyncio.sleep(sleep_interval)
                 else:

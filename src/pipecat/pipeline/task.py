@@ -383,6 +383,7 @@ class PipelineTask(BasePipelineTask):
         except asyncio.CancelledError:
             # Raise exception back to the pipeline runner so it can cancel this
             # task properly.
+            logger.debug("In PipelineTask, received CancelledError")
             raise
         finally:
             # We can reach this point for different reasons:
