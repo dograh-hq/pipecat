@@ -596,6 +596,11 @@ class LLMUserContextAggregator(LLMContextResponseAggregator):
             self._emulating_vad = False
 
     async def _handle_user_stopped_speaking(self, _: UserStoppedSpeakingFrame):
+        logger.debug(
+            f"User stopped speaking in LLMUserContextAggregator. aggregation: {self._aggregation} interim_results: "
+            f"{self._seen_interim_results} was_bot_speaking: {self._was_bot_speaking} bot_speaking: {self._bot_speaking}"
+        )
+
         self._user_speaking = False
         # We just stopped speaking. Let's see if there's some aggregation to
         # push. If the last thing we saw is an interim transcription, let's wait
@@ -611,9 +616,11 @@ class LLMUserContextAggregator(LLMContextResponseAggregator):
             self._aggregation_event.set()
 
     async def _handle_bot_started_speaking(self, _: BotStartedSpeakingFrame):
+        logger.debug("In LLMUserContextAggregator._handle_bot_started_speaking")
         self._bot_speaking = True
 
     async def _handle_bot_stopped_speaking(self, _: BotStoppedSpeakingFrame):
+        logger.debug("In LLMUserContextAggregator._handle_bot_stopped_speaking")
         self._bot_speaking = False
 
     async def _handle_transcription(self, frame: TranscriptionFrame):
@@ -808,6 +815,7 @@ class LLMAssistantContextAggregator(LLMContextResponseAggregator):
 
         # IMMEDIATELY reorder if we have function messages from same response
         tracked_ids = self._response_function_messages.get(self._current_llm_response_id)
+        logger.debug(f"In handle_aggregation - tracked_ids: {tracked_ids}")
         if tracked_ids:
             await self._reorder_context_for_response(self._current_llm_response_id, text_msg_index)
             self._cleanup_response_session(self._current_llm_response_id)
@@ -1082,6 +1090,7 @@ class LLMAssistantContextAggregator(LLMContextResponseAggregator):
 
     def _cleanup_response_session(self, response_id: str):
         """Clean up response session without relying on end frames."""
+        logger.debug(f"in _cleanup_response_session, response_id: {response_id}")
         if response_id in self._response_function_messages:
             del self._response_function_messages[response_id]
         if self._current_llm_response_id == response_id:
@@ -1089,11 +1098,16 @@ class LLMAssistantContextAggregator(LLMContextResponseAggregator):
 
     async def _handle_llm_start(self, _: LLMFullResponseStartFrame):
         self._started += 1
+        logger.debug(f"in _handle_llm_start, self._started: {self._started}")
         if self._started == 1:  # First start of this response
             self._current_llm_response_id = str(uuid.uuid4())
+            logger.debug(
+                f"in _handle_llm_start, self._current_llm_response_id: {self._current_llm_response_id}"
+            )
 
     async def _handle_llm_end(self, _: LLMFullResponseEndFrame):
         self._started -= 1
+        logger.debug(f"in _handle_llm_end, self._started: {self._started}")
         await self.push_aggregation(caller="_handle_llm_end")
 
     async def _handle_text(self, frame: TextFrame):
