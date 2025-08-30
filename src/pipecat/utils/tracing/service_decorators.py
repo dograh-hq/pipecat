@@ -547,7 +547,7 @@ def traced_llm(func: Optional[Callable] = None, *, name: Optional[str] = None) -
                                 calls_json = json.dumps(function_calls_info, indent=2)
                             except Exception:
                                 calls_json = str(function_calls_info)
-                                
+
                             calls_json = f"###FUNCTION_CALLS###{calls_json}###FUNCTION_CALLS###"
 
                             if output_payload:

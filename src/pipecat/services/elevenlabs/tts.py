@@ -545,7 +545,16 @@ class ElevenLabsTTSService(AudioContextWordTTSService):
                 # Close all contexts and the socket
                 if self._context_id:
                     await self._websocket.send(json.dumps({"close_socket": True}))
-                await self._websocket.close()
+
+                disconnect_task = self.create_task(self._websocket.close(), "disconnect_elevenlabs")
+
+                try:
+                    # Wait for disconnect with 2-second timeout
+                    await asyncio.wait_for(disconnect_task, timeout=2.0)
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "ElevenLabs disconnect timed out after 2 seconds, cancelling task"
+                    )
                 logger.debug("Disconnected from ElevenLabs")
         except Exception as e:
             logger.error(f"{self} error closing websocket: {e}")

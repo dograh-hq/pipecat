@@ -300,9 +300,13 @@ class BaseOpenAILLMService(LLMService):
 
         await self.start_ttfb_metrics()
 
+        logger.debug(f"{self} Going to call stream chat completions")
+
         chunk_stream: AsyncStream[ChatCompletionChunk] = await self._stream_chat_completions(
             context
         )
+
+        logger.debug(f"{self} Called stream chat completions")
 
         # Track if we've sent the LLMGeneratedTextFrame signal for this response
         text_generation_signaled = False
@@ -409,6 +413,7 @@ class BaseOpenAILLMService(LLMService):
 
         context = None
         if isinstance(frame, OpenAILLMContextFrame):
+            logger.debug(f"{self} Received OpenAILLMContextFrame: {frame}")
             context: OpenAILLMContext = frame.context
         elif isinstance(frame, LLMMessagesFrame):
             context = OpenAILLMContext.from_messages(frame.messages)

@@ -512,6 +512,7 @@ class LLMUserContextAggregator(LLMContextResponseAggregator):
         await self.reset()
         await self.handle_aggregation(aggregation)
         frame = OpenAILLMContextFrame(self._context)
+        logger.debug(f"{self} Pushing OpenAILLMContextFrame {frame}")
         await self.push_frame(frame)
 
     async def push_aggregation(self):

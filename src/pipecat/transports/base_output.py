@@ -742,10 +742,10 @@ class BaseOutputTransport(FrameProcessor):
                     except TransportClientNotConnectedException:
                         # Lets push bot stopped speaking frame if the
                         # bot was speaking to let the processors in pipeline
-                        # know (especially TTS which pauses processing until 
+                        # know (especially TTS which pauses processing until
                         # BotSpeakingFrame is seen in the pipeline)
                         await self._bot_stopped_speaking()
-                        
+
                         # Track the first occurrence of the exception
                         if exception_start_time is None:
                             exception_start_time = time.time()
@@ -763,7 +763,7 @@ class BaseOutputTransport(FrameProcessor):
 
                         # The client is not connected yet, sleep instead of going around
                         # in continuous loop
-                        sleep_interval = 1 # 1 second
+                        sleep_interval = 1  # 1 second
                         logger.warning(
                             f"TransportClientNotConnectedException - Sleeping for {sleep_interval}s"
                         )

@@ -72,7 +72,9 @@ class UserTranscriptProcessor(BaseTranscriptProcessor):
         """
         await super().process_frame(frame, direction)
 
-        if isinstance(frame, (UserStartedSpeakingFrame, UserStoppedSpeakingFrame, StartInterruptionFrame)):
+        if isinstance(
+            frame, (UserStartedSpeakingFrame, UserStoppedSpeakingFrame, StartInterruptionFrame)
+        ):
             logger.debug(f"{self} {frame}")
 
         if isinstance(frame, TranscriptionFrame):

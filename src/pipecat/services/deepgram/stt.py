@@ -6,6 +6,7 @@
 
 """Deepgram speech-to-text service implementation."""
 
+import asyncio
 import time
 from typing import AsyncGenerator, Dict, Optional
 
@@ -262,7 +263,15 @@ class DeepgramSTTService(STTService):
     async def _disconnect(self):
         if self._connection.is_connected:
             logger.debug("Disconnecting from Deepgram")
-            await self._connection.finish()
+
+            # Create a task for the disconnect operation
+            disconnect_task = self.create_task(self._connection.finish(), "disconnect_deepgram")
+
+            try:
+                # Wait for disconnect with 2-second timeout
+                await asyncio.wait_for(disconnect_task, timeout=2.0)
+            except asyncio.TimeoutError:
+                logger.warning("Deepgram disconnect timed out after 2 seconds, cancelling task")
             logger.debug("Disconnected from Deepgram")
 
     async def start_metrics(self):
