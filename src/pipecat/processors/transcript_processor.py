@@ -24,6 +24,8 @@ from pipecat.frames.frames import (
     TranscriptionMessage,
     TranscriptionUpdateFrame,
     TTSTextFrame,
+    UserStartedSpeakingFrame,
+    UserStoppedSpeakingFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.utils.time import time_now_iso8601
@@ -69,6 +71,9 @@ class UserTranscriptProcessor(BaseTranscriptProcessor):
             direction: Frame processing direction.
         """
         await super().process_frame(frame, direction)
+
+        if isinstance(frame, (UserStartedSpeakingFrame, UserStoppedSpeakingFrame, StartInterruptionFrame)):
+            logger.debug(f"{self} {frame}")
 
         if isinstance(frame, TranscriptionFrame):
             message = TranscriptionMessage(
