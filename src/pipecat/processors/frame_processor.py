@@ -540,6 +540,8 @@ class FrameProcessor(BaseObject):
         if self._enable_direct_mode:
             await self.__process_frame(frame, direction, callback)
         else:
+            if isinstance(frame, CancelFrame):
+                logger.debug(f"{self} Putting CancelFrame in input queue")
             await self.__input_queue.put((frame, direction, callback))
 
     async def pause_processing_frames(self):
@@ -789,11 +791,11 @@ class FrameProcessor(BaseObject):
         """
         while True:
             if self.__should_block_system_frames and self.__input_event:
-                logger.trace(f"{self}: system frame processing paused")
+                logger.debug(f"{self}: system frame processing paused")
                 await self.__input_event.wait()
                 self.__input_event.clear()
                 self.__should_block_system_frames = False
-                logger.trace(f"{self}: system frame processing resumed")
+                logger.debug(f"{self}: system frame processing resumed")
 
             (frame, direction, callback) = await self.__input_queue.get()
 
@@ -812,11 +814,11 @@ class FrameProcessor(BaseObject):
         """Handle non-system frames from the process queue."""
         while True:
             if self.__should_block_frames and self.__process_event:
-                logger.trace(f"{self}: frame processing paused")
+                logger.debug(f"{self}: frame processing paused")
                 await self.__process_event.wait()
                 self.__process_event.clear()
                 self.__should_block_frames = False
-                logger.trace(f"{self}: frame processing resumed")
+                logger.debug(f"{self}: frame processing resumed")
 
             (frame, direction, callback) = await self.__process_queue.get()
 
