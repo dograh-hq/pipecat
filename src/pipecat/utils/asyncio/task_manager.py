@@ -185,16 +185,30 @@ class TaskManager(BaseTaskManager):
             timeout: The optional timeout in seconds to wait for the task to cancel.
         """
         name = task.get_name()
-        task.cancel()
+        if "OpenAILLMService" in name:
+            logger.debug(f"{name}: Starting cancel_task, done={task.done()}, cancelled={task.cancelled()}")
+        cancel_result = task.cancel()
+        if "OpenAILLMService" in name:
+            logger.debug(f"{name}: task.cancel() returned {cancel_result}")
         try:
             if timeout:
+                logger.debug(f"{name}: Awaiting task with timeout={timeout}s")
                 await asyncio.wait_for(task, timeout=timeout)
             else:
+                if "OpenAILLMService" in name:
+                    logger.debug(f"{name}: Awaiting task without timeout")
+                import time
+                start_time = time.time()
                 await task
+                elapsed = time.time() - start_time
+                if "OpenAILLMService" in name:
+                    logger.debug(f"{name}: Task await completed in {elapsed:.3f}s")
         except asyncio.TimeoutError:
             logger.warning(f"{name}: timed out waiting for task to cancel")
         except asyncio.CancelledError:
             # Here are sure the task is cancelled properly.
+            if "OpenAILLMService" in name:
+                logger.debug(f"{name}: Task cancelled successfully")
             pass
         except Exception as e:
             logger.exception(f"{name}: unexpected exception while cancelling task: {e}")

@@ -9,6 +9,7 @@
 import asyncio
 import base64
 import json
+import time
 from typing import Any, Dict, List, Mapping, Optional
 
 import httpx
@@ -409,6 +410,9 @@ class BaseOpenAILLMService(LLMService):
             frame: The frame to process.
             direction: The direction of frame processing.
         """
+        start_time = time.time()
+        logger.debug(f"{self} Processing frame: {frame}")
+        
         await super().process_frame(frame, direction)
 
         context = None
@@ -434,6 +438,14 @@ class BaseOpenAILLMService(LLMService):
                 await self._process_context(context)
             except httpx.TimeoutException:
                 await self._call_event_handler("on_completion_timeout")
+            except asyncio.CancelledError:
+                logger.debug(f"{self} process_frame received CancelledError during _process_context")
+                raise
             finally:
+                logger.debug(f"{self} In finally block of BaseOpenAILLMService")
                 await self.stop_processing_metrics()
                 await self.push_frame(LLMFullResponseEndFrame())
+        
+        # Log processing time for the frame
+        processing_time = time.time() - start_time
+        logger.info(f"{self} Frame processing completed - Frame: {frame}, Time: {processing_time:.4f}s")

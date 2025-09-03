@@ -412,8 +412,14 @@ class FrameProcessor(BaseObject):
 
     async def stop_all_metrics(self):
         """Stop all active metrics collection."""
+        if "OpenAILLMService" in str(self):
+            logger.debug(f"{self} In stop_all_metrics of FrameProcessor")
+        
         await self.stop_ttfb_metrics()
         await self.stop_processing_metrics()
+        
+        if "OpenAILLMService" in str(self):
+            logger.debug(f"{self} In stop_all_metrics of FrameProcessor after stopping metrics")
 
     def create_task(self, coroutine: Coroutine, name: Optional[str] = None) -> asyncio.Task:
         """Create a new task managed by this processor.
@@ -671,6 +677,8 @@ class FrameProcessor(BaseObject):
     async def _start_interruption(self):
         """Start handling an interruption by cancelling current tasks."""
         try:
+            if "OpenAILLMService" in str(self):
+                logger.debug(f"{self} In _start_interruption of FrameProcessor")
             # Cancel the process task. This will stop processing queued frames.
             await self.__cancel_process_task()
         except Exception as e:
@@ -679,6 +687,9 @@ class FrameProcessor(BaseObject):
 
         # Create a new process queue and task.
         self.__create_process_task()
+        
+        if "OpenAILLMService" in str(self):
+            logger.debug(f"{self} In _start_interruption of FrameProcessor after handling interruption")
 
     async def _stop_interruption(self):
         """Stop handling an interruption."""
@@ -754,6 +765,9 @@ class FrameProcessor(BaseObject):
 
     def __create_process_task(self):
         """Create the non-system frame processing task."""
+        if "OpenAILLMService" in str(self):
+            logger.debug(f"{self} In __create_process_task of FrameProcessor {self._enable_direct_mode}")
+        
         if self._enable_direct_mode:
             return
 
@@ -762,12 +776,25 @@ class FrameProcessor(BaseObject):
             self.__process_event = asyncio.Event()
             self.__process_queue = asyncio.Queue()
             self.__process_frame_task = self.create_task(self.__process_frame_task_handler())
+            
+        if "OpenAILLMService" in str(self):
+            logger.debug(f"{self} In __create_process_task of FrameProcessor after creating task")
 
     async def __cancel_process_task(self):
         """Cancel the non-system frame processing task."""
         if self.__process_frame_task:
+            
+            if "OpenAILLMService" in str(self):
+                logger.debug(f"{self} In __cancel_process_task of FrameProcessor Length of ProcessQueue: {self.__process_queue.qsize()} Length of InputQueue: {self.__input_queue.qsize()}")
+                logger.debug(f"{self} Task done status: {self.__process_frame_task.done()}, cancelled: {self.__process_frame_task.cancelled()}")
+            
+            logger.debug(f"{self} Calling cancel_task for {self.__process_frame_task.get_name()}")
             await self.cancel_task(self.__process_frame_task)
+            logger.debug(f"{self} cancel_task completed for {self.__process_frame_task.get_name() if self.__process_frame_task else 'None'}")
             self.__process_frame_task = None
+            
+        if "OpenAILLMService" in str(self):
+            logger.debug(f"{self} In __cancel_process_task of FrameProcessor after cancelling task")
 
     async def __process_frame(
         self, frame: Frame, direction: FrameDirection, callback: Optional[FrameCallback]
@@ -812,16 +839,21 @@ class FrameProcessor(BaseObject):
 
     async def __process_frame_task_handler(self):
         """Handle non-system frames from the process queue."""
-        while True:
-            if self.__should_block_frames and self.__process_event:
-                logger.debug(f"{self}: frame processing paused")
-                await self.__process_event.wait()
-                self.__process_event.clear()
-                self.__should_block_frames = False
-                logger.debug(f"{self}: frame processing resumed")
+        try:
+            while True:
+                if self.__should_block_frames and self.__process_event:
+                    logger.debug(f"{self}: frame processing paused")
+                    await self.__process_event.wait()
+                    self.__process_event.clear()
+                    self.__should_block_frames = False
+                    logger.debug(f"{self}: frame processing resumed")
 
-            (frame, direction, callback) = await self.__process_queue.get()
+                (frame, direction, callback) = await self.__process_queue.get()
 
-            await self.__process_frame(frame, direction, callback)
+                await self.__process_frame(frame, direction, callback)
 
-            self.__process_queue.task_done()
+                self.__process_queue.task_done()
+        except asyncio.CancelledError:
+            if "OpenAILLMService" in str(self):
+                logger.debug(f"{self} Handling CancelledError in __process_frame_task_handler")
+            raise
