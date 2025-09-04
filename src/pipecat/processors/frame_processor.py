@@ -788,9 +788,10 @@ class FrameProcessor(BaseObject):
                 logger.debug(f"{self} In __cancel_process_task of FrameProcessor Length of ProcessQueue: {self.__process_queue.qsize()} Length of InputQueue: {self.__input_queue.qsize()}")
                 logger.debug(f"{self} Task done status: {self.__process_frame_task.done()}, cancelled: {self.__process_frame_task.cancelled()}")
             
-            logger.debug(f"{self} Calling cancel_task for {self.__process_frame_task.get_name()}")
             await self.cancel_task(self.__process_frame_task)
-            logger.debug(f"{self} cancel_task completed for {self.__process_frame_task.get_name() if self.__process_frame_task else 'None'}")
+            
+            if "OpenAILLMService" in str(self):
+                logger.debug(f"{self} cancel_task completed for {self.__process_frame_task.get_name() if self.__process_frame_task else 'None'}")
             self.__process_frame_task = None
             
         if "OpenAILLMService" in str(self):
@@ -804,7 +805,11 @@ class FrameProcessor(BaseObject):
             await self.process_frame(frame, direction)
             # If this frame has an associated callback, call it now.
             if callback:
+                if "OpenAILLMService" in str(self):
+                    logger.debug(f"{self} __process_frame: About to call callback for {frame}")
                 await callback(self, frame, direction)
+                if "OpenAILLMService" in str(self):
+                    logger.debug(f"{self} __process_frame: Returned from callback for {frame}")
         except Exception as e:
             logger.exception(f"{self}: error processing frame: {e}")
             await self.push_error(ErrorFrame(str(e)))
@@ -848,11 +853,51 @@ class FrameProcessor(BaseObject):
                     self.__should_block_frames = False
                     logger.debug(f"{self}: frame processing resumed")
 
-                (frame, direction, callback) = await self.__process_queue.get()
-
+                
+                if "OpenAILLMService" in str(self):
+                    logger.debug(f"{self} __process_frame_task_handler: About to get from queue (qsize={self.__process_queue.qsize()})")
+                
+                # Use a timeout to make the task more responsive to cancellation
+                # and to detect when we're stuck waiting on a dead queue
+                timeout = 1.0  # Check every second
+                wait_count = 0
+                while True:
+                    try:
+                        (frame, direction, callback) = await asyncio.wait_for(
+                            self.__process_queue.get(), 
+                            timeout=timeout
+                        )
+                        break  # Successfully got an item
+                    except asyncio.TimeoutError:
+                        wait_count += 1
+                        # Check if we should be cancelled
+                        current_task = asyncio.current_task()
+                        if "OpenAILLMService" in str(self) and current_task and current_task.cancelled():
+                            logger.debug(f"{self} __process_frame_task_handler: Detected cancellation during queue.get timeout")
+                            raise asyncio.CancelledError
+                        
+                        # Check if the task reference has been cleared (indicating we should stop)
+                        if "OpenAILLMService" in str(self) and self.__process_frame_task != current_task:
+                            logger.debug(f"{self} __process_frame_task_handler: Task reference changed, exiting")
+                            raise asyncio.CancelledError
+                        
+                        # Log periodically if we're waiting too long
+                        if "OpenAILLMService" in str(self) and wait_count % 5 == 1:
+                            logger.debug(f"{self} __process_frame_task_handler: Still waiting for queue item after {wait_count}s (queue size: {self.__process_queue.qsize()})")
+                        
+                        # If we've been waiting too long, something is wrong
+                        if "OpenAILLMService" in str(self) and wait_count > 30:
+                            logger.error(f"{self} __process_frame_task_handler: Waited 30s for queue item, likely stuck. Exiting.")
+                            raise asyncio.CancelledError
+                        
+                        continue  # Keep trying
+                
                 await self.__process_frame(frame, direction, callback)
-
+                if "OpenAILLMService" in str(self):
+                    logger.debug(f"{self} __process_frame_task_handler: About to call task_done for {frame}")
                 self.__process_queue.task_done()
+                if "OpenAILLMService" in str(self):
+                    logger.debug(f"{self} __process_frame_task_handler: Called task_done for {frame}")
         except asyncio.CancelledError:
             if "OpenAILLMService" in str(self):
                 logger.debug(f"{self} Handling CancelledError in __process_frame_task_handler")

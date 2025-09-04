@@ -286,11 +286,13 @@ class BaseOpenAILLMService(LLMService):
                 del message["mime_type"]
 
         chunks = await self.get_chat_completions(context, messages)
+        logger.debug(f"{self}: Got chunk stream from get_chat_completions")
 
         return chunks
 
     @traced_llm
     async def _process_context(self, context: OpenAILLMContext):
+        logger.debug(f"{self} _process_context: Starting")
         functions_list = []
         arguments_list = []
         tool_id_list = []
@@ -303,9 +305,13 @@ class BaseOpenAILLMService(LLMService):
 
         logger.debug(f"{self} Going to call stream chat completions")
 
-        chunk_stream: AsyncStream[ChatCompletionChunk] = await self._stream_chat_completions(
-            context
-        )
+        try:
+            chunk_stream: AsyncStream[ChatCompletionChunk] = await self._stream_chat_completions(
+                context
+            )
+        except asyncio.CancelledError:
+            logger.debug(f"{self} _process_context: CancelledError during _stream_chat_completions")
+            raise
 
         logger.debug(f"{self} Called stream chat completions")
 
@@ -314,65 +320,75 @@ class BaseOpenAILLMService(LLMService):
 
         # We use a WatchdogAsyncIterator to ensure that we don't hang on to
         # the chunk stream if the LLM response takes too long.
-        async for chunk in chunk_stream:
-            if chunk.usage:
-                tokens = LLMTokenUsage(
-                    prompt_tokens=chunk.usage.prompt_tokens,
-                    completion_tokens=chunk.usage.completion_tokens,
-                    total_tokens=chunk.usage.total_tokens,
-                )
-                await self.start_llm_usage_metrics(tokens)
+        logger.debug(f"{self} _process_context: About to iterate over chunk_stream")
+        chunk_count = 0
+        try:
+            async for chunk in chunk_stream:
+                chunk_count += 1
+                if chunk_count % 10 == 0:
+                    logger.debug(f"{self} _process_context: Processed {chunk_count} chunks")
+                if chunk.usage:
+                    tokens = LLMTokenUsage(
+                        prompt_tokens=chunk.usage.prompt_tokens,
+                        completion_tokens=chunk.usage.completion_tokens,
+                        total_tokens=chunk.usage.total_tokens,
+                    )
+                    await self.start_llm_usage_metrics(tokens)
 
-            if chunk.choices is None or len(chunk.choices) == 0:
-                continue
+                if chunk.choices is None or len(chunk.choices) == 0:
+                    continue
 
-            await self.stop_ttfb_metrics()
+                await self.stop_ttfb_metrics()
 
-            if not chunk.choices[0].delta:
-                continue
+                if not chunk.choices[0].delta:
+                    continue
 
-            if chunk.choices[0].delta.tool_calls:
-                # We're streaming the LLM response to enable the fastest response times.
-                # For text, we just yield each chunk as we receive it and count on consumers
-                # to do whatever coalescing they need (eg. to pass full sentences to TTS)
-                #
-                # If the LLM is a function call, we'll do some coalescing here.
-                # If the response contains a function name, we'll yield a frame to tell consumers
-                # that they can start preparing to call the function with that name.
-                # We accumulate all the arguments for the rest of the streamed response, then when
-                # the response is done, we package up all the arguments and the function name and
-                # yield a frame containing the function name and the arguments.
+                if chunk.choices[0].delta.tool_calls:
+                    # We're streaming the LLM response to enable the fastest response times.
+                    # For text, we just yield each chunk as we receive it and count on consumers
+                    # to do whatever coalescing they need (eg. to pass full sentences to TTS)
+                    #
+                    # If the LLM is a function call, we'll do some coalescing here.
+                    # If the response contains a function name, we'll yield a frame to tell consumers
+                    # that they can start preparing to call the function with that name.
+                    # We accumulate all the arguments for the rest of the streamed response, then when
+                    # the response is done, we package up all the arguments and the function name and
+                    # yield a frame containing the function name and the arguments.
 
-                tool_call = chunk.choices[0].delta.tool_calls[0]
-                if tool_call.index != func_idx:
-                    functions_list.append(function_name)
-                    arguments_list.append(arguments)
-                    tool_id_list.append(tool_call_id)
-                    function_name = ""
-                    arguments = ""
-                    tool_call_id = ""
-                    func_idx += 1
-                if tool_call.function and tool_call.function.name:
-                    function_name += tool_call.function.name
-                    tool_call_id = tool_call.id
-                if tool_call.function and tool_call.function.arguments:
-                    # Keep iterating through the response to collect all the argument fragments
-                    arguments += tool_call.function.arguments
-            elif chunk.choices[0].delta.content:
-                # Send a frame that signals that some text was generated in the current generation
-                if not text_generation_signaled:
-                    await self.push_frame(LLMGeneratedTextFrame())
-                    text_generation_signaled = True
+                    tool_call = chunk.choices[0].delta.tool_calls[0]
+                    if tool_call.index != func_idx:
+                        functions_list.append(function_name)
+                        arguments_list.append(arguments)
+                        tool_id_list.append(tool_call_id)
+                        function_name = ""
+                        arguments = ""
+                        tool_call_id = ""
+                        func_idx += 1
+                    if tool_call.function and tool_call.function.name:
+                        function_name += tool_call.function.name
+                        tool_call_id = tool_call.id
+                    if tool_call.function and tool_call.function.arguments:
+                        # Keep iterating through the response to collect all the argument fragments
+                        arguments += tool_call.function.arguments
+                elif chunk.choices[0].delta.content:
+                    # Send a frame that signals that some text was generated in the current generation
+                    if not text_generation_signaled:
+                        await self.push_frame(LLMGeneratedTextFrame())
+                        text_generation_signaled = True
 
-                await self.push_frame(LLMTextFrame(chunk.choices[0].delta.content))
+                    await self.push_frame(LLMTextFrame(chunk.choices[0].delta.content))
 
-            # When gpt-4o-audio / gpt-4o-mini-audio is used for llm or stt+llm
-            # we need to get LLMTextFrame for the transcript
-            elif hasattr(chunk.choices[0].delta, "audio") and chunk.choices[0].delta.audio.get(
-                "transcript"
-            ):
-                await self.push_frame(LLMTextFrame(chunk.choices[0].delta.audio["transcript"]))
+                # When gpt-4o-audio / gpt-4o-mini-audio is used for llm or stt+llm
+                # we need to get LLMTextFrame for the transcript
+                elif hasattr(chunk.choices[0].delta, "audio") and chunk.choices[0].delta.audio.get(
+                    "transcript"
+                ):
+                    await self.push_frame(LLMTextFrame(chunk.choices[0].delta.audio["transcript"]))
 
+        except asyncio.CancelledError:
+            logger.debug(f"{self} _process_context: CancelledError during chunk iteration after {chunk_count} chunks")
+            raise
+        
         # if we got a function name and arguments, check to see if it's a function with
         # a registered handler. If so, run the registered callback, save the result to
         # the context, and re-prompt to get a chat answer. If we don't have a registered
@@ -399,6 +415,8 @@ class BaseOpenAILLMService(LLMService):
                 )
 
             await self.run_function_calls(function_calls)
+        
+        logger.debug(f"{self} _process_context: Completed successfully after {chunk_count} chunks")
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         """Process frames for LLM completion requests.
@@ -437,9 +455,13 @@ class BaseOpenAILLMService(LLMService):
                 await self.start_processing_metrics()
                 await self._process_context(context)
             except httpx.TimeoutException:
+                logger.debug(f"{self} process_frame: Caught httpx.TimeoutException")
                 await self._call_event_handler("on_completion_timeout")
             except asyncio.CancelledError:
                 logger.debug(f"{self} process_frame received CancelledError during _process_context")
+                raise
+            except Exception as e:
+                logger.debug(f"{self} process_frame: Caught unexpected exception: {e}")
                 raise
             finally:
                 logger.debug(f"{self} In finally block of BaseOpenAILLMService")

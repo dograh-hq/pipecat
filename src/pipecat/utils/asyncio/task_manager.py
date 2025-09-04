@@ -14,6 +14,7 @@ comprehensive monitoring and cleanup capabilities.
 import asyncio
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+import io
 from typing import Coroutine, Dict, Optional, Sequence
 
 from loguru import logger
@@ -196,13 +197,77 @@ class TaskManager(BaseTaskManager):
                 await asyncio.wait_for(task, timeout=timeout)
             else:
                 if "OpenAILLMService" in name:
-                    logger.debug(f"{name}: Awaiting task without timeout")
+                    logger.debug(f"{name}: Awaiting task without timeout - will check status periodically")
+                
                 import time
                 start_time = time.time()
-                await task
+                check_interval = 0.5  # Check more frequently at first
+                last_log_time = 0
+                iteration_count = 0
+                
+                while not task.done():
+                    iteration_count += 1
+                    elapsed = time.time() - start_time
+                    
+                    # Log status periodically
+                    if "OpenAILLMService" in name and (elapsed - last_log_time) >= check_interval:
+                        logger.debug(f"{name}: Still waiting for task cancellation (elapsed: {elapsed:.1f}s, iterations: {iteration_count})")
+                        logger.debug(f"{name}: Task state - cancelled={task.cancelled()}, done={task.done()}")
+                        
+                        # Try to get the current exception if any
+                        if task.done() and not task.cancelled():
+                            try:
+                                exc = task.exception()
+                                if exc:
+                                    logger.debug(f"{name}: Task has exception: {exc}")
+                            except:
+                                pass
+                        
+                        # Warn at different thresholds
+                        if elapsed > 5 and elapsed <= 5.5:
+                            logger.warning(f"{name}: Task taking longer than expected to cancel (5s elapsed)")
+                            # List other active tasks
+                            # all_tasks = asyncio.all_tasks()
+                            # openai_tasks = [t for t in all_tasks if "OpenAILLMService" in t.get_name()]
+                            # logger.debug(f"{name}: Found {len(openai_tasks)} OpenAILLMService tasks out of {len(all_tasks)} total")
+                            # for t in openai_tasks:
+                            #     logger.debug(f"  Task: {t.get_name()} - done={t.done()}, cancelled={t.cancelled()}")
+                            
+                            buf = io.StringIO()
+                            task.print_stack(limit=10, file=buf)
+                            logger.debug(f"{self} Print Stack of Task: {buf.getvalue()}")
+                            logger.debug(f"{self} Task coroutine: {task._coro}")
+                            
+                        elif elapsed > 10 and elapsed <= 10.5:
+                            logger.error(f"{name}: Task still not cancelled after 10s - likely stuck")
+                        elif elapsed > 30 and elapsed <= 30.5:
+                            logger.critical(f"{name}: Task stuck for 30s during cancellation - THIS IS THE BUG!")
+                            logger.critical(f"{name}: Breaking out of wait loop to prevent infinite hang")
+                            break
+                        
+                        last_log_time = elapsed
+                        # Gradually increase check interval
+                        if check_interval < 2.0:
+                            check_interval = min(2.0, check_interval * 1.5)
+                    
+                    try:
+                        # Use a short timeout to check if task completes
+                        await asyncio.wait_for(task, timeout=0.05)
+                        break
+                    except asyncio.TimeoutError:
+                        # Task not done yet, continue waiting
+                        continue
+                    except Exception as e:
+                        if "OpenAILLMService" in name:
+                            logger.debug(f"{name}: Got exception while waiting: {e}")
+                        raise
+                
                 elapsed = time.time() - start_time
                 if "OpenAILLMService" in name:
-                    logger.debug(f"{name}: Task await completed in {elapsed:.3f}s")
+                    if task.done():
+                        logger.debug(f"{name}: Task await completed in {elapsed:.3f}s - task is done (cancelled={task.cancelled()})")
+                    else:
+                        logger.error(f"{name}: Exited wait loop after {elapsed:.3f}s but task.done()={task.done()}!")
         except asyncio.TimeoutError:
             logger.warning(f"{name}: timed out waiting for task to cancel")
         except asyncio.CancelledError:
