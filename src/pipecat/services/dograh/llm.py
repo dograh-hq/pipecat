@@ -25,7 +25,7 @@ class DograhLLMService(OpenAILLMService):
         self,
         *,
         api_key: str,
-        base_url: str = "https://services.dograh.com/api/v1",
+        base_url: str = "https://services.dograh.com/api/v1/llm",
         model: str = "default",
         **kwargs,
     ):
@@ -33,7 +33,7 @@ class DograhLLMService(OpenAILLMService):
 
         Args:
             api_key: The Dograh API key for authentication.
-            base_url: The base URL for Dograh API. Defaults to "https://services.dograh.com/api/v1".
+            base_url: The base URL for Dograh API. Defaults to "https://services.dograh.com/api/v1/llm".
             model: The model identifier to use. Options include "default", "fast", "accurate".
                    The actual model used is determined by Dograh backend configuration.
             **kwargs: Additional keyword arguments passed to OpenAILLMService.
