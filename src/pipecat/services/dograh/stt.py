@@ -46,8 +46,7 @@ class DograhSTTService(STTService):
     """Dograh speech-to-text service using WebSocket streaming.
     
     This service provides real-time speech recognition using Dograh's unified WebSocket API.
-    The actual STT provider (Deepgram, OpenAI, etc.) is determined by the Dograh backend 
-    configuration. Supports streaming transcription, interim results, and VAD events.
+    Supports streaming transcription, interim results, and VAD events.
     """
 
     def __init__(
@@ -224,7 +223,7 @@ class DograhSTTService(STTService):
     
     async def _keepalive_task_handler(self):
         """Send periodic keepalive messages to maintain WebSocket connection."""
-        KEEPALIVE_SLEEP = 10
+        KEEPALIVE_SLEEP = 5
         while True:
             await asyncio.sleep(KEEPALIVE_SLEEP)
             try:

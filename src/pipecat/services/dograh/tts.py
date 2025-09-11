@@ -417,7 +417,10 @@ class DograhTTSService(AudioContextWordTTSService):
             logger.trace(f"Closing context {self._context_id} due to interruption")
             try:
                 await self._websocket.send(
-                    json.dumps({"context_id": self._context_id, "close_context": True})
+                    json.dumps({
+                        "type": "close_context",
+                        "context_id": self._context_id
+                    })
                 )
             except Exception as e:
                 logger.error(f"Error closing context on interruption: {e}")

@@ -472,4 +472,4 @@ class BaseOpenAILLMService(LLMService):
         
         # Log processing time for the frame
         processing_time = time.time() - start_time
-        logger.info(f"{self} Frame processing completed - Frame: {frame}, Time: {processing_time:.4f}s")
+        logger.debug(f"{self} Frame processing completed - Frame: {frame}, Time: {processing_time:.4f}s")
