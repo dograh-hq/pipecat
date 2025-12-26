@@ -137,7 +137,9 @@ class VobizFrameSerializer(FrameSerializer):
             and isinstance(frame, (EndFrame, CancelFrame))
         ):
             self._hangup_attempted = True
-            await self._hang_up_call()
+            # Stop streams first, then hang up call
+            await self._stop_audio_streams()
+            await self._hangup_call()
             return None
         elif isinstance(frame, InterruptionFrame):
             answer = {"event": "clearAudio", "streamId": self._stream_id}
@@ -171,16 +173,48 @@ class VobizFrameSerializer(FrameSerializer):
         # Return None for unhandled frames
         return None
 
-    async def _hang_up_call(self):
-        """Hang up the Vobiz call and stop all audio streams using centralized API client."""
+    async def _stop_audio_streams(self):
+        """Stop Vobiz audio streams using centralized API client."""
         try:
-            # Try to import VobizApiClient, fallback to direct API calls if not available
-            try:
-                from api.services.telephony.vobiz_api_client import VobizApiClient
-                use_api_client = True
-            except ImportError:
-                import aiohttp
-                use_api_client = False
+            from api.services.telephony.vobiz_api_client import VobizApiClient
+            
+            auth_id = self._auth_id
+            auth_token = self._auth_token
+            call_id = self._call_id
+
+            if not call_id or not auth_id or not auth_token:
+                missing = []
+                if not call_id:
+                    missing.append("call_id")
+                if not auth_id:
+                    missing.append("auth_id")
+                if not auth_token:
+                    missing.append("auth_token")
+
+                logger.warning(
+                    f"Cannot stop Vobiz audio streams: missing required parameters: {', '.join(missing)}"
+                )
+                return
+
+            # Use centralized API client for consistent behavior
+            api_client = VobizApiClient(auth_id, auth_token)
+            result = await api_client.stop_audio_stream(call_id)
+            
+            logger.info(f"Vobiz stop audio streams - call {call_id}: {result}")
+
+        except Exception as e:
+            logger.error(
+                f"Exception stopping Vobiz audio streams - "
+                f"Call ID: {self._call_id}, "
+                f"Auth ID: {self._auth_id[:8] if self._auth_id else 'None'}*****, "
+                f"Exception: {type(e).__name__}: {e}"
+            )
+
+    async def _hangup_call(self):
+        """Hang up Vobiz call using centralized API client."""
+        try:
+            # Import may fail in IDE but works at runtime when main app runs
+            from api.services.telephony.vobiz_api_client import VobizApiClient
             
             auth_id = self._auth_id
             auth_token = self._auth_token
@@ -200,51 +234,15 @@ class VobizFrameSerializer(FrameSerializer):
                 )
                 return
 
-            if use_api_client:
-                # Use centralized API client for consistent behavior
-                api_client = VobizApiClient(auth_id, auth_token)
-                stream_result, hangup_result = await api_client.stop_streams_and_hangup(call_id)
-                
-                # Log results from both operations
-                if stream_result["success"]:
-                    logger.info(f"Successfully stopped Vobiz audio streams for call {call_id}")
-                else:
-                    logger.warning(f"Failed to stop Vobiz audio streams for call {call_id}: {stream_result.get('error')}")
-                    
-                if hangup_result["success"]:
-                    logger.info(f"Successfully terminated Vobiz call {call_id}")
-                else:
-                    logger.warning(f"Failed to terminate Vobiz call {call_id}: {hangup_result.get('error')}")
-            else:
-                # Fallback to direct API calls if VobizApiClient not available
-                headers = {"X-Auth-ID": auth_id, "X-Auth-Token": auth_token}
-                
-                async with aiohttp.ClientSession() as session:
-                    # Stop streams first
-                    try:
-                        stream_endpoint = f"https://api.vobiz.ai/api/v1/Account/{auth_id}/Call/{call_id}/Stream/"
-                        async with session.delete(stream_endpoint, headers=headers) as response:
-                            if response.status in [200, 404]:
-                                logger.info(f"Successfully stopped Vobiz audio streams for call {call_id}")
-                            else:
-                                logger.warning(f"Failed to stop Vobiz audio streams: HTTP {response.status}")
-                    except Exception as e:
-                        logger.warning(f"Exception stopping Vobiz audio streams: {e}")
-                    
-                    # Then hang up call
-                    try:
-                        call_endpoint = f"https://api.vobiz.ai/api/v1/Account/{auth_id}/Call/{call_id}/"
-                        async with session.delete(call_endpoint, headers=headers) as response:
-                            if response.status in [204, 404]:
-                                logger.info(f"Successfully terminated Vobiz call {call_id}")
-                            else:
-                                logger.warning(f"Failed to terminate Vobiz call: HTTP {response.status}")
-                    except Exception as e:
-                        logger.warning(f"Exception terminating Vobiz call: {e}")
+            # Use centralized API client for consistent behavior
+            api_client = VobizApiClient(auth_id, auth_token)
+            result = await api_client.hangup_call(call_id)
+            
+            logger.info(f"Vobiz hangup call - call {call_id}: {result}")
 
         except Exception as e:
             logger.error(
-                f"Exception during Vobiz call termination - "
+                f"Exception hanging up Vobiz call - "
                 f"Call ID: {self._call_id}, "
                 f"Auth ID: {self._auth_id[:8] if self._auth_id else 'None'}*****, "
                 f"Exception: {type(e).__name__}: {e}"
