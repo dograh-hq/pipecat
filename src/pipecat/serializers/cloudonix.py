@@ -88,11 +88,8 @@ class CloudonixFrameSerializer(TwilioFrameSerializer):
 
     async def _hang_up_call(self):
         """Terminate the Cloudonix call by issuing a DELETE request to the session endpoint."""
-        if self._hangup_attempted:
-            logger.debug(f"Hangup already attempted for call {self._call_sid}, skipping")
-            return
-
-        self._hangup_attempted = True
+        
+        logger.debug(f"Attempting hangup for call {self._call_sid}")
 
         # If session_token is not available, fall back to WebSocket close behavior
         if not self._session_token:
@@ -139,7 +136,7 @@ class CloudonixFrameSerializer(TwilioFrameSerializer):
                         # 404: Session already terminated (acceptable)
                         logger.info(
                             f"Successfully terminated Cloudonix session {self._session_token} "
-                            f"(HTTP {status})"
+                            f"(HTTP {status}), Response: {response_text}"
                         )
                     else:
                         logger.warning(
