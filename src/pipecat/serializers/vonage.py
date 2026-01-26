@@ -51,7 +51,13 @@ class VonageFrameSerializer(FrameSerializer):
         vonage_sample_rate: int = 16000
         sample_rate: Optional[int] = None
 
-    def __init__(self, call_uuid: str, application_id: Optional[str] = None, private_key: Optional[str] = None, params: Optional[InputParams] = None):
+    def __init__(
+        self,
+        call_uuid: str,
+        application_id: Optional[str] = None,
+        private_key: Optional[str] = None,
+        params: Optional[InputParams] = None,
+    ):
         """Initialize the VonageFrameSerializer.
 
         Args:
@@ -199,9 +205,10 @@ class VonageFrameSerializer(FrameSerializer):
     async def _hang_up_call(self):
         """Hang up the Vonage call using Vonage's REST API."""
         try:
+            import time
+
             import aiohttp
             import jwt
-            import time
 
             if not self._call_uuid or not self._application_id or not self._private_key:
                 missing = []
@@ -221,16 +228,13 @@ class VonageFrameSerializer(FrameSerializer):
                 "application_id": self._application_id,
                 "iat": int(time.time()),
                 "exp": int(time.time()) + 3600,
-                "jti": str(time.time())
+                "jti": str(time.time()),
             }
             token = jwt.encode(claims, self._private_key, algorithm="RS256")
 
             endpoint = f"https://api.nexmo.com/v1/calls/{self._call_uuid}"
 
-            headers = {
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json"
-            }
+            headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
             data = {"action": "hangup"}
 

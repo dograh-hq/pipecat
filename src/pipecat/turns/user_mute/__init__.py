@@ -6,6 +6,7 @@
 
 from .always_user_mute_strategy import AlwaysUserMuteStrategy
 from .base_user_mute_strategy import BaseUserMuteStrategy
+from .callback_user_mute_strategy import CallbackUserMuteStrategy
 from .first_speech_user_mute_strategy import FirstSpeechUserMuteStrategy
 from .function_call_user_mute_strategy import FunctionCallUserMuteStrategy
 from .mute_until_first_bot_complete_user_mute_strategy import (
@@ -15,6 +16,7 @@ from .mute_until_first_bot_complete_user_mute_strategy import (
 __all__ = [
     "AlwaysUserMuteStrategy",
     "BaseUserMuteStrategy",
+    "CallbackUserMuteStrategy",
     "FirstSpeechUserMuteStrategy",
     "FunctionCallUserMuteStrategy",
     "MuteUntilFirstBotCompleteUserMuteStrategy",

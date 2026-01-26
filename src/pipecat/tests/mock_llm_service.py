@@ -41,6 +41,7 @@ class MockLLMService(OpenAILLMService):
         *,
         mock_chunks: Optional[List[ChatCompletionChunk]] = None,
         mock_steps: Optional[List[List[ChatCompletionChunk]]] = None,
+        mock_inference_responses: Optional[List[str]] = None,
         chunk_delay: float = 0.01,
         **kwargs,
     ):
@@ -50,6 +51,8 @@ class MockLLMService(OpenAILLMService):
             mock_chunks: List of ChatCompletionChunk objects to stream (single step)
             mock_steps: List of chunk lists for multi-step responses. Each generation
                 will use the next step's chunks. Takes precedence over mock_chunks.
+            mock_inference_responses: List of response strings for run_inference, indexed
+                by step. Each step's run_inference call returns the corresponding response.
             chunk_delay: Delay in seconds between streaming chunks
             **kwargs: Additional arguments passed to OpenAILLMService
         """
@@ -62,6 +65,7 @@ class MockLLMService(OpenAILLMService):
         self._mock_steps = mock_steps or []
         self._current_step = 0
         self._chunk_delay = chunk_delay
+        self._mock_inference_responses = mock_inference_responses or []
 
     def _get_current_chunks(self) -> List[ChatCompletionChunk]:
         """Get the chunks for the current step."""
@@ -135,6 +139,40 @@ class MockLLMService(OpenAILLMService):
     def reset_steps(self):
         """Reset the step counter to start from the beginning."""
         self._current_step = 0
+
+    def set_mock_inference_responses(self, responses: List[str]):
+        """Update the mock inference responses indexed by step.
+
+        Args:
+            responses: List of response strings, indexed by step number
+        """
+        self._mock_inference_responses = responses
+
+    async def run_inference(self, context) -> Optional[str]:
+        """Override to return mock response for the current step.
+
+        Uses the same step counter as streaming methods. Does NOT advance
+        the step counter - only streaming completions advance the step.
+
+        Args:
+            context: The LLM context (ignored in mock).
+
+        Returns:
+            The mock inference response for the current step, or None if not set.
+        """
+        adapter = self.get_llm_adapter()
+        messages_for_log = adapter.get_messages_for_logging(context)
+        logger.debug(
+            f"{self}: Mock run_inference called at step {self._current_step} with context {messages_for_log}"
+        )
+
+        if self._mock_inference_responses:
+            if self._current_step < len(self._mock_inference_responses):
+                return self._mock_inference_responses[self._current_step]
+            # If we've exhausted responses, return None
+            return None
+
+        return None
 
     # Helper methods for creating chunks
     @staticmethod

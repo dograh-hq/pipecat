@@ -7,6 +7,7 @@ class EndTaskReason(Enum):
     """Reasons for ending a task."""
 
     CALL_DURATION_EXCEEDED = "call_duration_exceeded"
+    END_CALL_TOOL_REASON = "end_call_tool"
     VOICEMAIL_DETECTED = "voicemail_detected"
     USER_IDLE_MAX_DURATION_EXCEEDED = "user_idle_max_duration_exceeded"
     USER_HANGUP = "user_hangup"
@@ -14,4 +15,5 @@ class EndTaskReason(Enum):
     USER_DISQUALIFIED = "user_disqualified"
     SYSTEM_CANCELLED = "system_cancelled"
     SYSTEM_CONNECT_ERROR = "system_connect_error"
+    UNEXPECTED_ERROR = "unexpected_error"
     UNKNOWN = "unknown"
