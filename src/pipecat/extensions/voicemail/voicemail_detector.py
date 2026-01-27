@@ -719,7 +719,6 @@ VOICEMAIL SYSTEM (respond "VOICEMAIL"):
                 self._context_aggregator.user(),
                 self._classifier_llm,
                 self._classification_processor,
-                self._context_aggregator.assistant(),
                 self._classifier_upstream_gate,
             ],
         )
