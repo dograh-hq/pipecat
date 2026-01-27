@@ -842,7 +842,7 @@ class LLMAssistantAggregator(LLMContextAggregator):
                         "id": frame.tool_call_id,
                         "function": {
                             "name": frame.function_name,
-                            "arguments": json.dumps(frame.arguments),
+                            "arguments": json.dumps(frame.arguments, ensure_ascii=False),
                         },
                         "type": "function",
                     }
@@ -875,7 +875,7 @@ class LLMAssistantAggregator(LLMContextAggregator):
 
         # Update context with the function call result
         if frame.result:
-            result = json.dumps(frame.result)
+            result = json.dumps(frame.result, ensure_ascii=False)
             self._update_function_call_result(frame.function_name, frame.tool_call_id, result)
         else:
             self._update_function_call_result(frame.function_name, frame.tool_call_id, "COMPLETED")
