@@ -798,9 +798,6 @@ class LLMAssistantAggregator(LLMContextAggregator):
 
             self._context.add_message({"role": "assistant", "content": aggregation})
 
-        # Push context frame
-        await self.push_context_frame()
-
         # Push timestamp frame with current time
         timestamp_frame = LLMContextAssistantTimestampFrame(timestamp=time_now_iso8601())
         await self.push_frame(timestamp_frame)

@@ -1777,7 +1777,7 @@ class EndFrame(ControlFrame, UninterruptibleFrame):
 
 
 @dataclass
-class StopFrame(ControlFrame):
+class StopFrame(ControlFrame, UninterruptibleFrame):
     """Frame indicating pipeline should stop but keep processors running.
 
     Indicates that a pipeline should be stopped but that the pipeline
