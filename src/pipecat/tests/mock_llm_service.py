@@ -91,13 +91,18 @@ class MockLLMService(OpenAILLMService):
 
     async def _stream_mock_chunks(self) -> AsyncIterator[ChatCompletionChunk]:
         """Stream the mock chunks for the current step with delays."""
-        chunks = self._get_current_chunks()
-        for chunk in chunks:
-            if self._chunk_delay > 0:
-                await asyncio.sleep(self._chunk_delay)
-            yield chunk
-        # Advance to next step after streaming all chunks
-        self._advance_step()
+        try:
+            chunks = self._get_current_chunks()
+            for chunk in chunks:
+                if self._chunk_delay > 0:
+                    await asyncio.sleep(self._chunk_delay)
+                yield chunk
+            # Advance to next step after streaming all chunks
+        except asyncio.CancelledError:
+            logger.debug(f"CancelledError in {self}")
+            raise
+        finally:
+            self._advance_step()
 
     async def _stream_chat_completions_specific_context(
         self, context: OpenAILLMContext
