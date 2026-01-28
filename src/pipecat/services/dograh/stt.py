@@ -61,6 +61,7 @@ class DograhSTTService(STTService, WebsocketService):
         sample_rate: Optional[int] = None,
         interim_results: bool = True,
         vad_events: bool = False,
+        keyterms: Optional[list[str]] = None,
         **kwargs,
     ):
         """Initialize Dograh STT service.
@@ -75,6 +76,7 @@ class DograhSTTService(STTService, WebsocketService):
             sample_rate: Audio sample rate in Hz. Defaults to None.
             interim_results: Whether to receive interim transcription results.
             vad_events: Whether to receive voice activity detection events.
+            keyterms: Optional list of keyterms for speech recognition boosting.
             **kwargs: Additional arguments passed to the parent services.
         """
         STTService.__init__(self, sample_rate=sample_rate, **kwargs)
@@ -87,6 +89,7 @@ class DograhSTTService(STTService, WebsocketService):
         self._language = language
         self._interim_results = interim_results
         self._vad_events = vad_events
+        self._keyterms = keyterms or []
 
         self.set_model_name(model)
 
@@ -149,6 +152,10 @@ class DograhSTTService(STTService, WebsocketService):
                 "interim_results": self._interim_results,
                 "vad_events": self._vad_events,
             }
+
+            # Add keyterms if provided
+            if self._keyterms:
+                config_msg["keyterms"] = self._keyterms
 
             # Add workflow_run_id if available from StartFrame metadata
             if self._start_metadata and "workflow_run_id" in self._start_metadata:
