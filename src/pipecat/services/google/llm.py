@@ -42,7 +42,6 @@ from pipecat.frames.frames import (
     LLMThoughtStartFrame,
     LLMThoughtTextFrame,
     LLMUpdateSettingsFrame,
-    UserImageRawFrame,
 )
 from pipecat.metrics.metrics import LLMTokenUsage
 from pipecat.processors.aggregators.llm_context import LLMContext
@@ -200,22 +199,6 @@ class GoogleAssistantContextAggregator(OpenAIAssistantContextAggregator):
                 for part in message.parts:
                     if part.function_response and part.function_response.id == tool_call_id:
                         part.function_response.response = {"value": json.dumps(result)}
-
-    async def handle_user_image_frame(self, frame: UserImageRawFrame):
-        """Handle user image frame.
-
-        Args:
-            frame: Frame containing user image data and request context.
-        """
-        await self._update_function_call_result(
-            frame.request.function_name, frame.request.tool_call_id, "COMPLETED"
-        )
-        self._context.add_image_frame_message(
-            format=frame.format,
-            size=frame.size,
-            image=frame.image,
-            text=frame.request.context,
-        )
 
 
 @dataclass
@@ -1064,7 +1047,7 @@ class GoogleLLMService(LLMService):
                                     await self.push_frame(LLMThoughtEndFrame())
                                 else:
                                     accumulated_text += part.text
-                                    await self.push_frame(LLMTextFrame(part.text))
+                                    await self._push_llm_text(part.text)
                             elif part.function_call:
                                 function_call = part.function_call
                                 function_call_id = function_call.id or str(uuid.uuid4())
