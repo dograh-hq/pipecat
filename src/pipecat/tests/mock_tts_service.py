@@ -28,6 +28,7 @@ class MockTTSService(TTSService):
         mock_audio_duration_ms: Optional[int] = 1000,
         chunk_size: int = 1024,
         frame_delay: float = 0.01,
+        pause_frame_processing: bool = True,
         **kwargs,
     ):
         """Initialize mock TTS service.
@@ -37,9 +38,12 @@ class MockTTSService(TTSService):
             mock_audio_duration_ms: Mock audio duration in ms
             chunk_size: Size of each audio frame chunk
             frame_delay: Delay between audio frames for realistic timing
-            **kwargs: Additional args
+            pause_frame_processing: If True, pauses frame processing while generating
+                audio, waiting for BotStoppedSpeakingFrame to resume. This simulates
+                real TTS behavior where overlapping audio should be avoided.
+            **kwargs: Additional args passed to TTSService
         """
-        super().__init__(**kwargs)
+        super().__init__(pause_frame_processing=pause_frame_processing, **kwargs)
 
         self._mock_audio_data = mock_audio_data or self.create_mock_audio(mock_audio_duration_ms)
         self._chunk_size = chunk_size
@@ -63,7 +67,7 @@ class MockTTSService(TTSService):
             for i in range(0, len(self._mock_audio_data), self._chunk_size):
                 chunk = self._mock_audio_data[i : i + self._chunk_size]
                 if chunk:
-                    audio_frame = TTSAudioRawFrame(audio=chunk, sample_rate=24000, num_channels=1)
+                    audio_frame = TTSAudioRawFrame(audio=chunk, sample_rate=16000, num_channels=1)
                     yield audio_frame
                     if self._frame_delay > 0:
                         await asyncio.sleep(self._frame_delay)
@@ -71,7 +75,7 @@ class MockTTSService(TTSService):
         yield TTSStoppedFrame()
 
     @staticmethod
-    def create_mock_audio(duration_ms: int, sample_rate: int = 24000) -> bytes:
+    def create_mock_audio(duration_ms: int, sample_rate: int = 16000) -> bytes:
         """Helper to create mock audio data of specific duration.
 
         Args:
@@ -131,6 +135,6 @@ class PredictableMockTTSService(MockTTSService):
             for i in range(0, len(audio_data), chunk_size):
                 chunk = audio_data[i : i + chunk_size]
                 if chunk:
-                    yield TTSAudioRawFrame(audio=chunk, sample_rate=24000, num_channels=1)
+                    yield TTSAudioRawFrame(audio=chunk, sample_rate=16000, num_channels=1)
 
         yield TTSStoppedFrame()

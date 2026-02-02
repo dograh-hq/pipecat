@@ -50,8 +50,11 @@ from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.transports.base_transport import TransportParams
 from pipecat.utils.time import nanoseconds_to_seconds
 
-# Send bot stopped speaking immediately when using mixer
-BOT_VAD_STOP_SECS = 0
+# Reduced the Bot VAD stop secs so that the pipeline
+# is unmuted as soon as possible and we dont miss
+# the user speech. This is also used as timeout when
+# we are not using mixer.
+BOT_VAD_STOP_SECS = 0.1
 
 
 class BaseOutputTransport(FrameProcessor):
@@ -751,7 +754,8 @@ class BaseOutputTransport(FrameProcessor):
         async def _audio_task_handler(self):
             """Main audio processing task handler."""
             consecutive_failures = 0
-            max_consecutive_failures = 10
+            max_consecutive_failures = self._params.audio_out_max_consecutive_failures
+            sleep_between_consecutive_failures = self._params.audio_out_sleep_between_failures
 
             async for frame in self._next_frame():
                 # No need to push EndFrame, it's pushed from process_frame().
@@ -787,11 +791,15 @@ class BaseOutputTransport(FrameProcessor):
                         logger.warning(
                             f"{self} Cancelling task after {consecutive_failures} consecutive failures"
                         )
+
+                        # Send bot stopped speaking frame
+                        await self._bot_stopped_speaking()
+
                         await self._transport.push_frame(CancelTaskFrame(), FrameDirection.UPSTREAM)
                         break
 
                     # Sleep before retrying
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(sleep_between_consecutive_failures)
                 else:
                     # Reset counter on successful write
                     consecutive_failures = 0
