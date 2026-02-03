@@ -12,10 +12,11 @@ parameters, and performance metrics.
 """
 
 import contextlib
+import copy
 import functools
 import inspect
 import json
-from typing import TYPE_CHECKING, Callable, Optional, TypeVar
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, TypeVar
 
 from loguru import logger
 
@@ -26,7 +27,12 @@ if TYPE_CHECKING:
     from opentelemetry import context as context_api
     from opentelemetry import trace
 
-from pipecat.processors.aggregators.llm_context import NOT_GIVEN, LLMContext
+from pipecat.adapters.schemas.tools_schema import ToolsSchema
+from pipecat.processors.aggregators.llm_context import (
+    NOT_GIVEN,
+    LLMContext,
+    LLMSpecificMessage,
+)
 from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
 from pipecat.utils.tracing.context_registry import (
     get_current_conversation_context,
@@ -59,6 +65,85 @@ def _noop_decorator(func):
         The original function unchanged.
     """
     return func
+
+
+def _sanitize_messages_for_logging(messages: List[Any]) -> List[Dict[str, Any]]:
+    """Sanitize messages for logging by redacting sensitive data.
+
+    Creates deep copies and redacts base64-encoded images, audio data,
+    and other sensitive content to prevent logging large binary data.
+
+    Args:
+        messages: List of messages in standard ChatML format.
+
+    Returns:
+        List of sanitized messages safe for logging.
+    """
+    sanitized = []
+    for message in messages:
+        # Include LLM-specific messages with a marker so traces show something was there
+        if isinstance(message, LLMSpecificMessage):
+            sanitized.append(
+                {
+                    "role": "assistant",
+                    "content": f"[LLM-specific message for {message.llm}]",
+                    "_llm_specific": True,
+                }
+            )
+            continue
+
+        msg = copy.deepcopy(message)
+
+        # Handle content field (can be string or list of content parts)
+        if "content" in msg and isinstance(msg["content"], list):
+            for item in msg["content"]:
+                if not isinstance(item, dict):
+                    continue
+                # Redact base64 image data
+                if item.get("type") == "image_url":
+                    url = item.get("image_url", {}).get("url", "")
+                    if url.startswith("data:image/"):
+                        item["image_url"]["url"] = "data:image/..."
+                # Redact audio data
+                if item.get("type") == "input_audio":
+                    if "input_audio" in item and "data" in item["input_audio"]:
+                        item["input_audio"]["data"] = "..."
+
+        # Handle legacy mime_type format
+        if "mime_type" in msg and msg.get("mime_type", "").startswith("image/"):
+            msg["data"] = "..."
+
+        sanitized.append(msg)
+
+    return sanitized
+
+
+def _get_standard_tools_for_logging(tools: Any) -> Optional[List[Dict[str, Any]]]:
+    """Convert tools to standard format for logging.
+
+    Converts ToolsSchema to a list of standard tool definitions
+    in OpenAI's function calling format.
+
+    Args:
+        tools: ToolsSchema instance or NOT_GIVEN.
+
+    Returns:
+        List of tools in standard format, or None if no tools.
+    """
+    if tools is NOT_GIVEN or tools is None:
+        return None
+
+    if isinstance(tools, ToolsSchema):
+        standard_tools = []
+        for func in tools.standard_tools:
+            standard_tools.append({"type": "function", "function": func.to_default_dict()})
+        return standard_tools if standard_tools else None
+
+    # Fallback: if it's already a list, return as-is
+    if isinstance(tools, list):
+        return tools
+
+    return None
 
 
 def _get_parent_service_context(self):
@@ -488,56 +573,31 @@ def traced_llm(func: Optional[Callable] = None, *, name: Optional[str] = None) -
                             # Replace push_frame to capture output
                             self.push_frame = traced_push_frame
 
-                            # Get messages for logging
+                            # Get messages for logging in standard ChatML format
                             # For OpenAILLMContext: use context's own get_messages_for_logging() method
-                            # For LLMContext: use adapter's get_messages_for_logging() which returns
-                            # messages in provider's native format with sensitive data sanitized
+                            # For LLMContext: use context.messages directly (already in standard format)
+                            #                 and sanitize for logging
                             messages = None
 
                             if isinstance(context, OpenAILLMContext):
                                 # OpenAILLMContext and subclasses have their own method
                                 messages = context.get_messages_for_logging()
                             elif isinstance(context, LLMContext):
-                                # Universal LLMContext - use adapter for provider-native format
-                                if hasattr(self, "get_llm_adapter"):
-                                    adapter = self.get_llm_adapter()
-                                    messages = adapter.get_messages_for_logging(context)
+                                # Universal LLMContext - use standard messages directly
+                                # context.messages returns messages in standard ChatML format
+                                messages = _sanitize_messages_for_logging(context.messages)
 
-                            # Get tools
-                            # For OpenAILLMContext: tools may need adapter conversion if set
-                            # For LLMContext: use adapter's from_standard_tools() to convert ToolsSchema
+                            # Get tools in standard format for logging
+                            # For OpenAILLMContext: tools property returns provider-specific format
+                            # For LLMContext: use standard tools from ToolsSchema
                             tools = None
 
                             if isinstance(context, OpenAILLMContext):
                                 # OpenAILLMContext: tools property handles adapter conversion internally
                                 tools = context.tools
                             elif isinstance(context, LLMContext):
-                                # Universal LLMContext - use adapter to convert ToolsSchema
-                                if hasattr(self, "get_llm_adapter") and hasattr(context, "tools"):
-                                    adapter = self.get_llm_adapter()
-                                    tools = adapter.from_standard_tools(context.tools)
-
-                            # Handle system message for different services
-                            system_message = None
-                            if hasattr(context, "system"):
-                                system_message = context.system
-                            elif hasattr(context, "system_message"):
-                                system_message = context.system_message
-                            elif hasattr(self, "_system_instruction"):
-                                system_message = self._system_instruction
-
-                            # --------------------------------------------------
-                            # Combine the system message with the conversation messages so that
-                            # they are emitted as a single `messages` span attribute
-                            # --------------------------------------------------
-                            try:
-                                if system_message is not None:
-                                    messages = [
-                                        {"role": "system", "content": system_message}
-                                    ] + messages
-                            except Exception as e:
-                                logger.error("Error serializing messages")
-                                messages = f"Error serializing messages: {str(e)}"
+                                # Universal LLMContext - use standard tools format
+                                tools = _get_standard_tools_for_logging(context.tools)
 
                             # Get settings from the service
                             params = {}
