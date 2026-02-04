@@ -50,11 +50,7 @@ from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.transports.base_transport import TransportParams
 from pipecat.utils.time import nanoseconds_to_seconds
 
-# Reduced the Bot VAD stop secs so that the pipeline
-# is unmuted as soon as possible and we dont miss
-# the user speech. This is also used as timeout when
-# we are not using mixer.
-BOT_VAD_STOP_SECS = 0.1
+BOT_VAD_STOP_SECS = 0.35
 
 
 class BaseOutputTransport(FrameProcessor):

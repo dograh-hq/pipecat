@@ -38,6 +38,7 @@ from pipecat.frames.frames import (
     InterruptionFrame,
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
+    OutputAudioRawFrame,
     StartFrame,
     TextFrame,
     TranscriptionFrame,
@@ -1092,7 +1093,7 @@ class AudioContextTTSService(WebsocketTTSService):
 
                 # Append some silence between sentences.
                 silence = b"\x00" * self.sample_rate
-                frame = TTSAudioRawFrame(
+                frame = OutputAudioRawFrame(
                     audio=silence, sample_rate=self.sample_rate, num_channels=1
                 )
                 await self.push_frame(frame)
