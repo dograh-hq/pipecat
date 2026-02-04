@@ -154,21 +154,21 @@ where = ["src"]
 [tool.setuptools.package-data]
 "pipecat" = ["py.typed"]
 "pipecat.audio.dtmf" = [
-    "src/pipecat/audio/dtmf/dtmf-0.wav",
-    "src/pipecat/audio/dtmf/dtmf-1.wav",
-    "src/pipecat/audio/dtmf/dtmf-2.wav",
-    "src/pipecat/audio/dtmf/dtmf-3.wav",
-    "src/pipecat/audio/dtmf/dtmf-4.wav",
-    "src/pipecat/audio/dtmf/dtmf-5.wav",
-    "src/pipecat/audio/dtmf/dtmf-6.wav",
-    "src/pipecat/audio/dtmf/dtmf-7.wav",
-    "src/pipecat/audio/dtmf/dtmf-8.wav",
-    "src/pipecat/audio/dtmf/dtmf-9.wav",
-    "src/pipecat/audio/dtmf/dtmf-pound.wav",
-    "src/pipecat/audio/dtmf/dtmf-star.wav",
+    "dtmf-0.wav",
+    "dtmf-1.wav",
+    "dtmf-2.wav",
+    "dtmf-3.wav",
+    "dtmf-4.wav",
+    "dtmf-5.wav",
+    "dtmf-6.wav",
+    "dtmf-7.wav",
+    "dtmf-8.wav",
+    "dtmf-9.wav",
+    "dtmf-pound.wav",
+    "dtmf-star.wav",
 ]
-"pipecat.services.aws_nova_sonic" = ["src/pipecat/services/aws_nova_sonic/ready.wav"]
-"pipecat.audio.turn.smart_turn.data" = ["src/pipecat/audio/turn/smart_turn/data/smart-turn-v3.2-cpu.onnx"]
+"pipecat.services.aws_nova_sonic" = ["ready.wav"]
+"pipecat.audio.turn.smart_turn.data" = ["smart-turn-v3.2-cpu.onnx"]
 "pipecat.audio.vad.data" = ["silero_vad.onnx"]
 
 [tool.pytest.ini_options]
