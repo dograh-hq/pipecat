@@ -128,7 +128,9 @@ class VobizFrameSerializer(FrameSerializer):
             and isinstance(frame, (EndFrame, CancelFrame))
         ):
             self._hangup_attempted = True
-            await self._hang_up_call()
+            # Stop streams first, then hang up call
+            await self._stop_audio_streams()
+            await self._hangup_call()
             return None
         elif isinstance(frame, InterruptionFrame):
             answer = {"event": "clearAudio", "streamId": self._stream_id}
@@ -162,11 +164,49 @@ class VobizFrameSerializer(FrameSerializer):
         # Return None for unhandled frames
         return None
 
-    async def _hang_up_call(self):
-        """Hang up the Vobiz call using Vobiz's REST API."""
+    async def _stop_audio_streams(self):
+        """Stop Vobiz audio streams using centralized API client."""
         try:
-            import aiohttp
+            from api.services.telephony.vobiz_api_client import VobizApiClient
+            
+            auth_id = self._auth_id
+            auth_token = self._auth_token
+            call_id = self._call_id
 
+            if not call_id or not auth_id or not auth_token:
+                missing = []
+                if not call_id:
+                    missing.append("call_id")
+                if not auth_id:
+                    missing.append("auth_id")
+                if not auth_token:
+                    missing.append("auth_token")
+
+                logger.warning(
+                    f"Cannot stop Vobiz audio streams: missing required parameters: {', '.join(missing)}"
+                )
+                return
+
+            # Use centralized API client for consistent behavior
+            api_client = VobizApiClient(auth_id, auth_token)
+            result = await api_client.stop_audio_stream(call_id)
+            
+            logger.info(f"Vobiz stop audio streams - call {call_id}: {result}")
+
+        except Exception as e:
+            logger.error(
+                f"Exception stopping Vobiz audio streams - "
+                f"Call ID: {self._call_id}, "
+                f"Auth ID: {self._auth_id[:8] if self._auth_id else 'None'}*****, "
+                f"Exception: {type(e).__name__}: {e}"
+            )
+
+    async def _hangup_call(self):
+        """Hang up Vobiz call using centralized API client."""
+        try:
+            # Import may fail in IDE but works at runtime when main app runs
+            from api.services.telephony.vobiz_api_client import VobizApiClient
+            
             auth_id = self._auth_id
             auth_token = self._auth_token
             call_id = self._call_id
@@ -185,40 +225,17 @@ class VobizFrameSerializer(FrameSerializer):
                 )
                 return
 
-            # Vobiz API endpoint for hanging up calls
-            endpoint = f"https://api.vobiz.ai/api/v1/Account/{auth_id}/Call/{call_id}/"
-
-            # Create headers for Vobiz authentication
-            headers = {
-                "X-Auth-ID": auth_id,
-                "X-Auth-Token": auth_token,
-            }
-
-            # Make the DELETE request to hang up the call
-            async with aiohttp.ClientSession() as session:
-                async with session.delete(endpoint, headers=headers) as response:
-                    if response.status == 204:
-                        logger.info(f"Successfully terminated Vobiz call {call_id}")
-                    elif response.status == 404:
-                        # Call already ended
-                        logger.debug(f"Vobiz call {call_id} already terminated")
-                    else:
-                        error_text = await response.text()
-
-                        logger.error(
-                            f"Vobiz call termination failure details - "
-                            f"Call ID: {call_id}, "
-                            f"HTTP Status: {response.status}, "
-                            f"Request URL: {endpoint}, "
-                            f"Auth ID: {auth_id[:8]}*****, "
-                            f"Response Body: {error_text}"
-                        )
+            # Use centralized API client for consistent behavior
+            api_client = VobizApiClient(auth_id, auth_token)
+            result = await api_client.hangup_call(call_id)
+            
+            logger.info(f"Vobiz hangup call - call {call_id}: {result}")
 
         except Exception as e:
             logger.error(
-                f"Exception during Vobiz call termination - "
-                f"Call ID: {call_id}, "
-                f"Auth ID: {auth_id[:8] if auth_id else 'None'}*****, "
+                f"Exception hanging up Vobiz call - "
+                f"Call ID: {self._call_id}, "
+                f"Auth ID: {self._auth_id[:8] if self._auth_id else 'None'}*****, "
                 f"Exception: {type(e).__name__}: {e}"
             )
 
@@ -256,8 +273,9 @@ class VobizFrameSerializer(FrameSerializer):
 
             try:
                 return InputDTMFFrame(KeypadEntry(digit))
-            except ValueError as e:
+            except ValueError:
                 # Handle case where string doesn't match any enum value
+                logger.debug(f"Invalid DTMF digit received: {digit}")
                 return None
         else:
             return None
