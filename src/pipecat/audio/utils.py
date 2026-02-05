@@ -22,7 +22,7 @@ from pipecat.audio.resamplers.soxr_stream_resampler import SOXRStreamAudioResamp
 
 # Normal speech usually results in many samples between ±500 to ±5000, depending on loudness and mic gain.
 # So we are using a threshold that is well below what real speech produces.
-SPEAKING_THRESHOLD = 500
+SPEAKING_THRESHOLD = 20
 
 
 def create_default_resampler(**kwargs) -> BaseAudioResampler:
