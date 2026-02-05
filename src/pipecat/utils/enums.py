@@ -7,6 +7,7 @@ class EndTaskReason(Enum):
     """Reasons for ending a task."""
 
     CALL_DURATION_EXCEEDED = "call_duration_exceeded"
+    CALL_TRANSFERRED = "call_transferred"
     END_CALL_TOOL_REASON = "end_call_tool"
     VOICEMAIL_DETECTED = "voicemail_detected"
     USER_IDLE_MAX_DURATION_EXCEEDED = "user_idle_max_duration_exceeded"
