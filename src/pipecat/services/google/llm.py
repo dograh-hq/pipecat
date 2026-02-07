@@ -916,7 +916,7 @@ class GoogleLLMService(LLMService):
             params_from_context["system_instruction"]
             and self._system_instruction != params_from_context["system_instruction"]
         ):
-            logger.debug(f"System instruction changed: {params_from_context['system_instruction']}")
+            logger.trace(f"System instruction changed: {params_from_context['system_instruction']}")
             self._system_instruction = params_from_context["system_instruction"]
 
         tools = []
