@@ -28,8 +28,6 @@ from pipecat.frames.frames import (
     TranscriptionMessage,
     TranscriptionUpdateFrame,
     TTSTextFrame,
-    UserStartedSpeakingFrame,
-    UserStoppedSpeakingFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.utils.string import TextPartForConcatenation, concatenate_aggregated_text
@@ -76,11 +74,6 @@ class UserTranscriptProcessor(BaseTranscriptProcessor):
             direction: Frame processing direction.
         """
         await super().process_frame(frame, direction)
-
-        if isinstance(
-            frame, (UserStartedSpeakingFrame, UserStoppedSpeakingFrame, InterruptionFrame)
-        ):
-            logger.debug(f"{self} {frame}")
 
         if isinstance(frame, TranscriptionFrame):
             message = TranscriptionMessage(

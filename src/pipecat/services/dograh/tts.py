@@ -9,7 +9,6 @@
 import asyncio
 import base64
 import json
-import uuid
 from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
 
 from loguru import logger
@@ -293,7 +292,7 @@ class DograhTTSService(AudioContextWordTTSService):
                     audio_data = msg.get("audio")
                     if audio_data:
                         audio = base64.b64decode(audio_data)
-                        frame = TTSAudioRawFrame(audio, self.sample_rate, 1)
+                        frame = TTSAudioRawFrame(audio, self.sample_rate, 1, context_id=ctx_id)
 
                         # Use context ID from message or current context
                         ctx_id = ctx_id or self._context_id
@@ -306,7 +305,7 @@ class DograhTTSService(AudioContextWordTTSService):
                     word_times = calculate_word_times(alignment, self._cumulative_time)
 
                     if word_times:
-                        await self.add_word_timestamps(word_times)
+                        await self.add_word_timestamps(word_times, ctx_id)
 
                         # Update cumulative time based on last word
                         self._cumulative_time = word_times[-1][1]
@@ -398,11 +397,12 @@ class DograhTTSService(AudioContextWordTTSService):
             await self._websocket.send(json.dumps(msg))
 
     @traced_tts
-    async def run_tts(self, text: str) -> AsyncGenerator[Frame, None]:
+    async def run_tts(self, text: str, context_id: str) -> AsyncGenerator[Frame, None]:
         """Generate speech from text using Dograh's streaming WebSocket API.
 
         Args:
             text: The text to synthesize into speech.
+            context_id: The context ID for tracking audio frames.
 
         Yields:
             Frame: Audio frames containing the synthesized speech.
@@ -413,43 +413,53 @@ class DograhTTSService(AudioContextWordTTSService):
             if not self._websocket or self._websocket.state != State.OPEN:
                 await self._connect()
 
-            if not self._started:
-                await self.start_ttfb_metrics()
-                yield TTSStartedFrame()
-                self._started = True
-                self._cumulative_time = 0
+            try:
+                if not self._started:
+                    await self.start_ttfb_metrics()
+                    yield TTSStartedFrame(context_id=context_id)
+                    self._started = True
+                    self._cumulative_time = 0
 
-                # Create new context if needed
-                if not self._context_id:
-                    self._context_id = str(uuid.uuid4())
+                    # If a context ID does not exist, use the provided one.
+                    # If an ID exists, that means the Pipeline doesn't allow
+                    # user interruptions, so continue using the current ID.
+                    # When interruptions are allowed, user speech results in
+                    # an interruption, which resets the context ID.
+                    if not self._context_id:
+                        self._context_id = context_id
 
-                if not self.audio_context_available(self._context_id):
-                    await self.create_audio_context(self._context_id)
+                    if not self.audio_context_available(self._context_id):
+                        await self.create_audio_context(self._context_id)
 
-                # Send initial context setup with voice settings
-                context_msg = {
-                    "type": "create_context",
-                    "context_id": self._context_id,
-                    "voice": self._voice,
-                    "model": self._model,
-                    "settings": self._settings,
-                }
+                    # Send initial context setup with voice settings
+                    context_msg = {
+                        "type": "create_context",
+                        "context_id": self._context_id,
+                        "voice": self._voice,
+                        "model": self._model,
+                        "settings": self._settings,
+                    }
 
-                # Add workflow_run_id if available
-                if self._start_metadata and "workflow_run_id" in self._start_metadata:
-                    context_msg["correlation_id"] = self._start_metadata["workflow_run_id"]
+                    # Add workflow_run_id if available
+                    if self._start_metadata and "workflow_run_id" in self._start_metadata:
+                        context_msg["correlation_id"] = self._start_metadata["workflow_run_id"]
 
-                await self._websocket.send(json.dumps(context_msg))
-                logger.trace(f"Created new context {self._context_id} with voice settings")
+                    await self._websocket.send(json.dumps(context_msg))
+                    logger.trace(f"Created new context {self._context_id} with voice settings")
 
-            # Send text for synthesis
-            await self._send_text(text)
-            self._accumulated_text += text
+                # Send text for synthesis
+                await self._send_text(text)
+                self._accumulated_text += text
+                await self.start_tts_usage_metrics(text)
+            except Exception as e:
+                yield TTSStoppedFrame(context_id=context_id)
+                yield ErrorFrame(error=f"Unknown error occurred: {e}")
+                return
 
             yield None
 
         except Exception as e:
-            logger.error(f"Dograh TTS exception: {e}")
+            yield ErrorFrame(error=f"Unknown error occurred: {e}")
 
     async def _handle_interruption(self, frame: StartInterruptionFrame, direction: FrameDirection):
         """Handle interruption by closing the current context.
@@ -513,7 +523,7 @@ class DograhTTSService(AudioContextWordTTSService):
                 self._accumulated_text = ""
             self._started = False
             if isinstance(frame, TTSStoppedFrame):
-                await self.add_word_timestamps([("Reset", 0)])
+                await self.add_word_timestamps([("Reset", 0)], self._context_id)
 
     async def start(self, frame: StartFrame):
         """Start the TTS service.

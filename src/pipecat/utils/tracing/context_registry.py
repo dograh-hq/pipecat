@@ -20,7 +20,7 @@ from pipecat.utils.tracing.turn_context_provider import TurnContextProvider
 if TYPE_CHECKING:
     from opentelemetry.context import Context
 
-from pipecat.utils.context import get_current_run_id
+from pipecat.utils.run_context import get_current_run_id
 
 
 class ContextProviderRegistry:

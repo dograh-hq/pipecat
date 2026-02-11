@@ -68,7 +68,7 @@ class VonageFrameSerializer(FrameSerializer):
             params: Configuration parameters.
         """
         super().__init__(params or VonageFrameSerializer.InputParams())
-        
+
         self._call_uuid = call_uuid
         self._application_id = application_id
         self._private_key = private_key

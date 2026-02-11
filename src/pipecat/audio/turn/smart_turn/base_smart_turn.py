@@ -75,8 +75,6 @@ class BaseSmartTurn(BaseTurnAnalyzer):
         self._speech_triggered = False
         self._silence_ms = 0
         self._speech_start_time = 0
-        # Store timeout metrics when end of turn is triggered by timeout
-        self._timeout_metrics: Optional[MetricsData] = None
         # Thread executor that will run the model. We only need one thread per
         # analyzer because one analyzer just handles one audio stream.
         self._executor = ThreadPoolExecutor(max_workers=1)
@@ -133,15 +131,6 @@ class BaseSmartTurn(BaseTurnAnalyzer):
                         f"End of Turn complete due to stop_secs. Silence in ms: {self._silence_ms}"
                     )
                     state = EndOfTurnState.COMPLETE
-                    # Create metrics for timeout-based end of turn
-                    self._timeout_metrics = SmartTurnMetricsData(
-                        processor="BaseSmartTurn",
-                        is_complete=True,
-                        probability=1.0,  # Certain due to timeout
-                        inference_time_ms=0.0,  # No inference was done
-                        server_total_time_ms=0.0,  # No server call
-                        e2e_processing_time_ms=self._stop_ms,  # Instant decision
-                    )
                     self._clear(state)
             else:
                 # Trim buffer to prevent unbounded growth before speech

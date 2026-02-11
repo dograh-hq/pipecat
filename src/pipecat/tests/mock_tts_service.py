@@ -50,29 +50,32 @@ class MockTTSService(TTSService):
         self._frame_delay = frame_delay
         self.received_texts = []
 
-    async def run_tts(self, text: str) -> AsyncGenerator[Frame, None]:
+    async def run_tts(self, text: str, context_id: str) -> AsyncGenerator[Frame, None]:
         """Generate mock audio frames for given text.
 
         Args:
             text: The text to convert (after filtering)
+            context_id: The context ID of the synthesis
 
         Yields:
             Frames simulating real TTS service behavior
         """
         self.received_texts.append(text)
 
-        yield TTSStartedFrame()
+        yield TTSStartedFrame(context_id=context_id)
 
         if text.strip():
             for i in range(0, len(self._mock_audio_data), self._chunk_size):
                 chunk = self._mock_audio_data[i : i + self._chunk_size]
                 if chunk:
-                    audio_frame = TTSAudioRawFrame(audio=chunk, sample_rate=16000, num_channels=1)
+                    audio_frame = TTSAudioRawFrame(
+                        audio=chunk, sample_rate=16000, num_channels=1, context_id=context_id
+                    )
                     yield audio_frame
                     if self._frame_delay > 0:
                         await asyncio.sleep(self._frame_delay)
 
-        yield TTSStoppedFrame()
+        yield TTSStoppedFrame(context_id=context_id)
 
     @staticmethod
     def create_mock_audio(duration_ms: int, sample_rate: int = 16000) -> bytes:

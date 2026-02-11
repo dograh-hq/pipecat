@@ -17,22 +17,13 @@ from typing import TYPE_CHECKING, Dict, Optional
 
 from loguru import logger
 
-from pipecat.frames.frames import (
-    BotStartedSpeakingFrame,
-    MetricsFrame,
-    STTMuteFrame,
-    UserStoppedSpeakingFrame,
-    VADUserStoppedSpeakingFrame,
-)
-from pipecat.observers.base_observer import BaseObserver, FramePushed
-from pipecat.observers.turn_tracking_observer import TurnTrackingObserver
-from pipecat.processors.frame_processor import FrameDirection
-from pipecat.utils.context import get_current_run_id
-from pipecat.utils.tracing.context_registry import ContextProviderRegistry
 from pipecat.frames.frames import StartFrame
 from pipecat.observers.base_observer import BaseObserver, FramePushed
 from pipecat.observers.turn_tracking_observer import TurnTrackingObserver
 from pipecat.observers.user_bot_latency_observer import UserBotLatencyObserver
+from pipecat.processors.frame_processor import FrameDirection
+from pipecat.utils.run_context import get_current_run_id
+from pipecat.utils.tracing.context_registry import ContextProviderRegistry
 from pipecat.utils.tracing.conversation_context_provider import ConversationContextProvider
 from pipecat.utils.tracing.setup import is_tracing_available
 from pipecat.utils.tracing.turn_context_provider import TurnContextProvider
@@ -83,18 +74,16 @@ class TurnTraceObserver(BaseObserver):
         self._trace_context_map: Dict[int, "SpanContext"] = {}
         self._tracer = trace.get_tracer("pipecat.turn") if is_tracing_available() else None
 
-        self._processed_frames = set()
-
         # Conversation tracking properties
         self._conversation_span: Optional["Span"] = None
         self._conversation_id = conversation_id
         self._additional_span_attributes = additional_span_attributes or {}
 
         # Get workflow run ID and providers from registry
-        self._workflow_run_id = conversation_id or get_current_run_id()
-        if self._workflow_run_id:
+        workflow_run_id = conversation_id or get_current_run_id()
+        if workflow_run_id:
             # Ensure workflow_run_id is a string for consistency
-            workflow_run_id_str = str(self._workflow_run_id)
+            workflow_run_id_str = str(workflow_run_id)
             self._conversation_provider, self._turn_provider = (
                 ContextProviderRegistry.get_or_create_providers(workflow_run_id_str)
             )
@@ -102,16 +91,6 @@ class TurnTraceObserver(BaseObserver):
             # Fallback to singleton instances for backward compatibility
             self._conversation_provider = ConversationContextProvider.get_instance()
             self._turn_provider = TurnContextProvider.get_instance()
-
-        # Latency measurement helpers (reset on every turn)
-        self._latency_span: Optional["Span"] = None
-        # Timestamp when the user was detected to stop speaking (after end of turn)
-        self._user_stopped_ts: float = 0.0
-        # Timestamp when VAD non-definitively detected the user stopped speaking (pre end of turn)
-        self._vad_stopped_ts: float = 0.0
-
-        # STT mute tracking
-        self._stt_muted: bool = False
 
         @turn_tracker.event_handler("on_turn_started")
         async def on_turn_started(tracker, turn_number):
@@ -150,82 +129,6 @@ class TurnTraceObserver(BaseObserver):
         Args:
             data: The frame push event data.
         """
-        # If tracing is not available or no active turn span, do nothing
-        if not (is_tracing_available() and self._current_span and self._tracer):
-            return
-
-        # Only process downstream frames
-        if data.direction != FrameDirection.DOWNSTREAM:
-            return
-
-        if data.frame.id in self._processed_frames:
-            return
-        self._processed_frames.add(data.frame.id)
-
-        frame = data.frame
-
-        # ------------------------------------------------------------
-        # 1) Latency attributes within the pre-allocated span
-        # ------------------------------------------------------------
-        if isinstance(frame, VADUserStoppedSpeakingFrame):
-            # Record the timestamp – actual span already exists from turn start
-            # logger.debug("VADUserStoppedSpeakingFrame in TurnTraceObserver")
-            self._vad_stopped_ts = time.time()
-
-        elif isinstance(frame, UserStoppedSpeakingFrame):
-            # Record generic user stop speaking timestamp (may occur before definitive VAD stop)
-            # logger.debug("UserStoppedSpeakingFrame in TurnTraceObserver")
-            self._user_stopped_ts = time.time()
-
-        elif isinstance(frame, BotStartedSpeakingFrame):
-            # Capture latency attribute once
-            # logger.debug("BotStartedSpeakingFrame in TurnTraceObserver")
-            if self._latency_span is not None:
-                now = time.time()
-
-                # Latency from VAD definitive stop to bot start
-                if self._vad_stopped_ts > 0:
-                    latency_vad = max(now - self._vad_stopped_ts, 0.0)
-                    self._latency_span.set_attribute(
-                        "vad_stop_to_bot_start_latency", latency_vad * 1000
-                    )
-
-                # Latency from first user stop event to bot start
-                if self._user_stopped_ts > 0:
-                    latency_user = max(now - self._user_stopped_ts, 0.0)
-                    self._latency_span.set_attribute(
-                        "user_stop_to_bot_start_latency", latency_user * 1000
-                    )
-
-        # ------------------------------------------------------------
-        # 2) MetricsFrames – capture TTFB and end-of-turn processing times
-        # ------------------------------------------------------------
-        if isinstance(frame, MetricsFrame) and self._latency_span is not None:
-            for metric in frame.data:
-                try:
-                    processor_name = metric.processor.lower()
-                except AttributeError:
-                    processor_name = "unknown"
-
-                # Time-to-first-byte metrics
-                metric_type = metric.__class__.__name__
-
-                if metric_type == "TTFBMetricsData":
-                    # Store as milliseconds for consistency
-                    self._latency_span.set_attribute(
-                        f"{processor_name}.ttfb_ms", metric.value * 1000
-                    )
-                elif metric_type == "SmartTurnMetricsData":
-                    # Detailed SmartTurn metrics
-                    for attr_name in [
-                        "e2e_processing_time_ms",
-                        "inference_time_ms",
-                        "server_total_time_ms",
-                    ]:
-                        if hasattr(metric, attr_name):
-                            self._latency_span.set_attribute(
-                                f"end_of_turn.{attr_name}", getattr(metric, attr_name)
-                            )
         if isinstance(data.frame, StartFrame) and not self._conversation_span:
             self.start_conversation_tracing(self._conversation_id)
 
@@ -335,13 +238,6 @@ class TurnTraceObserver(BaseObserver):
         # Update the context provider so services can access this span
         self._turn_provider.set_current_turn_context(self._current_span.get_span_context())
 
-        # Pre-create latency span for this turn so we can accrue attributes over time
-        self._latency_span = self._tracer.start_span(
-            "latency.user_stop_to_bot_start", context=self._turn_provider.get_current_turn_context()
-        )
-        self._user_stopped_ts = 0.0
-        self._vad_stopped_ts = 0.0
-
         logger.debug(f"Started tracing for Turn {turn_number}")
 
     async def _handle_turn_ended(self, turn_number: int, duration: float, was_interrupted: bool):
@@ -355,14 +251,7 @@ class TurnTraceObserver(BaseObserver):
             self._current_span.set_attribute("turn.duration_seconds", duration)
             self._current_span.set_attribute("turn.was_interrupted", was_interrupted)
 
-            # End latency span if it hasn't been closed yet (e.g., bot never spoke)
-            if self._latency_span is not None:
-                self._latency_span.end()
-                self._latency_span = None
-                self._user_stopped_ts = 0.0
-                self._vad_stopped_ts = 0.0
-
-            # Now end the main turn span
+            # End the span
             self._current_span.end()
             self._current_span = None
 

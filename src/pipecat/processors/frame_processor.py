@@ -139,7 +139,7 @@ class FrameProcessorQueue(asyncio.PriorityQueue):
 
 # Timeout in seconds for cancelling the input frame processing task.
 # This prevents hanging if a library swallows asyncio.CancelledError.
-INPUT_TASK_CANCEL_TIMEOUT_SECS = 10
+INPUT_TASK_CANCEL_TIMEOUT_SECS = 3
 
 
 class FrameProcessor(BaseObject):
