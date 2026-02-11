@@ -15,7 +15,7 @@ import asyncio
 import importlib.util
 import os
 from pathlib import Path
-from typing import Any, AsyncIterable, Dict, Iterable, List, Optional, Set, Tuple, Type
+from typing import Any, AsyncIterable, Dict, Iterable, List, Optional, Set, Tuple, Type, TypeVar
 
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field
@@ -43,13 +43,14 @@ from pipecat.frames.frames import (
 from pipecat.metrics.metrics import ProcessingMetricsData, TTFBMetricsData
 from pipecat.observers.base_observer import BaseObserver, FramePushed
 from pipecat.observers.turn_tracking_observer import TurnTrackingObserver
+from pipecat.observers.user_bot_latency_observer import UserBotLatencyObserver
 from pipecat.pipeline.base_pipeline import BasePipeline
 from pipecat.pipeline.base_task import BasePipelineTask, PipelineTaskParams
 from pipecat.pipeline.pipeline import Pipeline, PipelineSink, PipelineSource
 from pipecat.pipeline.task_observer import TaskObserver
 from pipecat.processors.aggregators.llm_response import LLMUserContextAggregator
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor, FrameProcessorSetup
-from pipecat.processors.frameworks.rtvi import RTVIObserverParams, RTVIProcessor
+from pipecat.processors.frameworks.rtvi import RTVIObserver, RTVIObserverParams, RTVIProcessor
 from pipecat.utils.asyncio.task_manager import BaseTaskManager, TaskManager, TaskManagerParams
 from pipecat.utils.tracing.setup import is_tracing_available
 from pipecat.utils.tracing.turn_trace_observer import TurnTraceObserver
@@ -60,6 +61,9 @@ HEARTBEAT_MONITOR_SECS = HEARTBEAT_SECS * 10
 IDLE_TIMEOUT_SECS = 300
 
 CANCEL_TIMEOUT_SECS = 20.0
+
+
+T = TypeVar("T")
 
 
 class IdleFrameObserver(BaseObserver):
@@ -284,13 +288,19 @@ class PipelineTask(BasePipelineTask):
             observers = self._params.observers
         observers = observers or []
         self._turn_tracking_observer: Optional[TurnTrackingObserver] = None
+        self._user_bot_latency_observer: Optional[UserBotLatencyObserver] = None
         self._turn_trace_observer: Optional[TurnTraceObserver] = None
         if self._enable_turn_tracking:
             self._turn_tracking_observer = TurnTrackingObserver()
             observers.append(self._turn_tracking_observer)
         if self._enable_tracing and self._turn_tracking_observer:
+            # Create latency observer for tracing
+            self._user_bot_latency_observer = UserBotLatencyObserver()
+            observers.append(self._user_bot_latency_observer)
+            # Create turn trace observer with latency tracking
             self._turn_trace_observer = TurnTraceObserver(
                 self._turn_tracking_observer,
+                latency_tracker=self._user_bot_latency_observer,
                 conversation_id=self._conversation_id,
                 additional_span_attributes=self._additional_span_attributes,
             )
@@ -315,10 +325,31 @@ class PipelineTask(BasePipelineTask):
 
         # RTVI support
         self._rtvi = None
-        if enable_rtvi:
+        external_rtvi = self._find_processor(pipeline, RTVIProcessor)
+        external_observer_found = any(isinstance(o, RTVIObserver) for o in observers)
+
+        if external_rtvi and not external_observer_found:
+            logger.error(
+                f"{self}: RTVIProcessor found in pipeline but no RTVIObserver in observers. "
+                "Make sure to add both."
+            )
+        elif not external_rtvi and external_observer_found:
+            logger.error(
+                f"{self}: RTVIObserver found in observers but no RTVIProcessor in pipeline. "
+                "Make sure to add both."
+            )
+        elif external_rtvi and external_observer_found:
+            logger.warning(
+                f"{self}: RTVIProcessor and RTVIObserver found, skipping default ones. "
+                "They are both added by default, no need to add them yourself."
+            )
+            self._rtvi = external_rtvi
+        elif enable_rtvi:
             self._rtvi = rtvi_processor or RTVIProcessor()
             observers.append(self._rtvi.create_rtvi_observer(params=rtvi_observer_params))
 
+        if self._rtvi:
+            # Automatically call RTVIProcessor.set_bot_ready()
             @self.rtvi.event_handler("on_client_ready")
             async def on_client_ready(rtvi: RTVIProcessor):
                 await rtvi.set_bot_ready()
@@ -833,7 +864,7 @@ class PipelineTask(BasePipelineTask):
             # pipeline. This is in case the push task is blocked waiting for a
             # pipeline-ending frame to finish traversing the pipeline.
             logger.debug(f"{self}: received interruption task frame {frame}")
-            await self._pipeline.queue_frame(InterruptionFrame())
+            await self._pipeline.queue_frame(InterruptionFrame(event=frame.event))
         elif isinstance(frame, ErrorFrame):
             await self._call_event_handler("on_pipeline_error", frame)
             if frame.fatal:
@@ -872,6 +903,8 @@ class PipelineTask(BasePipelineTask):
             self._pipeline_end_event.set()
         elif isinstance(frame, CancelFrame):
             self._pipeline_end_event.set()
+        elif isinstance(frame, InterruptionFrame):
+            frame.complete()
         elif isinstance(frame, HeartbeatFrame):
             await self._heartbeat_queue.put(frame)
 
@@ -1012,7 +1045,7 @@ class PipelineTask(BasePipelineTask):
         start_metadata = {}
 
         # NOTE(aleix): Remove when OpenAILLMContext/LLMUserContextAggregator is removed.
-        if self._find_deprecated_openaillmcontext(self._pipeline):
+        if self._find_processor(self._pipeline, LLMUserContextAggregator):
             start_metadata["deprecated_openaillmcontext"] = True
 
         # Update with user provided metadata.
@@ -1020,12 +1053,13 @@ class PipelineTask(BasePipelineTask):
 
         return start_metadata
 
-    def _find_deprecated_openaillmcontext(self, processor: FrameProcessor) -> bool:
-        """Check whether there is a deprecated LLMUserContextAggregator in the pipeline."""
-        if isinstance(processor, LLMUserContextAggregator):
-            return True
+    def _find_processor(self, processor: FrameProcessor, processor_type: Type[T]) -> Optional[T]:
+        """Recursively find a processor of the given type in the pipeline."""
+        if isinstance(processor, processor_type):
+            return processor
 
         for p in processor.processors:
-            if self._find_deprecated_openaillmcontext(p):
-                return True
-        return False
+            found = self._find_processor(p, processor_type)
+            if found:
+                return found
+        return None

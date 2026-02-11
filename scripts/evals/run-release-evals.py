@@ -111,6 +111,7 @@ TESTS_07 = [
     ("07f-interruptible-azure.py", EVAL_SIMPLE_MATH),
     ("07f-interruptible-azure-http.py", EVAL_SIMPLE_MATH),
     ("07g-interruptible-openai.py", EVAL_SIMPLE_MATH),
+    ("07g-interruptible-openai-http.py", EVAL_SIMPLE_MATH),
     ("07h-interruptible-openpipe.py", EVAL_SIMPLE_MATH),
     ("07j-interruptible-gladia.py", EVAL_SIMPLE_MATH),
     ("07j-interruptible-gladia-vad.py", EVAL_SIMPLE_MATH),
@@ -144,8 +145,7 @@ TESTS_07 = [
     ("07zg-interruptible-camb.py", EVAL_SIMPLE_MATH),
     ("07zh-interruptible-hathora.py", EVAL_SIMPLE_MATH),
     ("07zi-interruptible-piper.py", EVAL_SIMPLE_MATH),
-    # Some issue with loguru.
-    # ("07zj-interruptible-kokoro.py", EVAL_SIMPLE_MATH),
+    ("07zj-interruptible-kokoro.py", EVAL_SIMPLE_MATH),
     # Needs a local XTTS docker instance running.
     # ("07i-interruptible-xtts.py", EVAL_SIMPLE_MATH),
     # Needs a Krisp license.

@@ -64,12 +64,18 @@ class VADProcessor(FrameProcessor):
         @self._vad_controller.event_handler("on_speech_started")
         async def on_speech_started(_controller):
             logger.debug(f"{self}: User started speaking")
-            await self.broadcast_frame(VADUserStartedSpeakingFrame)
+            await self.broadcast_frame(
+                VADUserStartedSpeakingFrame,
+                start_secs=_controller._vad_analyzer.params.start_secs,
+            )
 
         @self._vad_controller.event_handler("on_speech_stopped")
         async def on_speech_stopped(_controller):
             logger.debug(f"{self}: User stopped speaking")
-            await self.broadcast_frame(VADUserStoppedSpeakingFrame)
+            await self.broadcast_frame(
+                VADUserStoppedSpeakingFrame,
+                stop_secs=_controller._vad_analyzer.params.stop_secs,
+            )
 
         @self._vad_controller.event_handler("on_speech_activity")
         async def on_speech_activity(_controller):
@@ -93,8 +99,10 @@ class VADProcessor(FrameProcessor):
         """
         await super().process_frame(frame, direction)
 
+        # Forward the frame first, then let VAD controller process. This ensures:
+        # 1. StartFrame reaches downstream before SpeechControlParamsFrame is broadcast
+        # 2. Audio flows through immediately while VAD detection happens after
+        await self.push_frame(frame, direction)
+
         # Let the VAD controller handle the frame
         await self._vad_controller.process_frame(frame)
-
-        # Always forward the frame
-        await self.push_frame(frame, direction)

@@ -39,13 +39,14 @@ class VonageFrameSerializer(FrameSerializer):
         Ref docs: https://developer.vonage.com/en/video/guides/audio-connector
     """
 
-    class InputParams(BaseModel):
+    class InputParams(FrameSerializer.InputParams):
         """Configuration parameters for VonageFrameSerializer.
 
         Parameters:
             vonage_sample_rate: Sample rate used by Vonage, defaults to 16000 Hz.
                 Common values: 8000, 16000, 24000 Hz.
             sample_rate: Optional override for pipeline input sample rate.
+            ignore_rtvi_messages: Inherited from base FrameSerializer, defaults to True.
         """
 
         vonage_sample_rate: int = 16000
@@ -66,10 +67,11 @@ class VonageFrameSerializer(FrameSerializer):
             private_key: Private key for JWT generation (required for call control).
             params: Configuration parameters.
         """
+        super().__init__(params or VonageFrameSerializer.InputParams())
+        
         self._call_uuid = call_uuid
         self._application_id = application_id
         self._private_key = private_key
-        self._params = params or VonageFrameSerializer.InputParams()
 
         self._vonage_sample_rate = self._params.vonage_sample_rate
         self._sample_rate = 0  # Pipeline input rate
@@ -122,6 +124,8 @@ class VonageFrameSerializer(FrameSerializer):
             # Vonage expects raw binary PCM data (not base64 encoded)
             return serialized_data
         elif isinstance(frame, (OutputTransportMessageFrame, OutputTransportMessageUrgentFrame)):
+            if self.should_ignore_frame(frame):
+                return None
             # Allow sending custom JSON commands (e.g., notify)
             return json.dumps(frame.message)
 

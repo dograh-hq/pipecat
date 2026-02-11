@@ -149,7 +149,8 @@ def _get_standard_tools_for_logging(tools: Any) -> Optional[List[Dict[str, Any]]
 def _get_parent_service_context(self):
     """Get the parent service span context (internal use only).
 
-    This looks for the service span that was created when the service was initialized.
+    This looks for the service span that was created when the service was initialized,
+    or falls back to the conversation context if available.
 
     Args:
         self: The service instance.
@@ -164,7 +165,12 @@ def _get_parent_service_context(self):
     if hasattr(self, "_span") and self._span:
         return trace.set_span_in_context(self._span)
 
-    # If we can't find a stored span, default to current context
+    # Fall back to conversation context if available
+    conversation_context = get_current_conversation_context()
+    if conversation_context:
+        return conversation_context
+
+    # Last resort: use current context (may create orphan spans)
     return context_api.get_current()
 
 
