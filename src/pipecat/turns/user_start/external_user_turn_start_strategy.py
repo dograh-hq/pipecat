@@ -19,13 +19,16 @@ class ExternalUserTurnStartStrategy(BaseUserTurnStartStrategy):
 
     """
 
-    def __init__(self, **kwargs):
+    def __init__(self, enable_interruptions: bool = False, **kwargs):
         """Initialize the external user turn start strategy.
 
         Args:
+            enable_interruptions: Whether or not to enable interruption
             **kwargs: Additional keyword arguments.
         """
-        super().__init__(enable_interruptions=False, enable_user_speaking_frames=False, **kwargs)
+        super().__init__(
+            enable_interruptions=enable_interruptions, enable_user_speaking_frames=False, **kwargs
+        )
 
     async def process_frame(self, frame: Frame):
         """Process an incoming frame to detect user turn start.
