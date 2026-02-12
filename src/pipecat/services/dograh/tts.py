@@ -161,6 +161,12 @@ class DograhTTSService(AudioContextWordTTSService):
         """
         return True
 
+    def _reset_state(self):
+        """Reset internal state variables."""
+        self._cumulative_time = 0
+        self._started = False
+        logger.debug(f"{self}: Reset internal state")
+
     async def set_model(self, model: str):
         """Set the TTS model.
 
@@ -486,7 +492,7 @@ class DograhTTSService(AudioContextWordTTSService):
                 self._accumulated_text = ""
 
             self._context_id = None
-            self._started = False
+            self._reset_state()
 
     async def flush_audio(self):
         """Flush any pending audio and finalize the current context."""
@@ -521,7 +527,7 @@ class DograhTTSService(AudioContextWordTTSService):
             if self._accumulated_text:
                 await self.start_tts_usage_metrics(self._accumulated_text)
                 self._accumulated_text = ""
-            self._started = False
+            self._reset_state()
             if isinstance(frame, TTSStoppedFrame):
                 await self.add_word_timestamps([("Reset", 0)], self._context_id)
 
@@ -532,6 +538,7 @@ class DograhTTSService(AudioContextWordTTSService):
             frame: The start frame containing initialization data.
         """
         await super().start(frame)
+        self._reset_state()
         await self._connect()
 
     async def stop(self, frame: EndFrame):
