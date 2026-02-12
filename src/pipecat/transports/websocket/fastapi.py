@@ -119,6 +119,7 @@ class FastAPIWebsocketClient:
         self._closing = False
         self._callbacks = callbacks
         self._leave_counter = 0
+        self._transfer_in_progress = False
 
     async def setup(self, _: StartFrame):
         """Set up the WebSocket client.
@@ -173,6 +174,11 @@ class FastAPIWebsocketClient:
                 await self._websocket.close()
             except Exception as e:
                 logger.error(f"{self} exception while closing the websocket: {e}")
+
+    async def transfer_call(self):
+        """Disconnect the WebSocket client."""
+        self._transfer_in_progress = True
+        await self._websocket.close()          
 
     async def trigger_client_disconnected(self):
         """Trigger the client disconnected callback."""
@@ -321,7 +327,7 @@ class FastAPIWebsocketInputTransport(BaseInputTransport):
 
         # Trigger `on_client_disconnected` if the client actually disconnects,
         # that is, we are not the ones disconnecting.
-        if not self._client.is_closing:
+        if not self._client.is_closing and not self._client._transfer_in_progress:
             await self._client.trigger_client_disconnected()
 
     async def _monitor_websocket(self):

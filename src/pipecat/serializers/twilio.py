@@ -11,7 +11,7 @@ import json
 from typing import Optional
 
 from loguru import logger
-from pydantic import BaseModel
+from pipecat.utils.enums import EndTaskReason
 
 from pipecat.audio.dtmf.types import KeypadEntry
 from pipecat.audio.utils import create_stream_resampler, pcm_to_ulaw, ulaw_to_pcm
@@ -92,7 +92,8 @@ class TwilioFrameSerializer(FrameSerializer):
 
             if missing_credentials:
                 raise ValueError(
-                    f"auto_hang_up is enabled but missing required parameters: {', '.join(missing_credentials)}"
+                    f"auto_hang_up is enabled but missing required parameters: "
+                    f"{', '.join(missing_credentials)}"
                 )
 
             # Validate region and edge are both provided if either is specified
@@ -137,14 +138,22 @@ class TwilioFrameSerializer(FrameSerializer):
         Returns:
             Serialized data as string or bytes, or None if the frame isn't handled.
         """
+        if isinstance(frame, (EndFrame, CancelFrame)):
+            frame_reason = getattr(frame, 'reason', 'N/A')
+            logger.debug(f"Processing {type(frame).__name__} with reason: {frame_reason}")
+
+        frame_reason = getattr(frame, 'reason', 'N/A')
         if (
             self._params.auto_hang_up
             and not self._hangup_attempted
             and isinstance(frame, (EndFrame, CancelFrame))
         ):
-            self._hangup_attempted = True
-            await self._hang_up_call()
-            return None
+            if frame_reason == EndTaskReason.TRANSFER_CALL.value:
+                await self._transfer_call()
+            else:
+                self._hangup_attempted = True
+                await self._hang_up_call()
+                return None
         elif isinstance(frame, InterruptionFrame):
             answer = {"event": "clear", "streamSid": self._stream_sid}
             return json.dumps(answer)
@@ -212,7 +221,7 @@ class TwilioFrameSerializer(FrameSerializer):
                             if error_data.get("code") == 20404:
                                 logger.debug(f"Twilio call {call_sid} was already terminated")
                                 return
-                        except:
+                        except Exception:
                             pass  # Fall through to log the raw error
 
                         # Log other 404 errors
@@ -231,6 +240,55 @@ class TwilioFrameSerializer(FrameSerializer):
 
         except Exception as e:
             logger.error(f"Failed to hang up Twilio call: {e}")
+
+    async def _transfer_call(self):
+        """Transfer the Twilio call to a conference using Twilio's REST API."""
+        try:
+            import aiohttp
+
+            account_sid = self._account_sid
+            auth_token = self._auth_token
+            call_sid = self._call_sid
+            region = self._region
+            edge = self._edge
+
+            region_prefix = f"{region}." if region else ""
+            edge_prefix = f"{edge}." if edge else ""
+
+            # Twilio API endpoint for updating calls
+            endpoint = f"https://api.{edge_prefix}{region_prefix}twilio.com/2010-04-01/Accounts/{account_sid}/Calls/{call_sid}.json"
+
+            # Create basic auth from account_sid and auth_token
+            auth = aiohttp.BasicAuth(account_sid, auth_token)
+
+            conference_name = f"transfer-{call_sid}"
+            twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say>Connecting you now.</Say>
+    <Dial>
+        <Conference endConferenceOnExit="false" \
+                    startConferenceOnEnter="true">{conference_name}</Conference>
+    </Dial>
+</Response>"""
+
+            logger.debug(f"Transferring call to conference: {conference_name}")
+            # Make the POST request to transfer the call
+            async with aiohttp.ClientSession() as session:
+                async with session.post(endpoint, auth=auth, data={"Twiml": twiml}) as response:
+                    response_text = response.text()
+                    
+                    if response.status == 200:
+                        logger.info(f"Successfully transferred Twilio call {call_sid} to conference {conference_name}")
+                    elif response.status == 404:
+                        logger.error(f"Failed to transfer Twilio call {call_sid}: Call not found (404)")
+                    else:
+                        logger.error(
+                            f"Failed to transfer Twilio call {call_sid} to conference {conference_name}: "
+                            f"Status {response.status}, Response: {response_text}"
+                        )
+
+        except Exception as e:
+            logger.error(f"Failed to transfer Twilio call {call_sid}: {e}")
 
     async def deserialize(self, data: str | bytes) -> Frame | None:
         """Deserializes Twilio WebSocket data to Pipecat frames.
@@ -266,7 +324,7 @@ class TwilioFrameSerializer(FrameSerializer):
 
             try:
                 return InputDTMFFrame(KeypadEntry(digit))
-            except ValueError as e:
+            except ValueError:
                 # Handle case where string doesn't match any enum value
                 return None
         else:
