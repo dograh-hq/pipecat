@@ -17,3 +17,5 @@ class EndTaskReason(Enum):
     SYSTEM_CONNECT_ERROR = "system_connect_error"
     UNEXPECTED_ERROR = "unexpected_error"
     UNKNOWN = "unknown"
+    TRANSFER_CALL = "transfer_call"
+    CALL_TRANSFERRED = "call_transferred"

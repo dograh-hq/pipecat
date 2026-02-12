@@ -21,6 +21,10 @@ run_id_var: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("run_
 # Context variable for tracking the current turn number in a conversation
 turn_var: contextvars.ContextVar[int] = contextvars.ContextVar("turn", default=0)
 
+# Context variable for tracking the current call SID (for telephony calls)
+call_sid_var: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("call_sid", default=None)
+
+
 
 def get_current_run_id() -> Optional[str]:
     """Get the current workflow run ID from the context.
@@ -59,3 +63,21 @@ def set_current_turn(turn: int) -> None:
         turn: The turn number to set.
     """
     turn_var.set(turn)
+
+
+def get_current_call_sid() -> Optional[str]:
+    """Get the current call SID from the context.
+
+    Returns:
+        The current call SID or None if not set.
+    """
+    return call_sid_var.get()
+
+
+def set_current_call_sid(call_sid: Optional[str]) -> None:
+    """Set the current call SID in the context.
+
+    Args:
+        call_sid: The call SID to set, or None to clear it.
+    """
+    call_sid_var.set(call_sid)

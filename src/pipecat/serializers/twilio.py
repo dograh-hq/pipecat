@@ -11,6 +11,7 @@ import json
 from typing import Optional
 
 from loguru import logger
+from pipecat.utils.enums import EndTaskReason
 from pydantic import BaseModel
 
 from pipecat.audio.dtmf.types import KeypadEntry
@@ -136,14 +137,25 @@ class TwilioFrameSerializer(FrameSerializer):
         Returns:
             Serialized data as string or bytes, or None if the frame isn't handled.
         """
+        if isinstance(frame, (EndFrame, CancelFrame)):
+            logger.info(f"[TRANSFER-DEBUG] Serializing frame: {frame}")
+            logger.info(f"[TRANSFER-DEBUG] Hangup attempted: {self._hangup_attempted}")
+            logger.info(f"[TRANSFER-DEBUG] Auto hang up: {self._params.auto_hang_up}")
+            logger.info(f"[TRANSFER-DEBUG] Frame reason: {getattr(frame, 'reason', 'N/A')}")
+
+        frame_reason = getattr(frame, 'reason', 'N/A')
         if (
             self._params.auto_hang_up
             and not self._hangup_attempted
             and isinstance(frame, (EndFrame, CancelFrame))
         ):
-            self._hangup_attempted = True
-            await self._hang_up_call()
-            return None
+            if frame_reason == EndTaskReason.TRANSFER_CALL.value:
+                await self._transfer_call()
+                # TODO: check if _hangup_attempted should be set to True
+            else:
+                self._hangup_attempted = True
+                await self._hang_up_call()
+                return None
         elif isinstance(frame, InterruptionFrame):
             answer = {"event": "clear", "streamSid": self._stream_sid}
             return json.dumps(answer)
@@ -228,6 +240,59 @@ class TwilioFrameSerializer(FrameSerializer):
 
         except Exception as e:
             logger.error(f"Failed to hang up Twilio call: {e}")
+
+    async def _transfer_call(self):
+        """Hang up the Twilio call using Twilio's REST API."""
+        try:
+            import aiohttp
+
+            account_sid = self._account_sid
+            auth_token = self._auth_token
+            call_sid = self._call_sid
+            region = self._region
+            edge = self._edge
+
+            region_prefix = f"{region}." if region else ""
+            edge_prefix = f"{edge}." if edge else ""
+
+            # Twilio API endpoint for updating calls
+            endpoint = f"https://api.{edge_prefix}{region_prefix}twilio.com/2010-04-01/Accounts/{account_sid}/Calls/{call_sid}.json"
+            
+            # Create basic auth from account_sid and auth_token
+            auth = aiohttp.BasicAuth(account_sid, auth_token)
+
+            conference_name = f"transfer-{call_sid}"
+            twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say>Connecting you now.</Say>
+    <Dial>
+        <Conference endConferenceOnExit="false" startConferenceOnEnter="true">{conference_name}</Conference>
+    </Dial>
+</Response>"""
+
+            logger.info(f"[TRANSFER-DEBUG]  calling endpoint {endpoint} with auth {auth} and data {twiml}")
+            # Make the POST request to update the call
+            async with aiohttp.ClientSession() as session:
+                async with session.post(endpoint, auth=auth, data={"Twiml": twiml}) as response:
+                    response_text = response.text()
+                    logger.debug(f"Twilio call {call_sid} transferred and added to conference {conference_name} with response status {response.status} and response text {await response_text}")
+                    if response.status == 200:
+                        logger.info(f"Successfully transferred Twilio call {call_sid}")
+                    elif response.status == 404:
+                        logger.debug(f"Twilio call {call_sid} not found")
+                        logger.error(
+                            f"Failed to transfer Twilio call {call_sid}: "
+                            f"Status {response.status}, Response: {response_text}"
+                        )
+                    else:
+                        # Log other errors
+                        logger.error(
+                            f"Failed to transfer Twilio call {call_sid}: "
+                            f"Status {response.status}, Response: {response_text}"
+                        )
+
+        except Exception as e:
+            logger.error(f"Failed to transfer Twilio call {call_sid}: {e}")            
 
     async def deserialize(self, data: str | bytes) -> Frame | None:
         """Deserializes Twilio WebSocket data to Pipecat frames.
