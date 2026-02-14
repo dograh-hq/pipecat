@@ -38,6 +38,7 @@ from pipecat.serializers.base_serializer import FrameSerializer
 from pipecat.transports.base_input import BaseInputTransport
 from pipecat.transports.base_output import BaseOutputTransport
 from pipecat.transports.base_transport import BaseTransport, TransportParams
+from pipecat.utils.enums import EndTaskReason
 
 try:
     from fastapi import WebSocket
@@ -155,12 +156,8 @@ class FastAPIWebsocketClient:
             )
             # For some reason the websocket is disconnected, and we are not able to send data
             # So let's properly handle it and disconnect the transport if it is not already disconnecting
-            if (
-                self._websocket.application_state == WebSocketState.DISCONNECTED
-                and not self.is_closing
-            ):
+            if self._websocket.application_state == WebSocketState.DISCONNECTED:
                 logger.warning("Closing already disconnected websocket!")
-                self._closing = True
 
     async def disconnect(self):
         """Disconnect the WebSocket client."""
@@ -178,7 +175,7 @@ class FastAPIWebsocketClient:
     async def transfer_call(self):
         """Disconnect the WebSocket client."""
         self._transfer_in_progress = True
-        await self._websocket.close()          
+        await self._websocket.close()
 
     async def trigger_client_disconnected(self):
         """Trigger the client disconnected callback."""
@@ -410,7 +407,10 @@ class FastAPIWebsocketOutputTransport(BaseOutputTransport):
         """
         await super().stop(frame)
         await self._write_frame(frame)
-        await self._client.disconnect()
+        if getattr(frame, "reason", None) == EndTaskReason.TRANSFER_CALL.value:
+            await self._client.transfer_call()
+        else:
+            await self._client.disconnect()
 
     async def cancel(self, frame: CancelFrame):
         """Cancel the output transport and stop all processing.

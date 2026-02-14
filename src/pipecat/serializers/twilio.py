@@ -10,8 +10,8 @@ import base64
 import json
 from typing import Optional
 
+import aiohttp
 from loguru import logger
-from pipecat.utils.enums import EndTaskReason
 
 from pipecat.audio.dtmf.types import KeypadEntry
 from pipecat.audio.utils import create_stream_resampler, pcm_to_ulaw, ulaw_to_pcm
@@ -28,6 +28,7 @@ from pipecat.frames.frames import (
     StartFrame,
 )
 from pipecat.serializers.base_serializer import FrameSerializer
+from pipecat.utils.enums import EndTaskReason
 
 
 class TwilioFrameSerializer(FrameSerializer):
@@ -117,6 +118,7 @@ class TwilioFrameSerializer(FrameSerializer):
         self._input_resampler = create_stream_resampler()
         self._output_resampler = create_stream_resampler()
         self._hangup_attempted = False
+        self._transfer_attempted = False
 
     async def setup(self, frame: StartFrame):
         """Sets up the serializer with pipeline configuration.
@@ -138,19 +140,16 @@ class TwilioFrameSerializer(FrameSerializer):
         Returns:
             Serialized data as string or bytes, or None if the frame isn't handled.
         """
+        frame_reason = None
         if isinstance(frame, (EndFrame, CancelFrame)):
-            frame_reason = getattr(frame, 'reason', 'N/A')
+            frame_reason = getattr(frame, "reason", None)
             logger.debug(f"Processing {type(frame).__name__} with reason: {frame_reason}")
 
-        frame_reason = getattr(frame, 'reason', 'N/A')
-        if (
-            self._params.auto_hang_up
-            and not self._hangup_attempted
-            and isinstance(frame, (EndFrame, CancelFrame))
-        ):
-            if frame_reason == EndTaskReason.TRANSFER_CALL.value:
+        if isinstance(frame, (EndFrame, CancelFrame)):
+            if frame_reason == EndTaskReason.TRANSFER_CALL.value and not self._transfer_attempted:
+                self._transfer_attempted = True
                 await self._transfer_call()
-            else:
+            elif self._params.auto_hang_up and not self._hangup_attempted:
                 self._hangup_attempted = True
                 await self._hang_up_call()
                 return None
@@ -244,8 +243,6 @@ class TwilioFrameSerializer(FrameSerializer):
     async def _transfer_call(self):
         """Transfer the Twilio call to a conference using Twilio's REST API."""
         try:
-            import aiohttp
-
             account_sid = self._account_sid
             auth_token = self._auth_token
             call_sid = self._call_sid
@@ -266,8 +263,7 @@ class TwilioFrameSerializer(FrameSerializer):
 <Response>
     <Say>Connecting you now.</Say>
     <Dial>
-        <Conference endConferenceOnExit="false" \
-                    startConferenceOnEnter="true">{conference_name}</Conference>
+        <Conference endConferenceOnExit="true">{conference_name}</Conference>
     </Dial>
 </Response>"""
 
@@ -276,11 +272,15 @@ class TwilioFrameSerializer(FrameSerializer):
             async with aiohttp.ClientSession() as session:
                 async with session.post(endpoint, auth=auth, data={"Twiml": twiml}) as response:
                     response_text = response.text()
-                    
+
                     if response.status == 200:
-                        logger.info(f"Successfully transferred Twilio call {call_sid} to conference {conference_name}")
+                        logger.info(
+                            f"Successfully transferred Twilio call {call_sid} to conference {conference_name}"
+                        )
                     elif response.status == 404:
-                        logger.error(f"Failed to transfer Twilio call {call_sid}: Call not found (404)")
+                        logger.error(
+                            f"Failed to transfer Twilio call {call_sid}: Call not found (404)"
+                        )
                     else:
                         logger.error(
                             f"Failed to transfer Twilio call {call_sid} to conference {conference_name}: "
