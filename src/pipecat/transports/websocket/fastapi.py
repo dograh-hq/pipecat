@@ -38,6 +38,7 @@ from pipecat.serializers.base_serializer import FrameSerializer
 from pipecat.transports.base_input import BaseInputTransport
 from pipecat.transports.base_output import BaseOutputTransport
 from pipecat.transports.base_transport import BaseTransport, TransportParams
+from pipecat.utils.enums import EndTaskReason
 
 try:
     from fastapi import WebSocket
@@ -119,6 +120,7 @@ class FastAPIWebsocketClient:
         self._closing = False
         self._callbacks = callbacks
         self._leave_counter = 0
+        self._transfer_in_progress = False
 
     async def setup(self, _: StartFrame):
         """Set up the WebSocket client.
@@ -154,12 +156,8 @@ class FastAPIWebsocketClient:
             )
             # For some reason the websocket is disconnected, and we are not able to send data
             # So let's properly handle it and disconnect the transport if it is not already disconnecting
-            if (
-                self._websocket.application_state == WebSocketState.DISCONNECTED
-                and not self.is_closing
-            ):
+            if self._websocket.application_state == WebSocketState.DISCONNECTED:
                 logger.warning("Closing already disconnected websocket!")
-                self._closing = True
 
     async def disconnect(self):
         """Disconnect the WebSocket client."""
@@ -321,7 +319,7 @@ class FastAPIWebsocketInputTransport(BaseInputTransport):
 
         # Trigger `on_client_disconnected` if the client actually disconnects,
         # that is, we are not the ones disconnecting.
-        if not self._client.is_closing:
+        if not self._client.is_closing and not self._client._transfer_in_progress:
             await self._client.trigger_client_disconnected()
 
     async def _monitor_websocket(self):
@@ -403,7 +401,14 @@ class FastAPIWebsocketOutputTransport(BaseOutputTransport):
             frame: The end frame signaling transport shutdown.
         """
         await super().stop(frame)
+
+        # Lets mark transfer in progress in client, so that we dont call on_client_disconnected
+        # handler if
+        if isinstance(frame, EndFrame) and frame.reason == EndTaskReason.TRANSFER_CALL.value:
+            self._client._transfer_in_progress = True
+
         await self._write_frame(frame)
+
         await self._client.disconnect()
 
     async def cancel(self, frame: CancelFrame):
