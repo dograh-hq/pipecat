@@ -261,7 +261,6 @@ class TwilioFrameSerializer(FrameSerializer):
             conference_name = f"transfer-{call_sid}"
             twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Say>Connecting you now.</Say>
     <Dial>
         <Conference endConferenceOnExit="true">{conference_name}</Conference>
     </Dial>
@@ -271,7 +270,7 @@ class TwilioFrameSerializer(FrameSerializer):
             # Make the POST request to transfer the call
             async with aiohttp.ClientSession() as session:
                 async with session.post(endpoint, auth=auth, data={"Twiml": twiml}) as response:
-                    response_text = response.text()
+                    response_text = await response.text()
 
                     if response.status == 200:
                         logger.info(

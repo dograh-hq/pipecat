@@ -172,11 +172,6 @@ class FastAPIWebsocketClient:
             except Exception as e:
                 logger.error(f"{self} exception while closing the websocket: {e}")
 
-    async def transfer_call(self):
-        """Disconnect the WebSocket client."""
-        self._transfer_in_progress = True
-        await self._websocket.close()
-
     async def trigger_client_disconnected(self):
         """Trigger the client disconnected callback."""
         await self._callbacks.on_client_disconnected(self._websocket)
@@ -406,11 +401,15 @@ class FastAPIWebsocketOutputTransport(BaseOutputTransport):
             frame: The end frame signaling transport shutdown.
         """
         await super().stop(frame)
+
+        # Lets mark transfer in progress in client, so that we dont call on_client_disconnected
+        # handler if
+        if isinstance(frame, EndFrame) and frame.reason == EndTaskReason.TRANSFER_CALL.value:
+            self._client._transfer_in_progress = True
+
         await self._write_frame(frame)
-        if getattr(frame, "reason", None) == EndTaskReason.TRANSFER_CALL.value:
-            await self._client.transfer_call()
-        else:
-            await self._client.disconnect()
+
+        await self._client.disconnect()
 
     async def cancel(self, frame: CancelFrame):
         """Cancel the output transport and stop all processing.
