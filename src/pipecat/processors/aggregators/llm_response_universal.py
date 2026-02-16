@@ -560,7 +560,6 @@ class LLMUserAggregator(LLMContextAggregator):
                 VADUserStoppedSpeakingFrame,
                 UserStartedSpeakingFrame,
                 UserStoppedSpeakingFrame,
-                InputAudioRawFrame,
                 InterimTranscriptionFrame,
                 TranscriptionFrame,
             ),
