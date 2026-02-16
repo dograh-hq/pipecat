@@ -123,6 +123,7 @@ class FunctionCallRegistryItem:
     handler: FunctionCallHandler | "DirectFunctionWrapper"
     cancel_on_interruption: bool
     handler_deprecated: bool
+    disable_timeout: bool
 
 
 @dataclass
@@ -508,6 +509,7 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
         start_callback=None,
         *,
         cancel_on_interruption: bool = True,
+        disable_timeout: bool = False,
     ):
         """Register a function handler for LLM function calls.
 
@@ -524,6 +526,7 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
 
             cancel_on_interruption: Whether to cancel this function call when an
                 interruption occurs. Defaults to True.
+            disable_timeout: Whether to disable timeout for function call execution
         """
         signature = inspect.signature(handler)
         handler_deprecated = len(signature.parameters) > 1
@@ -542,6 +545,7 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
             handler=handler,
             cancel_on_interruption=cancel_on_interruption,
             handler_deprecated=handler_deprecated,
+            disable_timeout=disable_timeout,
         )
 
         # Start callbacks are now deprecated.
@@ -813,7 +817,8 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
             except asyncio.CancelledError:
                 raise
 
-        timeout_task = self.create_task(timeout_handler())
+        if not runner_item.registry_item.disable_timeout:
+            timeout_task = self.create_task(timeout_handler())
 
         try:
             # Yield to the event loop so the timeout task coroutine gets entered
