@@ -779,13 +779,13 @@ class BaseOutputTransport(FrameProcessor):
                 if not push_downstream and isinstance(frame, OutputAudioRawFrame):
                     consecutive_failures += 1
                     logger.warning(
-                        f"{self} Failed to write audio frame (consecutive failures: {consecutive_failures}/{max_consecutive_failures})"
+                        f"Failed to write audio frame (consecutive failures: {consecutive_failures}/{max_consecutive_failures})"
                     )
 
                     # Break out if we've failed too many times consecutively
                     if consecutive_failures >= max_consecutive_failures:
                         logger.warning(
-                            f"{self} Cancelling task after {consecutive_failures} consecutive failures"
+                            f"Cancelling task after {consecutive_failures} consecutive failures"
                         )
 
                         # Send bot stopped speaking frame
