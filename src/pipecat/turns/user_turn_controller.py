@@ -261,16 +261,17 @@ class UserTurnController(BaseObject):
     async def _trigger_user_turn_stop(
         self, strategy: Optional[BaseUserTurnStopStrategy], params: UserTurnStoppedParams
     ):
+        # Always reset stop strategies to prevent dangling state (e.g. accumulated
+        # _text) when a stop is triggered but rejected because no turn is active.
+        for s in self._user_turn_strategies.stop or []:
+            await s.reset()
+
         # Prevent two consecutive user turn stops.
         if not self._user_turn:
             return
 
         self._user_turn = False
         self._user_turn_stop_timeout_event.set()
-
-        # Reset all user turn stop strategies to start fresh.
-        for s in self._user_turn_strategies.stop or []:
-            await s.reset()
 
         await self._call_event_handler("on_user_turn_stopped", strategy, params)
 
