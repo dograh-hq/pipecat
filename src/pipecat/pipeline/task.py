@@ -293,10 +293,10 @@ class PipelineTask(BasePipelineTask):
         if self._enable_turn_tracking:
             self._turn_tracking_observer = TurnTrackingObserver()
             observers.append(self._turn_tracking_observer)
-        if self._enable_tracing and self._turn_tracking_observer:
-            # Create latency observer for tracing
+            # Create latency observer (useful for both tracing and external consumers)
             self._user_bot_latency_observer = UserBotLatencyObserver()
             observers.append(self._user_bot_latency_observer)
+        if self._enable_tracing and self._turn_tracking_observer:
             # Create turn trace observer with latency tracking
             self._turn_trace_observer = TurnTraceObserver(
                 self._turn_tracking_observer,
@@ -446,6 +446,15 @@ class PipelineTask(BasePipelineTask):
             The turn trace observer instance or None if not enabled.
         """
         return self._turn_trace_observer
+
+    @property
+    def user_bot_latency_observer(self) -> Optional[UserBotLatencyObserver]:
+        """Get the user-bot latency observer if turn tracking is enabled.
+
+        Returns:
+            The user-bot latency observer instance or None if not enabled.
+        """
+        return self._user_bot_latency_observer
 
     @property
     def rtvi(self) -> RTVIProcessor:

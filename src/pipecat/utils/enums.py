@@ -19,3 +19,15 @@ class EndTaskReason(Enum):
     UNEXPECTED_ERROR = "unexpected_error"
     UNKNOWN = "unknown"
     TRANSFER_CALL = "transfer_call"
+
+
+class RealtimeFeedbackType(Enum):
+    """Message types for real-time feedback events."""
+
+    USER_TRANSCRIPTION = "rtf-user-transcription"
+    BOT_TEXT = "rtf-bot-text"
+    FUNCTION_CALL_START = "rtf-function-call-start"
+    FUNCTION_CALL_END = "rtf-function-call-end"
+    TTFB_METRIC = "rtf-ttfb-metric"
+    NODE_TRANSITION = "rtf-node-transition"
+    LATENCY_MEASURED = "rtf-latency-measured"
