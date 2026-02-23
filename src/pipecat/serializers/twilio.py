@@ -276,6 +276,8 @@ class TwilioFrameSerializer(FrameSerializer):
                         logger.info(
                             f"Successfully transferred Twilio call {call_sid} to conference {conference_name}"
                         )
+                        # Clean up transfer context after successful transfer
+                        await self._cleanup_transfer_context(call_sid)
                     elif response.status == 404:
                         logger.error(
                             f"Failed to transfer Twilio call {call_sid}: Call not found (404)"
