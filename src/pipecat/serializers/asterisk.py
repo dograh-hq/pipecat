@@ -102,7 +102,7 @@ class AsteriskFrameSerializer(FrameSerializer):
         if isinstance(frame, (EndFrame, CancelFrame)):
             frame_reason = getattr(frame, "reason", None)
             logger.debug(f"Processing {type(frame).__name__} with reason: {frame_reason}")
-            
+
             if frame_reason == EndTaskReason.TRANSFER_CALL.value and not self._transfer_attempted:
                 self._transfer_attempted = True
                 await self._transfer_call()
@@ -213,24 +213,24 @@ class AsteriskFrameSerializer(FrameSerializer):
             from aiohttp import BasicAuth
 
             if not self._channel_id or not self._ari_endpoint:
-                logger.warning(
-                    "Cannot execute transfer: missing channel_id or ari_endpoint"
-                )
+                logger.warning("Cannot execute transfer: missing channel_id or ari_endpoint")
                 return
 
             logger.info(f"[ARI Transfer] Executing bridge swap for channel {self._channel_id}")
 
-            from api.services.telephony.call_transfer_manager import get_call_transfer_manager
-            from api.db import db_client
             from api.constants import REDIS_URL
+            from api.db import db_client
+            from api.services.telephony.call_transfer_manager import get_call_transfer_manager
 
             auth = BasicAuth(self._app_name, self._app_password)
             call_transfer_manager = await get_call_transfer_manager()
-            
+
             # 1. Find active transfer context for this caller channel
             transfer_context = await self._find_transfer_context_for_caller(self._channel_id)
             if not transfer_context:
-                logger.error(f"[ARI Transfer] No active transfer context found for caller {self._channel_id}")
+                logger.error(
+                    f"[ARI Transfer] No active transfer context found for caller {self._channel_id}"
+                )
                 return
 
             logger.info(
@@ -244,7 +244,7 @@ class AsteriskFrameSerializer(FrameSerializer):
             if not workflow_run_id:
                 logger.error(f"[ARI Transfer] No workflow run found for caller {self._channel_id}")
                 return
-                
+
             workflow_run = await db_client.get_workflow_run_by_id(int(workflow_run_id))
             if not workflow_run or not workflow_run.gathered_context:
                 logger.error(f"[ARI Transfer] No workflow context found for run {workflow_run_id}")
@@ -253,11 +253,11 @@ class AsteriskFrameSerializer(FrameSerializer):
             ctx = workflow_run.gathered_context
             bridge_id = ctx.get("bridge_id")
             ext_channel_id = ctx.get("ext_channel_id")
-            
+
             if not bridge_id or not ext_channel_id:
                 logger.error(f"[ARI Transfer] Missing bridge/external channel info: {ctx}")
                 return
-                
+
             destination_channel_id = transfer_context.call_sid
             if not destination_channel_id:
                 logger.error(f"[ARI Transfer] No destination channel in transfer context")
@@ -273,51 +273,66 @@ class AsteriskFrameSerializer(FrameSerializer):
             await db_client.update_workflow_run(
                 run_id=int(workflow_run_id), gathered_context=workflow_run.gathered_context
             )
-            logger.debug(f"[ARI Transfer] Set transfer_state=in-progress for workflow {workflow_run_id}")
+            logger.debug(
+                f"[ARI Transfer] Set transfer_state=in-progress for workflow {workflow_run_id}"
+            )
 
             # 4. Execute bridge swap operations via ARI REST API
             async with aiohttp.ClientSession() as session:
                 # Add destination channel to existing bridge
                 add_url = f"{self._ari_endpoint}/ari/bridges/{bridge_id}/addChannel"
                 async with session.post(
-                    add_url, 
-                    auth=auth, 
-                    params={"channel": destination_channel_id}
+                    add_url, auth=auth, params={"channel": destination_channel_id}
                 ) as response:
                     if response.status in (200, 204):
-                        logger.info(f"[ARI Transfer] Added destination {destination_channel_id} to bridge {bridge_id}")
+                        logger.info(
+                            f"[ARI Transfer] Added destination {destination_channel_id} to bridge {bridge_id}"
+                        )
                     else:
                         error_text = await response.text()
-                        logger.error(f"[ARI Transfer] Failed to add destination to bridge: {response.status} {error_text}")
+                        logger.error(
+                            f"[ARI Transfer] Failed to add destination to bridge: {response.status} {error_text}"
+                        )
                         return
 
                 # Remove external media channel from bridge
                 remove_url = f"{self._ari_endpoint}/ari/bridges/{bridge_id}/removeChannel"
                 async with session.post(
-                    remove_url, 
-                    auth=auth, 
-                    params={"channel": ext_channel_id}
+                    remove_url, auth=auth, params={"channel": ext_channel_id}
                 ) as response:
                     if response.status in (200, 204):
-                        logger.info(f"[ARI Transfer] Removed external media {ext_channel_id} from bridge {bridge_id}")
+                        logger.info(
+                            f"[ARI Transfer] Removed external media {ext_channel_id} from bridge {bridge_id}"
+                        )
                     else:
                         error_text = await response.text()
-                        logger.error(f"[ARI Transfer] Failed to remove external media from bridge: {response.status} {error_text}")
-
+                        logger.error(
+                            f"[ARI Transfer] Failed to remove external media from bridge: {response.status} {error_text}"
+                        )
 
                 # Hang up the external media channel
                 hangup_url = f"{self._ari_endpoint}/ari/channels/{ext_channel_id}"
                 async with session.delete(hangup_url, auth=auth) as response:
                     if response.status in (200, 204):
-                        logger.info(f"[ARI Transfer] Hung up external media channel {ext_channel_id}")
+                        logger.info(
+                            f"[ARI Transfer] Hung up external media channel {ext_channel_id}"
+                        )
                     elif response.status == 404:
-                        logger.debug(f"[ARI Transfer] External media channel {ext_channel_id} already gone")
+                        logger.debug(
+                            f"[ARI Transfer] External media channel {ext_channel_id} already gone"
+                        )
                     else:
                         error_text = await response.text()
-                        logger.warning(f"[ARI Transfer] Failed to hang up external media: {response.status} {error_text}")
+                        logger.warning(
+                            f"[ARI Transfer] Failed to hang up external media: {response.status} {error_text}"
+                        )
 
             # 5. Publish completion event
-            from api.services.telephony.transfer_event_protocol import TransferEvent, TransferEventType
+            from api.services.telephony.transfer_event_protocol import (
+                TransferEvent,
+                TransferEventType,
+            )
+
             completion_event = TransferEvent(
                 type=TransferEventType.TRANSFER_COMPLETED,
                 transfer_id=transfer_context.transfer_id,
@@ -328,29 +343,29 @@ class AsteriskFrameSerializer(FrameSerializer):
                 status="success",
                 action="transfer_success",
                 end_call=True,
-                timestamp=time.time()
+                timestamp=time.time(),
             )
             await call_transfer_manager.publish_transfer_event(completion_event)
 
             logger.info(
                 f"[ARI Transfer] Bridge swap completed successfully for transfer {transfer_context.transfer_id}"
             )
-            
+
         except Exception as e:
             logger.exception(f"Failed to execute ARI transfer: {e}")
 
     async def _find_transfer_context_for_caller(self, caller_channel_id: str):
         """Find the active transfer context for this caller channel."""
         try:
-            from api.services.telephony.call_transfer_manager import get_call_transfer_manager
-            from api.services.telephony.transfer_event_protocol import TransferContext
             import redis.asyncio as aioredis
             from api.constants import REDIS_URL
+            from api.services.telephony.call_transfer_manager import get_call_transfer_manager
+            from api.services.telephony.transfer_event_protocol import TransferContext
 
             # Search Redis for transfer contexts where original_call_sid matches this caller
             redis = aioredis.from_url(REDIS_URL, decode_responses=True)
             transfer_keys = await redis.keys("transfer:context:*")
-            
+
             for key in transfer_keys:
                 try:
                     context_data = await redis.get(key)
@@ -360,9 +375,9 @@ class AsteriskFrameSerializer(FrameSerializer):
                             return context
                 except Exception:
                     continue
-            
+
             return None
-            
+
         except Exception as e:
             logger.error(f"[ARI Transfer] Error finding transfer context: {e}")
             return None
