@@ -110,7 +110,7 @@ class AsteriskFrameSerializer(FrameSerializer):
             elif (
                 self._params.auto_hang_up
                 and not self._hangup_attempted
-                and frame_reason != "transfer_call"
+                and frame_reason != EndTaskReason.TRANSFER_CALL.value
             ):
                 self._hangup_attempted = True
                 await self._hang_up_call()
@@ -220,7 +220,6 @@ class AsteriskFrameSerializer(FrameSerializer):
 
             logger.info(f"[ARI Transfer] Executing bridge swap for channel {self._channel_id}")
 
-            # Import here to avoid circular dependencies
             from api.services.telephony.call_transfer_manager import get_call_transfer_manager
             from api.db import db_client
             from api.constants import REDIS_URL
@@ -269,14 +268,14 @@ class AsteriskFrameSerializer(FrameSerializer):
                 f"destination={destination_channel_id}, ext_media={ext_channel_id}"
             )
 
-            # 2.5. Set transfer state to prevent StasisEnd auto-teardown
+            # 3. Set transfer state to prevent StasisEnd auto-teardown
             workflow_run.gathered_context["transfer_state"] = "in-progress"
             await db_client.update_workflow_run(
                 run_id=int(workflow_run_id), gathered_context=workflow_run.gathered_context
             )
             logger.debug(f"[ARI Transfer] Set transfer_state=in-progress for workflow {workflow_run_id}")
 
-            # 3. Execute bridge swap operations via ARI REST API
+            # 4. Execute bridge swap operations via ARI REST API
             async with aiohttp.ClientSession() as session:
                 # Add destination channel to existing bridge
                 add_url = f"{self._ari_endpoint}/ari/bridges/{bridge_id}/addChannel"
@@ -304,7 +303,7 @@ class AsteriskFrameSerializer(FrameSerializer):
                     else:
                         error_text = await response.text()
                         logger.error(f"[ARI Transfer] Failed to remove external media from bridge: {response.status} {error_text}")
-                        # Continue anyway - the main transfer connection is established
+
 
                 # Hang up the external media channel
                 hangup_url = f"{self._ari_endpoint}/ari/channels/{ext_channel_id}"
@@ -317,7 +316,7 @@ class AsteriskFrameSerializer(FrameSerializer):
                         error_text = await response.text()
                         logger.warning(f"[ARI Transfer] Failed to hang up external media: {response.status} {error_text}")
 
-            # 4. Publish completion event
+            # 5. Publish completion event
             from api.services.telephony.transfer_event_protocol import TransferEvent, TransferEventType
             completion_event = TransferEvent(
                 type=TransferEventType.TRANSFER_COMPLETED,
@@ -332,9 +331,6 @@ class AsteriskFrameSerializer(FrameSerializer):
                 timestamp=time.time()
             )
             await call_transfer_manager.publish_transfer_event(completion_event)
-
-            # Note: Transfer context cleanup is now handled by background job in pipecat_engine_custom_tools.py
-            # to avoid timing conflicts with pipeline processing
 
             logger.info(
                 f"[ARI Transfer] Bridge swap completed successfully for transfer {transfer_context.transfer_id}"
@@ -363,7 +359,7 @@ class AsteriskFrameSerializer(FrameSerializer):
                         if context.original_call_sid == caller_channel_id:
                             return context
                 except Exception:
-                    continue  # Skip malformed contexts
+                    continue
             
             return None
             
