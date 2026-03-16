@@ -12,15 +12,19 @@ from typing import AsyncGenerator, Optional
 from pipecat.frames.frames import (
     Frame,
     TTSAudioRawFrame,
-    TTSStartedFrame,
-    TTSStoppedFrame,
 )
 from pipecat.services.settings import TTSSettings
 from pipecat.services.tts_service import TTSService
 
 
 class MockTTSService(TTSService):
-    """Mock TTS service that generates predictable audio frames for testing."""
+    """Mock TTS service that generates predictable audio frames for testing.
+
+    Matches real TTS service behavior: the parent class handles TTSStartedFrame
+    and TTSStoppedFrame lifecycle via ``push_start_frame=True`` and
+    ``push_stop_frames=True``. Multiple sentences within a turn share a single
+    audio context with one start/stop cycle, not one per sentence.
+    """
 
     def __init__(
         self,
@@ -46,6 +50,8 @@ class MockTTSService(TTSService):
         """
         super().__init__(
             pause_frame_processing=pause_frame_processing,
+            push_start_frame=True,
+            push_stop_frames=True,
             settings=TTSSettings(model=None, voice=None, language=None),
             **kwargs,
         )
@@ -58,16 +64,17 @@ class MockTTSService(TTSService):
     async def run_tts(self, text: str, context_id: str) -> AsyncGenerator[Frame, None]:
         """Generate mock audio frames for given text.
 
+        The parent class handles TTSStartedFrame/TTSStoppedFrame lifecycle.
+        This method only yields audio frames.
+
         Args:
             text: The text to convert (after filtering)
             context_id: The context ID of the synthesis
 
         Yields:
-            Frames simulating real TTS service behavior
+            TTSAudioRawFrame: Audio frames containing mock audio data.
         """
         self.received_texts.append(text)
-
-        yield TTSStartedFrame(context_id=context_id)
 
         if text.strip():
             for i in range(0, len(self._mock_audio_data), self._chunk_size):
@@ -79,8 +86,6 @@ class MockTTSService(TTSService):
                     yield audio_frame
                     if self._frame_delay > 0:
                         await asyncio.sleep(self._frame_delay)
-
-        yield TTSStoppedFrame(context_id=context_id)
 
     @staticmethod
     def create_mock_audio(duration_ms: int, sample_rate: int = 16000) -> bytes:
@@ -130,19 +135,24 @@ class PredictableMockTTSService(MockTTSService):
 
         return bytes(audio_data)
 
-    async def run_tts(self, text: str) -> AsyncGenerator[Frame, None]:
-        """Generate specific audio frames for the filtered text."""
+    async def run_tts(self, text: str, context_id: str) -> AsyncGenerator[Frame, None]:
+        """Generate specific audio frames for the filtered text.
+
+        Args:
+            text: The text to convert.
+            context_id: The context ID of the synthesis.
+
+        Yields:
+            TTSAudioRawFrame: Audio frames containing deterministic audio data.
+        """
         self.received_texts.append(text)
         audio_data = self.get_audio_for_text(text)
 
-        yield TTSStartedFrame()
-
         if text.strip():
-            # Split audio into chunks and yield audio frames
             chunk_size = 1024
             for i in range(0, len(audio_data), chunk_size):
                 chunk = audio_data[i : i + chunk_size]
                 if chunk:
-                    yield TTSAudioRawFrame(audio=chunk, sample_rate=16000, num_channels=1)
-
-        yield TTSStoppedFrame()
+                    yield TTSAudioRawFrame(
+                        audio=chunk, sample_rate=16000, num_channels=1, context_id=context_id
+                    )
