@@ -1028,6 +1028,12 @@ class GoogleLLMService(LLMService):
             self._settings.system_instruction or params_from_context["system_instruction"]
         )
 
+        # Google API requires non-empty contents. When system_instruction is
+        # set (e.g. via _update_settings) but the context has no messages yet,
+        # add it as a user message to satisfy the API requirement.
+        if not messages and system_instruction:
+            messages = [Content(role="user", parts=[Part(text=system_instruction)])]
+
         tools = []
         if params_from_context["tools"]:
             tools = params_from_context["tools"]
