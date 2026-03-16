@@ -389,9 +389,8 @@ class DograhTTSService(WebsocketTTSService):
             except Exception as e:
                 logger.error(f"Unexpected keepalive error: {e}")
 
-    async def _send_text(self, text: str):
+    async def _send_text(self, text: str, context_id: str):
         """Send text to the WebSocket for synthesis."""
-        context_id = self.get_active_audio_context_id()
         if self._websocket and context_id:
             msg = {
                 "type": "synthesize",
@@ -419,13 +418,11 @@ class DograhTTSService(WebsocketTTSService):
                 await self._connect()
 
             try:
-                if not self.has_active_audio_context():
+                if not self.audio_context_available(context_id):
+                    await self.create_audio_context(context_id)
                     await self.start_ttfb_metrics()
                     yield TTSStartedFrame(context_id=context_id)
                     self._cumulative_time = 0
-
-                    if not self.audio_context_available(context_id):
-                        await self.create_audio_context(context_id)
 
                     # Send initial context setup with voice settings
                     context_msg = {
@@ -444,7 +441,7 @@ class DograhTTSService(WebsocketTTSService):
                     logger.trace(f"Created new context {context_id} with voice settings")
 
                 # Send text for synthesis
-                await self._send_text(text)
+                await self._send_text(text, context_id)
                 self._accumulated_text += text
                 await self.start_tts_usage_metrics(text)
             except Exception as e:
