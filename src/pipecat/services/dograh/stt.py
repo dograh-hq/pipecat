@@ -24,6 +24,7 @@ from pipecat.frames.frames import (
     TranscriptionFrame,
     UserStartedSpeakingFrame,
     UserStoppedSpeakingFrame,
+    VADUserStoppedSpeakingFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.settings import STTSettings
@@ -322,10 +323,18 @@ class DograhSTTService(STTService, WebsocketService):
         """Handle a transcription result with tracing."""
         pass
 
+    async def _send_finalize(self):
+        """Send finalize message to Dograh server to flush the current transcript."""
+        if self._websocket and self._websocket.state == State.OPEN:
+            finalize_msg = json.dumps({"type": "finalize"})
+            await self._websocket.send(finalize_msg)
+            logger.trace("Sent finalize to Dograh STT server")
+
     async def _handle_transcription(self, msg: Dict):
         """Process transcription message from Dograh."""
         transcript = msg.get("text", "")
         is_final = msg.get("is_final", False)
+        from_finalize = msg.get("from_finalize", False)
         confidence = msg.get("confidence", 0.0)
         language_code = msg.get("language")
 
@@ -338,9 +347,11 @@ class DograhSTTService(STTService, WebsocketService):
                 language = self._settings.language
 
         if transcript:
-            await self.stop_ttfb_metrics()
-
             if is_final:
+                # Check if this response is from a finalize() call.
+                # Only mark as finalized when both we requested it AND the server confirms it.
+                if from_finalize:
+                    self.confirm_finalize()
                 logger.debug(f"Final transcription: {transcript}")
                 await self.push_frame(
                     TranscriptionFrame(
@@ -409,6 +420,22 @@ class DograhSTTService(STTService, WebsocketService):
         await super().cancel(frame)
         await self._disconnect()
         self._session_start_time = None
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        """Process frames with Dograh-specific handling.
+
+        Args:
+            frame: The frame to process.
+            direction: The direction of frame processing.
+        """
+        await super().process_frame(frame, direction)
+
+        if isinstance(frame, VADUserStoppedSpeakingFrame):
+            # Send finalize to flush the current transcript from Deepgram (via Dograh server)
+            if self._websocket and self._websocket.state == State.OPEN:
+                self.request_finalize()
+                await self._send_finalize()
+                logger.trace(f"Triggered finalize event on: {frame.name=}, {direction=}")
 
     async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame, None]:
         """Send audio data to Dograh for transcription.
