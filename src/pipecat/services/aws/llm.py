@@ -30,11 +30,13 @@ from pipecat.adapters.services.bedrock_adapter import (
     AWSBedrockLLMInvocationParams,
 )
 from pipecat.frames.frames import (
+    BotStoppedSpeakingFrame,
     Frame,
     FunctionCallCancelFrame,
     FunctionCallFromLLM,
     FunctionCallInProgressFrame,
     FunctionCallResultFrame,
+    FunctionCallsFromLLMInfoFrame,
     LLMContextFrame,
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
@@ -890,6 +892,9 @@ class AWSBedrockLLMService(LLMService):
         self._retry_timeout_secs = retry_timeout_secs
         self._retry_on_timeout = retry_on_timeout
 
+        # Store pending function calls that need to be executed after TTS
+        self._pending_function_calls = []
+
         logger.info(f"Using AWS Bedrock model: {self._settings.model}")
         if self._settings.system_instruction:
             logger.debug(f"{self}: Using system instruction: {self._settings.system_instruction}")
@@ -1128,6 +1133,15 @@ class AWSBedrockLLMService(LLMService):
             tools = params_from_context["tools"]
             tool_choice = params_from_context["tool_choice"]
 
+            # Bedrock requires conversations to start with a user message.
+            # When system_instruction is set but context has no messages yet,
+            # add a placeholder user message to satisfy the API requirement.
+            if not messages and system:
+                system_text = (
+                    system[0]["text"] if isinstance(system, list) and system else str(system)
+                )
+                messages = [{"role": "user", "content": [{"text": system_text}]}]
+
             # Set up inference config - only include parameters that are set
             inference_config = self._build_inference_config()
 
@@ -1183,7 +1197,7 @@ class AWSBedrockLLMService(LLMService):
             if self._settings.latency in ["standard", "optimized"]:
                 request_params["performanceConfig"] = {"latency": self._settings.latency}
 
-            # Log request params with messages redacted for logging
+            # Log request params with messages trimmed for logging
             if isinstance(context, LLMContext):
                 adapter = self.get_llm_adapter()
                 context_type_for_logging = "universal"
@@ -1191,8 +1205,42 @@ class AWSBedrockLLMService(LLMService):
             else:
                 context_type_for_logging = "LLM-specific"
                 messages_for_logging = context.get_messages_for_logging()
+
+            # Trim long text in messages for logging
+            for message in messages_for_logging:
+                if isinstance(message, dict) and "content" in message:
+                    content = message["content"]
+                    if isinstance(content, str):
+                        words = content.split()
+                        if len(words) > 120:
+                            message["content"] = " ".join(words[:20] + ["......"] + words[-100:])
+                    elif isinstance(content, list):
+                        for item in content:
+                            if (
+                                isinstance(item, dict)
+                                and "text" in item
+                                and isinstance(item["text"], str)
+                            ):
+                                words = item["text"].split()
+                                if len(words) > 120:
+                                    item["text"] = " ".join(words[:20] + ["......"] + words[-100:])
+
+            # Trim system instruction for logging
+            system_for_log = system
+            if isinstance(system, list) and system:
+                system_text = (
+                    system[0].get("text", "") if isinstance(system[0], dict) else str(system[0])
+                )
+                words = system_text.split()
+                if len(words) > 120:
+                    system_for_log = " ".join(words[:20] + ["......"] + words[-100:])
+            elif isinstance(system, str):
+                words = system.split()
+                if len(words) > 120:
+                    system_for_log = " ".join(words[:20] + ["......"] + words[-100:])
+
             logger.debug(
-                f"{self}: Generating chat from {context_type_for_logging} context [{system}] | {messages_for_logging}"
+                f"{self}: Generating chat from {context_type_for_logging} context [{system_for_log}] | {messages_for_logging}"
             )
 
             async with self._aws_session.client(
@@ -1209,11 +1257,18 @@ class AWSBedrockLLMService(LLMService):
 
                 function_calls = []
 
+                # Reset pending function calls when processing a new context
+                self._pending_function_calls = []
+
+                # Flag to track whether text was generated in the current generation
+                text_generated_signal = False
+
                 async for event in response["stream"]:
                     # Handle text content
                     if "contentBlockDelta" in event:
                         delta = event["contentBlockDelta"]["delta"]
                         if "text" in delta:
+                            text_generated_signal = True
                             await self._push_llm_text(delta["text"])
                             completion_tokens_estimate += self._estimate_tokens(delta["text"])
                         elif "toolUse" in delta and "input" in delta["toolUse"]:
@@ -1262,7 +1317,23 @@ class AWSBedrockLLMService(LLMService):
                         cache_read_input_tokens += usage.get("cacheReadInputTokens", 0)
                         cache_creation_input_tokens += usage.get("cacheWriteInputTokens", 0)
 
-            await self.run_function_calls(function_calls)
+            if function_calls:
+                # Send the info frame with function calls so that it can be traced
+                await self.push_frame(
+                    FunctionCallsFromLLMInfoFrame(function_calls=function_calls),
+                    direction=FrameDirection.DOWNSTREAM,
+                )
+
+                # If text was generated, defer function calls until after TTS plays
+                # Otherwise, execute them immediately
+                if text_generated_signal:
+                    self._pending_function_calls = function_calls
+                    logger.debug(
+                        f"{self}: Deferring {len(function_calls)} function calls until after TTS"
+                    )
+                else:
+                    logger.debug(f"{self}: Executing {len(function_calls)} function calls")
+                    await self.run_function_calls(function_calls)
         except asyncio.CancelledError:
             # If we're interrupted, we won't get a complete usage report. So set our flag to use the
             # token estimate. The reraise the exception so all the processors running in this task
@@ -1291,11 +1362,26 @@ class AWSBedrockLLMService(LLMService):
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         """Process incoming frames and handle LLM-specific frame types.
 
+        Handles LLMContextFrame, OpenAILLMContextFrame, LLMMessagesFrame,
+        and BotStoppedSpeakingFrame to trigger LLM completions and handle
+        deferred function calls.
+
         Args:
             frame: The frame to process.
             direction: The direction of frame processing.
         """
         await super().process_frame(frame, direction)
+
+        # Handle BotStoppedSpeakingFrame to execute pending function calls
+        if isinstance(frame, BotStoppedSpeakingFrame):
+            if self._pending_function_calls:
+                logger.debug(
+                    f"{self}: Executing {len(self._pending_function_calls)} deferred function calls after TTS"
+                )
+                await self.run_function_calls(self._pending_function_calls)
+                self._pending_function_calls = []
+            await self.push_frame(frame, direction)
+            return
 
         context = None
         if isinstance(frame, OpenAILLMContextFrame):

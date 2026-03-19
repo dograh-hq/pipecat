@@ -1092,7 +1092,9 @@ class GoogleLLMService(LLMService):
                         if len(words) > 120:
                             part["text"] = " ".join(words[:20] + ["......"] + words[-100:])
 
-        system_instruction_for_log = params["system_instruction"]
+        system_instruction_for_log = (
+            self._settings.system_instruction or params["system_instruction"]
+        )
         if isinstance(system_instruction_for_log, str):
             words = system_instruction_for_log.split()
             if len(words) > 120:
