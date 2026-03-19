@@ -269,6 +269,11 @@ class ClassifierUpstreamGate(FrameProcessor):
         """
         await super().process_frame(frame, direction)
 
+        # Never allow InterruptionFrame into the classifier branch so the
+        # classification LLM completes without being cancelled.
+        if isinstance(frame, InterruptionFrame):
+            return
+
         # Always allow downstream frames through
         if direction == FrameDirection.DOWNSTREAM:
             await self.push_frame(frame, direction)
