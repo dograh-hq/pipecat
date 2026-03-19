@@ -24,6 +24,7 @@ from pipecat.frames.frames import (
     EndFrame,
     Frame,
     InterimTranscriptionFrame,
+    InterruptionFrame,
     LLMContextFrame,
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
@@ -173,6 +174,11 @@ class ClassifierGate(NotifierGate):
             direction: The direction of frame flow in the pipeline.
         """
         await FrameProcessor.process_frame(self, frame, direction)
+
+        # Never allow InterruptionFrame into the classifier branch so the
+        # classification LLM completes without being cancelled.
+        if isinstance(frame, InterruptionFrame):
+            return
 
         # Gate logic: open gate allows all frames, closed gate filters frames
         if self._gate_opened:
