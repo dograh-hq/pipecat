@@ -33,3 +33,7 @@ class RealtimeFeedbackType(Enum):
     NODE_TRANSITION = "rtf-node-transition"
     LATENCY_MEASURED = "rtf-latency-measured"
     PIPELINE_ERROR = "rtf-pipeline-error"
+    BOT_STARTED_SPEAKING = "rtf-bot-started-speaking"
+    BOT_STOPPED_SPEAKING = "rtf-bot-stopped-speaking"
+    USER_MUTE_STARTED = "rtf-user-mute-started"
+    USER_MUTE_STOPPED = "rtf-user-mute-stopped"

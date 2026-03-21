@@ -171,7 +171,7 @@ class TTSService(AIService):
         # Text aggregator to aggregate incoming tokens and decide when to push to the TTS.
         text_aggregator: Optional[BaseTextAggregator] = None,
         # Types of text aggregations that should not be spoken.
-        skip_aggregator_types: Optional[List[str]] = [],
+        skip_aggregator_types: Optional[List[str]] = ["recording_router"],
         # A list of callables to transform text before just before sending it to TTS.
         # Each callable takes the aggregated text and its type, and returns the transformed text.
         # To register, provide a list of tuples of (aggregation_type | '*', transform_function).
