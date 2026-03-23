@@ -380,14 +380,14 @@ class BaseOpenAILLMService(LLMService):
         params["stream"] = False
         params.pop("stream_options", None)
 
-        # Prepend system instruction if provided
+        # Override system instruction if provided — replaces any system message
+        # already prepended by build_chat_completion_params so that out-of-band
+        # inference calls (e.g. variable extraction) are not contaminated by the
+        # current pipeline node's system prompt.
         if system_instruction is not None:
             messages = params.get("messages", [])
             if messages and messages[0].get("role") == "system":
-                logger.warning(
-                    f"{self}: Both system_instruction and a system message in context are set."
-                    " Using system_instruction."
-                )
+                messages = messages[1:]
             params["messages"] = [{"role": "system", "content": system_instruction}] + messages
 
         # Override max_tokens if provided
