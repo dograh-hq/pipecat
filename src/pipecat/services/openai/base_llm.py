@@ -387,6 +387,10 @@ class BaseOpenAILLMService(LLMService):
         if system_instruction is not None:
             messages = params.get("messages", [])
             if messages and messages[0].get("role") == "system":
+                logger.warning(
+                    f"{self}: Both system_instruction and a system message in context are set."
+                    " Using system_instruction."
+                )
                 messages = messages[1:]
             params["messages"] = [{"role": "system", "content": system_instruction}] + messages
 
