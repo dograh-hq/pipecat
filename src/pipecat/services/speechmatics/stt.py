@@ -1011,9 +1011,6 @@ class SpeechmaticsSTTService(STTService):
                 InterimTranscriptionFrame(**attr_from_segment(segment)) for segment in segments
             ]
 
-            # Log the frames
-            logger.debug(f"{self} interim transcript: {[f.text for f in frames]}")
-
         # Send the frames
         for frame in frames:
             await self.push_frame(frame)
