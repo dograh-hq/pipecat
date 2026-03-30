@@ -27,7 +27,9 @@ from pydantic import BaseModel, Field
 
 from pipecat.adapters.services.open_ai_adapter import OpenAILLMInvocationParams
 from pipecat.frames.frames import (
+    BotStoppedSpeakingFrame,
     Frame,
+    FunctionCallsFromLLMInfoFrame,
     LLMContextFrame,
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
@@ -214,6 +216,9 @@ class BaseOpenAILLMService(LLMService):
 
         if self._settings.system_instruction:
             logger.debug(f"{self}: Using system instruction: {self._settings.system_instruction}")
+
+        # Store pending function calls that need to be executed after TTS
+        self._pending_function_calls = []
 
     def create_client(
         self,
@@ -427,8 +432,12 @@ class BaseOpenAILLMService(LLMService):
         self, context: LLMContext
     ) -> AsyncStream[ChatCompletionChunk]:
         adapter = self.get_llm_adapter()
+        system_instruction_for_log = str(self._settings.system_instruction or "")
+        if len(system_instruction_for_log) > 100:
+            system_instruction_for_log = system_instruction_for_log[:100] + "..."
+
         logger.debug(
-            f"{self}: Generating chat from universal context {adapter.get_messages_for_logging(context)}"
+            f"{self}: Generating chat from universal context [{system_instruction_for_log}] | {adapter.get_messages_for_logging(context)}"
         )
 
         params: OpenAILLMInvocationParams = adapter.get_llm_invocation_params(
@@ -449,6 +458,12 @@ class BaseOpenAILLMService(LLMService):
         function_name = ""
         arguments = ""
         tool_call_id = ""
+
+        # Reset pending function calls when processing a new context
+        self._pending_function_calls = []
+
+        # Flag to store whether some text was generated in the current generation
+        text_generated_signal = False
 
         await self.start_ttfb_metrics()
 
@@ -541,6 +556,7 @@ class BaseOpenAILLMService(LLMService):
                         # Keep iterating through the response to collect all the argument fragments
                         arguments += tool_call.function.arguments
                 elif chunk.choices[0].delta.content:
+                    text_generated_signal = True
                     await self._push_llm_text(chunk.choices[0].delta.content)
 
                 # When gpt-4o-audio / gpt-4o-mini-audio is used for llm or stt+llm
@@ -577,7 +593,22 @@ class BaseOpenAILLMService(LLMService):
                     )
                 )
 
-            await self.run_function_calls(function_calls)
+            # Send the info frame with function calls so that it can be traced by service_decorators
+            await self.push_frame(
+                FunctionCallsFromLLMInfoFrame(function_calls=function_calls),
+                direction=FrameDirection.DOWNSTREAM,
+            )
+
+            # If text was generated, defer function calls until after TTS plays
+            # Otherwise, execute them immediately
+            if text_generated_signal:
+                self._pending_function_calls = function_calls
+                logger.debug(
+                    f"{self}: Deferring {len(function_calls)} function calls until after TTS"
+                )
+            else:
+                logger.debug(f"{self}: Executing {len(function_calls)} function calls")
+                await self.run_function_calls(function_calls)
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         """Process frames for LLM completion requests.
@@ -591,6 +622,17 @@ class BaseOpenAILLMService(LLMService):
             direction: The direction of frame processing.
         """
         await super().process_frame(frame, direction)
+
+        # Handle BotStoppedSpeakingFrame to execute pending function calls
+        if isinstance(frame, BotStoppedSpeakingFrame):
+            if self._pending_function_calls:
+                logger.debug(
+                    f"{self}: Executing {len(self._pending_function_calls)} deferred function calls after TTS"
+                )
+                await self.run_function_calls(self._pending_function_calls)
+                self._pending_function_calls = []
+            await self.push_frame(frame, direction)
+            return
 
         context = None
         if isinstance(frame, OpenAILLMContextFrame):

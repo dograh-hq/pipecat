@@ -101,11 +101,14 @@ class AssistantTranscriptProcessor(BaseTranscriptProcessor):
     - The pipeline ends (EndFrame, CancelFrame)
     """
 
-    def __init__(self, *, process_thoughts: bool = False, **kwargs):
+    def __init__(
+        self, *, process_thoughts: bool = False, correct_aggregation_callback=None, **kwargs
+    ):
         """Initialize processor with aggregation state.
 
         Args:
             process_thoughts: Whether to process LLM thought frames. Defaults to False.
+            correct_aggregation_callback: Optional callback to correct corrupted text
             **kwargs: Additional arguments passed to parent class.
         """
         super().__init__(**kwargs)
@@ -118,6 +121,8 @@ class AssistantTranscriptProcessor(BaseTranscriptProcessor):
         self._thought_start_time: Optional[str] = None
         self._thought_active = False
 
+        self._correct_aggregation_callback = correct_aggregation_callback
+
     async def _emit_aggregated_assistant_text(self):
         """Aggregates and emits text fragments as a transcript message.
 
@@ -126,6 +131,14 @@ class AssistantTranscriptProcessor(BaseTranscriptProcessor):
         """
         if self._current_assistant_text_parts and self._assistant_text_start_time:
             content = concatenate_aggregated_text(self._current_assistant_text_parts)
+
+            # Apply correction if callback is provided
+            if content and self._correct_aggregation_callback:
+                try:
+                    content = self._correct_aggregation_callback(content)
+                except Exception as e:
+                    logger.error(f"Error in transcript correction callback: {e}")
+
             if content:
                 logger.trace(f"Emitting aggregated assistant message: {content}")
                 message = TranscriptionMessage(
@@ -275,17 +288,21 @@ class TranscriptProcessor:
         Use `LLMUserAggregator`'s and `LLMAssistantAggregator`'s new events instead.
     """
 
-    def __init__(self, *, process_thoughts: bool = False):
+    def __init__(
+        self, *, process_thoughts: bool = False, assistant_correct_aggregation_callback=None
+    ):
         """Initialize factory.
 
         Args:
             process_thoughts: Whether the assistant processor should handle LLM thought
                 frames. Defaults to False.
+            assistant_correct_aggregation_callback: Optional callback for assistant text correction
         """
         self._process_thoughts = process_thoughts
         self._user_processor = None
         self._assistant_processor = None
         self._event_handlers = {}
+        self._assistant_correct_aggregation_callback = assistant_correct_aggregation_callback
 
         import warnings
 
@@ -327,8 +344,11 @@ class TranscriptProcessor:
             The assistant transcript processor instance.
         """
         if self._assistant_processor is None:
+            # Pass the correction callback to the assistant processor
             self._assistant_processor = AssistantTranscriptProcessor(
-                process_thoughts=self._process_thoughts, **kwargs
+                process_thoughts=self._process_thoughts,
+                correct_aggregation_callback=self._assistant_correct_aggregation_callback,
+                **kwargs,
             )
             # Apply any registered event handlers
             for event_name, handler in self._event_handlers.items():

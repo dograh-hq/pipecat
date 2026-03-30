@@ -436,7 +436,7 @@ class TTSTextFrame(AggregatedTextFrame):
 
 
 @dataclass
-class TranscriptionFrame(TextFrame):
+class TranscriptionFrame(TextFrame, UninterruptibleFrame):
     """Text frame containing speech transcription data.
 
     A text frame with transcription-specific data. The `result` field
@@ -1395,6 +1395,21 @@ class FunctionCallFromLLM:
     tool_call_id: str
     arguments: Mapping[str, Any]
     context: Any
+
+
+@dataclass
+class FunctionCallsFromLLMInfoFrame(SystemFrame):
+    """Frame that help trace function calls that are generated from LLM.
+
+    They are emitted so that llm tracing decorators can log tool calls
+    even though there is an interrupt and FunctionCallsStartedFrame can
+    not be emitted
+
+    Parameters:
+        function_calls: Sequence of function calls that will be executed.
+    """
+
+    function_calls: Sequence[FunctionCallFromLLM]
 
 
 @dataclass

@@ -86,6 +86,8 @@ class TransportParams(BaseModel):
         audio_out_end_silence_secs: How much silence to send after an EndFrame (0 for no silence).
         audio_out_auto_silence: Insert silence frames when the audio output queue is empty.
             When False, the transport will wait for audio data instead of inserting silence.
+        audio_out_max_consecutive_failures: Max failure of transport write before givingup
+        audio_out_sleep_between_failures: Sleep interval between subsequent failures
         audio_in_enabled: Enable audio input streaming.
         audio_in_sample_rate: Input audio sample rate in Hz.
         audio_in_channels: Number of input audio channels.
@@ -147,6 +149,8 @@ class TransportParams(BaseModel):
     audio_out_destinations: List[str] = Field(default_factory=list)
     audio_out_end_silence_secs: int = 2
     audio_out_auto_silence: bool = True
+    audio_out_max_consecutive_failures: int = 10
+    audio_out_sleep_between_failures: float = 0.5
     audio_in_enabled: bool = False
     audio_in_sample_rate: Optional[int] = None
     audio_in_channels: int = 1

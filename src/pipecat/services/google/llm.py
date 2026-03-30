@@ -26,10 +26,12 @@ from pipecat.adapters.services.gemini_adapter import GeminiLLMAdapter, GeminiLLM
 from pipecat.frames.frames import (
     AssistantImageRawFrame,
     AudioRawFrame,
+    BotStoppedSpeakingFrame,
     Frame,
     FunctionCallCancelFrame,
     FunctionCallInProgressFrame,
     FunctionCallResultFrame,
+    FunctionCallsFromLLMInfoFrame,
     LLMContextFrame,
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
@@ -868,6 +870,9 @@ class GoogleLLMService(LLMService):
         self._tools = tools
         self._tool_config = tool_config
 
+        # Store pending function calls that need to be executed after TTS
+        self._pending_function_calls = []
+
         # Initialize the API client. Subclasses can override this if needed.
         self.create_client()
 
@@ -1063,8 +1068,12 @@ class GoogleLLMService(LLMService):
             context, system_instruction=self._settings.system_instruction
         )
 
+        system_instruction_for_log = str(params["system_instruction"])
+        if len(system_instruction_for_log) > 100:
+            system_instruction_for_log = system_instruction_for_log[:100] + "..."
+
         logger.debug(
-            f"{self}: Generating chat from universal context [{params['system_instruction']}] | {adapter.get_messages_for_logging(context)}"
+            f"{self}: Generating chat from universal context [{system_instruction_for_log}] | {adapter.get_messages_for_logging(context)}"
         )
 
         return await self._stream_content(params)
@@ -1081,6 +1090,11 @@ class GoogleLLMService(LLMService):
 
         grounding_metadata = None
         accumulated_text = ""
+
+        text_generated_signal = False
+
+        # Reset pending function calls when processing a new context
+        self._pending_function_calls = []
 
         try:
             # Generate content using either OpenAILLMContext or universal LLMContext
@@ -1116,6 +1130,7 @@ class GoogleLLMService(LLMService):
                             function_call_id = None
                             if part.text:
                                 if part.thought:
+                                    text_generated_signal = True
                                     # Gemini emits fully-formed thoughts rather
                                     # than chunks so bracket each thought in
                                     # start/end
@@ -1238,7 +1253,24 @@ class GoogleLLMService(LLMService):
                             "origins": origins,
                         }
 
-            await self.run_function_calls(function_calls)
+            # Handle function calls if any were collected
+            if function_calls:
+                # Send the info frame with function calls so that it can be traced by service_decorators
+                await self.push_frame(
+                    FunctionCallsFromLLMInfoFrame(function_calls=function_calls),
+                    direction=FrameDirection.DOWNSTREAM,
+                )
+
+                # If text was generated, defer function calls until after TTS plays
+                # Otherwise, execute them immediately
+                if text_generated_signal:
+                    self._pending_function_calls = function_calls
+                    logger.debug(
+                        f"{self}: Deferring {len(function_calls)} function calls until after TTS"
+                    )
+                else:
+                    logger.debug(f"{self}: Executing {len(function_calls)} function calls")
+                    await self.run_function_calls(function_calls)
         except DeadlineExceeded:
             await self._call_event_handler("on_completion_timeout")
         except Exception as e:
@@ -1271,6 +1303,17 @@ class GoogleLLMService(LLMService):
             direction: Direction of frame processing.
         """
         await super().process_frame(frame, direction)
+
+        # Handle BotStoppedSpeakingFrame to execute pending function calls
+        if isinstance(frame, BotStoppedSpeakingFrame):
+            if self._pending_function_calls:
+                logger.debug(
+                    f"{self}: Executing {len(self._pending_function_calls)} deferred function calls after TTS"
+                )
+                await self.run_function_calls(self._pending_function_calls)
+                self._pending_function_calls = []
+            await self.push_frame(frame, direction)
+            return
 
         context = None
 

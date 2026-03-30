@@ -11,6 +11,7 @@ attributes to OpenTelemetry spans, following standard semantic conventions
 where applicable and Pipecat-specific conventions for additional context.
 """
 
+import json
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 # Import for type checking only
@@ -99,7 +100,7 @@ def add_tts_span_attributes(
 
     # Add optional attributes
     if text:
-        span.set_attribute("text", text)
+        span.set_attribute("input", text)
 
     if character_count is not None:
         span.set_attribute("metrics.character_count", character_count)
@@ -157,7 +158,7 @@ def add_stt_span_attributes(
 
     # Add optional attributes
     if transcript:
-        span.set_attribute("transcript", transcript)
+        span.set_attribute("output", transcript)
 
     if is_final is not None:
         span.set_attribute("is_final", is_final)
@@ -188,12 +189,10 @@ def add_llm_span_attributes(
     service_name: str,
     model: str,
     stream: bool = True,
-    messages: Optional[str] = None,
+    messages: Optional[Dict[str, Any] | str] = None,
+    tools: Optional[Dict[str, Any] | str] = None,
     output: Optional[str] = None,
-    tools: Optional[str] = None,
-    tool_count: Optional[int] = None,
     tool_choice: Optional[str] = None,
-    system_instructions: Optional[str] = None,
     parameters: Optional[Dict[str, Any]] = None,
     extra_parameters: Optional[Dict[str, Any]] = None,
     ttfb: Optional[float] = None,
@@ -206,12 +205,10 @@ def add_llm_span_attributes(
         service_name: Name of the LLM service (e.g., "openai").
         model: Model name/identifier.
         stream: Whether streaming is enabled.
-        messages: JSON-serialized messages.
+        messages: messages.
+        tools: tools configuration.
         output: Aggregated output text from the LLM.
-        tools: JSON-serialized tools configuration.
-        tool_count: Number of tools available.
         tool_choice: Tool selection configuration.
-        system_instructions: System instructions.
         parameters: Service parameters.
         extra_parameters: Additional parameters.
         ttfb: Time to first byte in seconds.
@@ -224,24 +221,23 @@ def add_llm_span_attributes(
     span.set_attribute("gen_ai.output.type", "text")
     span.set_attribute("stream", stream)
 
+    span_input = {}
+
     # Add optional attributes
     if messages:
-        span.set_attribute("input", messages)
+        span_input["messages"] = messages
 
     if output:
         span.set_attribute("output", output)
 
     if tools:
-        span.set_attribute("tools", tools)
+        span_input["tools"] = tools
 
-    if tool_count is not None:
-        span.set_attribute("tool_count", tool_count)
+    # Set input in ChatML format
+    span.set_attribute("input", json.dumps(span_input))
 
     if tool_choice:
         span.set_attribute("tool_choice", tool_choice)
-
-    if system_instructions:
-        span.set_attribute("gen_ai.system_instructions", system_instructions)
 
     if ttfb is not None:
         span.set_attribute("metrics.ttfb", ttfb)

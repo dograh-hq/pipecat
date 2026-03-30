@@ -28,6 +28,7 @@ from pipecat.frames.frames import (
     BotStartedSpeakingFrame,
     BotStoppedSpeakingFrame,
     CancelFrame,
+    CancelTaskFrame,
     EndFrame,
     Frame,
     InterruptionFrame,
@@ -793,6 +794,10 @@ class BaseOutputTransport(FrameProcessor):
 
         async def _audio_task_handler(self):
             """Main audio processing task handler."""
+            consecutive_failures = 0
+            max_consecutive_failures = self._params.audio_out_max_consecutive_failures
+            sleep_between_consecutive_failures = self._params.audio_out_sleep_between_failures
+
             async for frame in self._next_frame():
                 # No need to push EndFrame, it's pushed from process_frame().
                 if isinstance(frame, EndFrame):
@@ -814,6 +819,31 @@ class BaseOutputTransport(FrameProcessor):
                 except Exception as e:
                     logger.error(f"{self} Error writing {frame} to transport: {e}")
                     push_downstream = False
+
+                # Handle write failures
+                if not push_downstream and isinstance(frame, OutputAudioRawFrame):
+                    consecutive_failures += 1
+                    logger.warning(
+                        f"Failed to write audio frame (consecutive failures: {consecutive_failures}/{max_consecutive_failures})"
+                    )
+
+                    # Break out if we've failed too many times consecutively
+                    if consecutive_failures >= max_consecutive_failures:
+                        logger.warning(
+                            f"Cancelling task after {consecutive_failures} consecutive failures"
+                        )
+
+                        # Send bot stopped speaking frame
+                        await self._bot_stopped_speaking()
+
+                        await self._transport.push_frame(CancelTaskFrame(), FrameDirection.UPSTREAM)
+                        break
+
+                    # Sleep before retrying
+                    await asyncio.sleep(sleep_between_consecutive_failures)
+                else:
+                    # Reset counter on successful write
+                    consecutive_failures = 0
 
                 # If we were able to send to the transport, push the frame
                 # downstream in case anyone else needs it.

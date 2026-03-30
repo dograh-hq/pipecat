@@ -16,7 +16,7 @@ import json
 import warnings
 from abc import abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Literal, Optional, Set, Type
+from typing import Any, Callable, Dict, List, Literal, Optional, Set, Type
 
 from loguru import logger
 
@@ -32,7 +32,6 @@ from pipecat.frames.frames import (
     FunctionCallInProgressFrame,
     FunctionCallResultFrame,
     FunctionCallsStartedFrame,
-    InputAudioRawFrame,
     InterimTranscriptionFrame,
     InterruptionFrame,
     LLMAssistantPushAggregationFrame,
@@ -140,6 +139,8 @@ class LLMAssistantAggregatorParams:
             summarization. Controls trigger thresholds, message preservation, and
             summarization prompts. If None, uses default
             ``LLMAutoContextSummarizationConfig`` values.
+        correct_aggregation_callback: Optional callback to correct corrupted
+            TTS text before it's added to the conversation context.
     """
 
     expect_stripped_words: bool = True
@@ -152,6 +153,7 @@ class LLMAssistantAggregatorParams:
     # ---------------------------------------------------------------------------
     enable_context_summarization: Optional[bool] = None
     context_summarization_config: Optional[LLMContextSummarizationConfig] = None
+    correct_aggregation_callback: Optional[Callable[[str], str]] = None
 
     def __post_init__(self):
         if self.enable_context_summarization is not None:
@@ -603,7 +605,6 @@ class LLMUserAggregator(LLMContextAggregator):
                 VADUserStoppedSpeakingFrame,
                 UserStartedSpeakingFrame,
                 UserStoppedSpeakingFrame,
-                InputAudioRawFrame,
                 InterimTranscriptionFrame,
                 TranscriptionFrame,
             ),
@@ -987,7 +988,15 @@ class LLMAssistantAggregator(LLMContextAggregator):
         aggregation = self.aggregation_string()
         await self.reset()
 
-        self._context.add_message({"role": "assistant", "content": aggregation})
+        if aggregation:
+            if self._params.correct_aggregation_callback:
+                try:
+                    aggregation = self._params.correct_aggregation_callback(aggregation)
+                except Exception as e:
+                    logger.error(f"Error in aggregation correction callback: {e}")
+
+            logger.debug(f"{self} push_aggregation called - self._aggregation = {aggregation}")
+            self._context.add_message({"role": "assistant", "content": aggregation})
 
         # Push context frame
         await self.push_context_frame()

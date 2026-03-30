@@ -461,6 +461,15 @@ class PipelineTask(BasePipelineTask):
         return self._turn_trace_observer
 
     @property
+    def user_bot_latency_observer(self) -> Optional[UserBotLatencyObserver]:
+        """Get the user-bot latency observer if turn tracking is enabled.
+
+        Returns:
+            The user-bot latency observer instance or None if not enabled.
+        """
+        return self._user_bot_latency_observer
+
+    @property
     def rtvi(self) -> RTVIProcessor:
         """Get the RTVI processor if RTVI is enabled.
 
@@ -899,7 +908,7 @@ class PipelineTask(BasePipelineTask):
         elif isinstance(frame, ErrorFrame):
             await self._call_event_handler("on_pipeline_error", frame)
             if frame.fatal:
-                logger.error(f"A fatal error occurred: {frame}")
+                logger.warning(f"A fatal error occurred: {frame}")
                 # Cancel all tasks downstream.
                 await self.queue_frame(CancelFrame())
             else:

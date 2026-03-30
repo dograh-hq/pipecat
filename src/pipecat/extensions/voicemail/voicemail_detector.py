@@ -23,11 +23,16 @@ from loguru import logger
 from pipecat.frames.frames import (
     EndFrame,
     Frame,
+    InterimTranscriptionFrame,
+    InterruptionFrame,
+    LLMContextFrame,
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
     LLMTextFrame,
+    StartFrame,
     StopFrame,
     SystemFrame,
+    TranscriptionFrame,
     TTSAudioRawFrame,
     TTSStartedFrame,
     TTSStoppedFrame,
@@ -43,6 +48,7 @@ from pipecat.processors.aggregators.llm_response_universal import (
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor, FrameProcessorSetup
 from pipecat.services.llm_service import LLMService
+from pipecat.services.settings import LLMSettings
 from pipecat.turns.user_turn_strategies import ExternalUserTurnStrategies
 from pipecat.utils.sync.base_notifier import BaseNotifier
 from pipecat.utils.sync.event_notifier import EventNotifier
@@ -170,6 +176,11 @@ class ClassifierGate(NotifierGate):
         """
         await FrameProcessor.process_frame(self, frame, direction)
 
+        # Never allow InterruptionFrame into the classifier branch so the
+        # classification LLM completes without being cancelled.
+        if isinstance(frame, InterruptionFrame):
+            return
+
         # Gate logic: open gate allows all frames, closed gate filters frames
         if self._gate_opened:
             await self.push_frame(frame, direction)
@@ -212,6 +223,71 @@ class ConversationGate(NotifierGate):
         super().__init__(voicemail_notifier, task_name="conversation_gate")
 
 
+class ClassifierUpstreamGate(FrameProcessor):
+    """Gate that blocks upstream frames to classifier branch when conversation is detected.
+
+    This gate sits at the bottom of the classifier branch and blocks frames flowing
+    upstream after conversation is detected. This prevents system frames like
+    FunctionCallsStartedFrame from reaching the classifier LLM after classification
+    is complete. Downstream frames always pass through. Only essential cleanup frames
+    (EndFrame, StopFrame) are allowed upstream when closed.
+    """
+
+    def __init__(self, conversation_notifier: BaseNotifier):
+        """Initialize the classifier conversation gate.
+
+        Args:
+            conversation_notifier: Notifier that signals when conversation has been
+                detected and upstream frames should be blocked.
+        """
+        super().__init__()
+        self._conversation_notifier = conversation_notifier
+        self._gate_open = True
+        self._conversation_task: Optional[asyncio.Task] = None
+
+    async def setup(self, setup: FrameProcessorSetup):
+        """Set up the processor with required components.
+
+        Args:
+            setup: Configuration object containing setup parameters.
+        """
+        await super().setup(setup)
+        self._conversation_task = self.create_task(self._wait_for_conversation())
+
+    async def cleanup(self):
+        """Clean up the processor resources."""
+        await super().cleanup()
+        if self._conversation_task:
+            await self.cancel_task(self._conversation_task)
+            self._conversation_task = None
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        """Process frames and block upstream frames when conversation is detected.
+
+        Args:
+            frame: The frame to process.
+            direction: The direction of frame flow in the pipeline.
+        """
+        await super().process_frame(frame, direction)
+
+        # Never allow InterruptionFrame into the classifier branch so the
+        # classification LLM completes without being cancelled.
+        if isinstance(frame, InterruptionFrame):
+            return
+
+        # Always allow downstream frames through
+        if direction == FrameDirection.DOWNSTREAM:
+            await self.push_frame(frame, direction)
+        # Gate upstream frames when conversation is detected
+        elif self._gate_open:
+            await self.push_frame(frame, direction)
+
+    async def _wait_for_conversation(self):
+        """Wait for conversation detection and close the gate."""
+        await self._conversation_notifier.wait()
+        self._gate_open = False
+
+
 class ClassificationProcessor(FrameProcessor):
     """Processor that handles LLM classification responses and triggers events.
 
@@ -225,8 +301,6 @@ class ClassificationProcessor(FrameProcessor):
     a human answered) or "VOICEMAIL" (indicating an automated system). Once a
     decision is made, it triggers the appropriate notifications and event handlers.
 
-    For voicemail detection, the event handler timer starts immediately and is cancelled
-    and restarted based on user speech patterns to ensure proper timing.
     """
 
     def __init__(
@@ -235,7 +309,6 @@ class ClassificationProcessor(FrameProcessor):
         gate_notifier: BaseNotifier,
         conversation_notifier: BaseNotifier,
         voicemail_notifier: BaseNotifier,
-        voicemail_response_delay: float,
     ):
         """Initialize the voicemail processor.
 
@@ -246,15 +319,11 @@ class ClassificationProcessor(FrameProcessor):
                 all gated TTS frames for normal conversation flow.
             voicemail_notifier: Notifier to signal the TTSGate to clear
                 gated TTS frames since voicemail was detected.
-            voicemail_response_delay: Delay in seconds after user stops speaking
-                before triggering the voicemail event handler. This ensures the voicemail
-                greeting or user message is complete before responding.
         """
         super().__init__()
         self._gate_notifier = gate_notifier
         self._conversation_notifier = conversation_notifier
         self._voicemail_notifier = voicemail_notifier
-        self._voicemail_response_delay = voicemail_response_delay
 
         # Register the conversation and voicemail detected events
         self._register_event_handler("on_conversation_detected")
@@ -265,28 +334,6 @@ class ClassificationProcessor(FrameProcessor):
         self._response_buffer = ""
         self._decision_made = False
 
-        # Voicemail timing state
-        self._voicemail_detected = False
-        self._voicemail_task: Optional[asyncio.Task] = None
-        self._voicemail_event = asyncio.Event()
-        self._voicemail_event.set()
-
-    async def setup(self, setup: FrameProcessorSetup):
-        """Set up the processor with required components.
-
-        Args:
-            setup: Configuration object containing setup parameters.
-        """
-        await super().setup(setup)
-        self._voicemail_task = self.create_task(self._delayed_voicemail_handler())
-
-    async def cleanup(self):
-        """Clean up the processor resources."""
-        await super().cleanup()
-        if self._voicemail_task:
-            await self.cancel_task(self._voicemail_task)
-            self._voicemail_task = None
-
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         """Process frames and handle LLM classification responses.
 
@@ -294,7 +341,6 @@ class ClassificationProcessor(FrameProcessor):
         1. LLMFullResponseStartFrame: Begin collecting tokens
         2. LLMTextFrame: Accumulate text tokens into buffer
         3. LLMFullResponseEndFrame: Process complete response and make decision
-        4. UserStartedSpeakingFrame/UserStoppedSpeakingFrame: Manage voicemail timing
 
         Args:
             frame: The frame to process.
@@ -317,18 +363,6 @@ class ClassificationProcessor(FrameProcessor):
         elif isinstance(frame, LLMTextFrame) and self._processing_response:
             # Accumulate text tokens from the streaming LLM response
             self._response_buffer += frame.text
-
-        elif isinstance(frame, UserStartedSpeakingFrame):
-            # User started speaking - set the voicemail event
-            if self._voicemail_detected:
-                self._voicemail_event.set()
-            await self.push_frame(frame, direction)
-
-        elif isinstance(frame, UserStoppedSpeakingFrame):
-            # User stopped speaking - clear the voicemail event
-            if self._voicemail_detected:
-                self._voicemail_event.clear()
-            await self.push_frame(frame, direction)
 
         else:
             # Pass all non-LLM frames through
@@ -370,29 +404,12 @@ class ClassificationProcessor(FrameProcessor):
             # Interrupt the current pipeline to stop any ongoing processing
             await self.broadcast_interruption()
 
-            # Set the voicemail event to trigger the voicemail handler
-            self._voicemail_event.clear()
+            # Immediately trigger the voicemail event handler
+            await self._call_event_handler("on_voicemail_detected")
 
         else:
             # This can happen if the LLM is interrupted before completing the response
             logger.debug(f"{self}: No classification found: '{full_response}'")
-
-    async def _delayed_voicemail_handler(self):
-        """Execute the voicemail event handler after the configured delay.
-
-        This method waits for the specified delay period, then triggers the
-        developer's voicemail event handler. The timer can be cancelled and restarted
-        based on user speech patterns to ensure proper timing.
-        """
-        while True:
-            try:
-                await asyncio.wait_for(
-                    self._voicemail_event.wait(), timeout=self._voicemail_response_delay
-                )
-                await asyncio.sleep(0.1)
-            except asyncio.TimeoutError:
-                await self._call_event_handler("on_voicemail_detected")
-                break
 
 
 class TTSGate(FrameProcessor):
@@ -502,6 +519,104 @@ class TTSGate(FrameProcessor):
         self._frame_buffer.clear()
 
 
+class LLMGate(FrameProcessor):
+    """Gates LLMContextFrame until voicemail classification decision is made.
+
+    This processor buffers the most recent LLMContextFrame while voicemail
+    classification is in progress, preventing the main conversation LLM from
+    being triggered before determining if the call reached a human or a
+    voicemail system. If multiple LLMContextFrame objects arrive while the gate
+    is closed, only the latest one is kept (it carries the most up-to-date
+    context).
+
+    Based on the classification result:
+
+    - CONVERSATION: Opens the gate and releases the buffered frame to trigger the LLM
+    - VOICEMAIL: Discards the buffered frame since the call will be ended
+
+    Only LLMContextFrame is gated. All other frames pass through immediately
+    to maintain proper pipeline flow (turn detection, speaking events, etc.).
+    """
+
+    def __init__(self, conversation_notifier: BaseNotifier, voicemail_notifier: BaseNotifier):
+        """Initialize the LLM gate.
+
+        Args:
+            conversation_notifier: Notifier that signals when a conversation is
+                detected and gated frames should be released for LLM processing.
+            voicemail_notifier: Notifier that signals when voicemail is detected
+                and gated frames should be discarded.
+        """
+        super().__init__()
+        self._conversation_notifier = conversation_notifier
+        self._voicemail_notifier = voicemail_notifier
+        self._buffered_context_frame: Optional[tuple[Frame, FrameDirection]] = None
+        self._gating_active = True
+        self._conversation_task: Optional[asyncio.Task] = None
+        self._voicemail_task: Optional[asyncio.Task] = None
+
+    async def setup(self, setup: FrameProcessorSetup):
+        """Set up the processor with required components.
+
+        Args:
+            setup: Configuration object containing setup parameters.
+        """
+        await super().setup(setup)
+        self._conversation_task = self.create_task(self._wait_for_conversation())
+        self._voicemail_task = self.create_task(self._wait_for_voicemail())
+
+    async def cleanup(self):
+        """Clean up the processor resources."""
+        await super().cleanup()
+        if self._conversation_task:
+            await self.cancel_task(self._conversation_task)
+            self._conversation_task = None
+        if self._voicemail_task:
+            await self.cancel_task(self._voicemail_task)
+            self._voicemail_task = None
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        """Process frames, buffering LLMContextFrame while classification is active.
+
+        Args:
+            frame: The frame to process.
+            direction: The direction of frame flow in the pipeline.
+        """
+        await super().process_frame(frame, direction)
+
+        if self._gating_active and isinstance(frame, LLMContextFrame):
+            # Keep only the latest LLMContextFrame — it carries the most
+            # up-to-date context, so earlier ones are redundant.
+            self._buffered_context_frame = (frame, direction)
+        else:
+            await self.push_frame(frame, direction)
+
+    async def _wait_for_conversation(self):
+        """Wait for conversation detection and release the gated frame.
+
+        When a conversation is detected, the buffered LLMContextFrame is
+        released to trigger the main LLM for normal dialogue flow.
+        """
+        await self._conversation_notifier.wait()
+
+        self._gating_active = False
+        if self._buffered_context_frame:
+            frame, direction = self._buffered_context_frame
+            self._buffered_context_frame = None
+            await self.push_frame(frame, direction)
+
+    async def _wait_for_voicemail(self):
+        """Wait for voicemail detection and discard the gated frame.
+
+        When voicemail is detected, the buffered LLMContextFrame is
+        discarded since the call will be ended by the voicemail event handler.
+        """
+        await self._voicemail_notifier.wait()
+
+        self._gating_active = False
+        self._buffered_context_frame = None
+
+
 class VoicemailDetector(ParallelPipeline):
     """Parallel pipeline for detecting voicemail vs. live conversation in outbound calls.
 
@@ -550,8 +665,8 @@ class VoicemailDetector(ParallelPipeline):
         on_conversation_detected: Triggered when a human conversation is detected. The
             event handler receives one argument: the ClassificationProcessor instance
             which can be used to push frames.
-        on_voicemail_detected: Triggered when voicemail is detected after the configured
-            delay. The event handler receives one argument: the ClassificationProcessor
+        on_voicemail_detected: Triggered immediately when voicemail is detected. The
+            event handler receives one argument: the ClassificationProcessor
             instance which can be used to push frames.
 
     Constants:
@@ -590,43 +705,43 @@ VOICEMAIL SYSTEM (respond "VOICEMAIL"):
         self,
         *,
         llm: LLMService,
-        voicemail_response_delay: float = 2.0,
         custom_system_prompt: Optional[str] = None,
+        long_speech_timeout: Optional[float] = None,
     ):
         """Initialize the voicemail detector with classification and buffering components.
 
         Args:
             llm: LLM service used for voicemail vs conversation classification.
                 Should be fast and reliable for real-time classification.
-            voicemail_response_delay: Delay in seconds after user stops speaking
-                before triggering the voicemail event handler. This allows voicemail
-                responses to be played back after a short delay to ensure the response
-                occurs during the voicemail recording. Default is 2.0 seconds.
             custom_system_prompt: Optional custom system prompt for classification. If None,
                 uses the default prompt optimized for outbound calling scenarios.
                 Custom prompts should instruct the LLM to respond with exactly
                 "CONVERSATION" or "VOICEMAIL" for proper detection functionality.
+            long_speech_timeout: Optional timeout in seconds. When the first turn has
+                continuous speech exceeding this duration, classification is triggered
+                early with whatever transcript is available. Useful for detecting long
+                voicemail greetings without waiting for the caller to stop speaking.
+                Requires ``eager_eot_threshold`` on Deepgram Flux for interim
+                transcripts. Defaults to None (disabled).
         """
         self._classifier_llm = llm
         self._prompt = (
             custom_system_prompt if custom_system_prompt is not None else self.DEFAULT_SYSTEM_PROMPT
         )
-        self._voicemail_response_delay = voicemail_response_delay
 
         # Validate custom prompts to ensure they work with the detection logic
         if custom_system_prompt is not None:
             self._validate_prompt(custom_system_prompt)
 
-        # Set up the LLM context with the classification prompt
-        self._messages = [
-            {
-                "role": "system",
-                "content": self._prompt,
-            },
-        ]
+        # Set the system prompt as LLM system_instruction instead of a context message
+        self._classifier_llm._settings.system_instruction = self._prompt
 
         # Create the LLM context and aggregators for conversation management
-        self._context = LLMContext(self._messages)
+        self._messages = []
+        self._context = LLMContext(self._messages, skip_set_tools_frame=True)
+
+        # Set OTel span name for tracing
+        self._context.set_otel_span_name("llm-voicemail-detector")
         self._context_aggregator = LLMContextAggregatorPair(
             self._context,
             user_params=LLMUserAggregatorParams(user_turn_strategies=ExternalUserTurnStrategies()),
@@ -639,27 +754,45 @@ VOICEMAIL SYSTEM (respond "VOICEMAIL"):
 
         # Create the processor components
         self._classifier_gate = ClassifierGate(self._gate_notifier, self._conversation_notifier)
+        self._classifier_upstream_gate = ClassifierUpstreamGate(self._conversation_notifier)
         self._conversation_gate = ConversationGate(self._voicemail_notifier)
         self._classification_processor = ClassificationProcessor(
             gate_notifier=self._gate_notifier,
             conversation_notifier=self._conversation_notifier,
             voicemail_notifier=self._voicemail_notifier,
-            voicemail_response_delay=voicemail_response_delay,
         )
         self._voicemail_gate = TTSGate(self._conversation_notifier, self._voicemail_notifier)
+        self._llm_gate = LLMGate(self._conversation_notifier, self._voicemail_notifier)
 
-        # Initialize the parallel pipeline with conversation and classifier branches
-        super().__init__(
-            # Conversation branch: gate to blocks after voicemail detection
-            [self._conversation_gate],
-            # Classification branch: gate -> context -> LLM -> processor -> context
+        # Create first-turn speech monitor if long speech timeout is configured
+        self._first_turn_speech_monitor = None
+        if long_speech_timeout is not None:
+            self._first_turn_speech_monitor = FirstTurnSpeechMonitor(
+                timeout_secs=long_speech_timeout,
+                context=self._context,
+                gate_notifier=self._gate_notifier,
+            )
+
+        # Build classification branch
+        classification_pipeline = [self._classifier_gate]
+        if self._first_turn_speech_monitor:
+            classification_pipeline.append(self._first_turn_speech_monitor)
+        classification_pipeline.extend(
             [
-                self._classifier_gate,
                 self._context_aggregator.user(),
                 self._classifier_llm,
                 self._classification_processor,
                 self._context_aggregator.assistant(),
-            ],
+                self._classifier_upstream_gate,
+            ]
+        )
+
+        # Initialize the parallel pipeline with conversation and classifier branches
+        super().__init__(
+            # Conversation pipeline: gate that blocks after voicemail detection
+            [self._conversation_gate],
+            # Classification pipeline
+            classification_pipeline,
         )
 
         # Register the voicemail detected event after super().__init__()
@@ -708,6 +841,19 @@ VOICEMAIL SYSTEM (respond "VOICEMAIL"):
         """
         return self._voicemail_gate
 
+    def llm_gate(self) -> LLMGate:
+        """Get the LLM gate for placement before the main LLM in the pipeline.
+
+        This should be placed after the user context aggregator and before the
+        main LLM service to prevent the LLM from being triggered before
+        voicemail classification completes. Only ``LLMContextFrame`` is gated;
+        all other frames pass through immediately.
+
+        Returns:
+            The LLMGate processor instance.
+        """
+        return self._llm_gate
+
     def add_event_handler(self, event_name: str, handler):
         """Add an event handler for voicemail detection events.
 
@@ -719,3 +865,109 @@ VOICEMAIL SYSTEM (respond "VOICEMAIL"):
             self._classification_processor.add_event_handler(event_name, handler)
         else:
             super().add_event_handler(event_name, handler)
+
+
+class FirstTurnSpeechMonitor(FrameProcessor):
+    """Monitors the first conversation turn for extended continuous speech.
+
+    Used internally by :class:`VoicemailDetector`. When continuous speech in
+    the first turn exceeds the configured timeout, it adds the accumulated
+    transcript to the classifier ``LLMContext`` and pushes an
+    ``LLMContextFrame`` downstream. Because this processor lives inside the
+    classification branch of the parallel pipeline, the frame is consumed by
+    the classifier LLM and never leaks into the main pipeline.
+
+    For Deepgram Flux, ensure ``eager_eot_threshold`` is set so that
+    ``InterimTranscriptionFrame`` s are pushed during speech pauses.
+    """
+
+    def __init__(self, *, timeout_secs: float, context: LLMContext, gate_notifier: BaseNotifier):
+        """Initialize the first turn speech monitor.
+
+        Args:
+            timeout_secs: Duration in seconds of continuous first-turn speech
+                before classification is triggered.
+            context: The classifier LLM context to inject the transcript into.
+            gate_notifier: Notifier to close the ClassifierGate after triggering
+                early classification, preventing subsequent LLM calls.
+        """
+        super().__init__()
+        self._timeout_secs = timeout_secs
+        self._context = context
+        self._gate_notifier = gate_notifier
+        self._is_first_turn = True
+        self._final_transcripts: list[str] = []
+        self._latest_interim = ""
+        self._timer = None
+        self._triggered = False
+
+    async def cleanup(self):
+        """Clean up timer resources."""
+        await super().cleanup()
+        self._cancel_timer()
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        """Process frames, tracking first-turn speech and interim transcripts."""
+        await super().process_frame(frame, direction)
+
+        if isinstance(frame, StartFrame):
+            # Start timer now since Voicemail Detector relies on
+            # External Turn Stop strategies, and the main pipeline
+            # might be muted till first Bot Stopped Speaking
+            self._schedule_timer()
+        elif not self._triggered and self._is_first_turn:
+            if isinstance(frame, UserStoppedSpeakingFrame):
+                self._cancel_timer()
+                self._is_first_turn = False
+
+            elif isinstance(frame, TranscriptionFrame):
+                self._final_transcripts.append(frame.text)
+                self._latest_interim = ""
+
+            elif isinstance(frame, InterimTranscriptionFrame):
+                self._latest_interim = frame.text
+
+        await self.push_frame(frame, direction)
+
+    def _get_best_transcript(self) -> str:
+        """Return accumulated finals + latest interim."""
+        parts = list(self._final_transcripts)
+        if self._latest_interim:
+            parts.append(self._latest_interim)
+        return " ".join(parts).strip()
+
+    def _schedule_timer(self):
+        self._cancel_timer()
+        loop = asyncio.get_event_loop()
+        self._timer = loop.call_later(
+            self._timeout_secs,
+            lambda: asyncio.create_task(self._on_timeout()),
+        )
+
+    def _cancel_timer(self):
+        if self._timer:
+            self._timer.cancel()
+            self._timer = None
+
+    async def _on_timeout(self):
+        if self._is_first_turn and not self._triggered:
+            self._triggered = True
+            self._timer = None
+            transcript = self._get_best_transcript()
+            if not transcript:
+                logger.warning(
+                    f"{self}: First turn exceeded {self._timeout_secs}s "
+                    "but no transcript available yet"
+                )
+                return
+            logger.info(
+                f"{self}: First turn exceeded {self._timeout_secs}s, "
+                f"triggering classification with: {transcript!r}"
+            )
+            # Close the classifier gate to prevent subsequent UserStoppedSpeaking
+            # from triggering another classification LLM call
+            await self._gate_notifier.notify()
+
+            # Inject transcript into classifier context and trigger LLM
+            self._context.add_message({"role": "user", "content": transcript})
+            await self.push_frame(LLMContextFrame(self._context))

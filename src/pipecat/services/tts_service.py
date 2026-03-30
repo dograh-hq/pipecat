@@ -42,6 +42,7 @@ from pipecat.frames.frames import (
     LLMAssistantPushAggregationFrame,
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
+    OutputAudioRawFrame,
     StartFrame,
     SystemFrame,
     TextFrame,
@@ -831,7 +832,7 @@ class TTSService(AIService):
 
         if self._push_silence_after_stop and isinstance(frame, TTSStoppedFrame):
             silence_num_bytes = int(self._silence_time_s * self.sample_rate * 2)  # 16-bit
-            silence_frame = TTSAudioRawFrame(
+            silence_frame = OutputAudioRawFrame(
                 audio=b"\x00" * silence_num_bytes,
                 sample_rate=self.sample_rate,
                 num_channels=1,

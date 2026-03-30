@@ -1,0 +1,158 @@
+#
+# Copyright (c) 2024-2025 Daily
+#
+# SPDX-License-Identifier: BSD 2-Clause License
+#
+
+"""Mock TTS service for testing XMLFunctionTagFilter integration."""
+
+import asyncio
+from typing import AsyncGenerator, Optional
+
+from pipecat.frames.frames import (
+    Frame,
+    TTSAudioRawFrame,
+)
+from pipecat.services.settings import TTSSettings
+from pipecat.services.tts_service import TTSService
+
+
+class MockTTSService(TTSService):
+    """Mock TTS service that generates predictable audio frames for testing.
+
+    Matches real TTS service behavior: the parent class handles TTSStartedFrame
+    and TTSStoppedFrame lifecycle via ``push_start_frame=True`` and
+    ``push_stop_frames=True``. Multiple sentences within a turn share a single
+    audio context with one start/stop cycle, not one per sentence.
+    """
+
+    def __init__(
+        self,
+        *,
+        mock_audio_data: Optional[bytes] = None,
+        mock_audio_duration_ms: Optional[int] = 1000,
+        chunk_size: int = 1024,
+        frame_delay: float = 0.01,
+        pause_frame_processing: bool = True,
+        **kwargs,
+    ):
+        """Initialize mock TTS service.
+
+        Args:
+            mock_audio_data: Bytes to use as fake audio
+            mock_audio_duration_ms: Mock audio duration in ms
+            chunk_size: Size of each audio frame chunk
+            frame_delay: Delay between audio frames for realistic timing
+            pause_frame_processing: If True, pauses frame processing while generating
+                audio, waiting for BotStoppedSpeakingFrame to resume. This simulates
+                real TTS behavior where overlapping audio should be avoided.
+            **kwargs: Additional args passed to TTSService
+        """
+        super().__init__(
+            pause_frame_processing=pause_frame_processing,
+            push_start_frame=True,
+            push_stop_frames=True,
+            settings=TTSSettings(model=None, voice=None, language=None),
+            **kwargs,
+        )
+
+        self._mock_audio_data = mock_audio_data or self.create_mock_audio(mock_audio_duration_ms)
+        self._chunk_size = chunk_size
+        self._frame_delay = frame_delay
+        self.received_texts = []
+
+    async def run_tts(self, text: str, context_id: str) -> AsyncGenerator[Frame, None]:
+        """Generate mock audio frames for given text.
+
+        The parent class handles TTSStartedFrame/TTSStoppedFrame lifecycle.
+        This method only yields audio frames.
+
+        Args:
+            text: The text to convert (after filtering)
+            context_id: The context ID of the synthesis
+
+        Yields:
+            TTSAudioRawFrame: Audio frames containing mock audio data.
+        """
+        self.received_texts.append(text)
+
+        if text.strip():
+            for i in range(0, len(self._mock_audio_data), self._chunk_size):
+                chunk = self._mock_audio_data[i : i + self._chunk_size]
+                if chunk:
+                    audio_frame = TTSAudioRawFrame(
+                        audio=chunk, sample_rate=16000, num_channels=1, context_id=context_id
+                    )
+                    yield audio_frame
+                    if self._frame_delay > 0:
+                        await asyncio.sleep(self._frame_delay)
+
+    @staticmethod
+    def create_mock_audio(duration_ms: int, sample_rate: int = 16000) -> bytes:
+        """Helper to create mock audio data of specific duration.
+
+        Args:
+            duration_ms: Duration in milliseconds
+            sample_rate: Audio sample rate
+
+        Returns:
+            Bytes representing mock audio data
+        """
+        samples = int(duration_ms * sample_rate / 1000)
+
+        audio_data = bytearray()
+        for i in range(samples):
+            # Simple pattern that creates audio-like data
+            value = int(32767 * 0.3 * (i % 100) / 100)
+            audio_data.extend(value.to_bytes(2, byteorder="little", signed=True))
+
+        return bytes(audio_data)
+
+
+class PredictableMockTTSService(MockTTSService):
+    """Mock TTS that generates predictable audio based on input text."""
+
+    def __init__(self, **kwargs):
+        """Initialize PredictableMockTTSService with deterministic audio generation."""
+        super().__init__(**kwargs)
+
+    def get_audio_for_text(self, text: str) -> bytes:
+        """Get deterministic audio bytes for given text input."""
+        return self.create_deterministic_audio_from_text(text)
+
+    @staticmethod
+    def create_deterministic_audio_from_text(text: str) -> bytes:
+        """Create deterministic audio bytes from text content."""
+        # use text hash + length
+        text_hash = hash(text) % 1000
+        text_len = len(text)
+
+        audio_data = bytearray()
+        for i in range(text_len * 100):  # 100 bytes per character
+            # Pattern based on text hash and position
+            value = (text_hash + i) % 256
+            audio_data.append(value)
+
+        return bytes(audio_data)
+
+    async def run_tts(self, text: str, context_id: str) -> AsyncGenerator[Frame, None]:
+        """Generate specific audio frames for the filtered text.
+
+        Args:
+            text: The text to convert.
+            context_id: The context ID of the synthesis.
+
+        Yields:
+            TTSAudioRawFrame: Audio frames containing deterministic audio data.
+        """
+        self.received_texts.append(text)
+        audio_data = self.get_audio_for_text(text)
+
+        if text.strip():
+            chunk_size = 1024
+            for i in range(0, len(audio_data), chunk_size):
+                chunk = audio_data[i : i + chunk_size]
+                if chunk:
+                    yield TTSAudioRawFrame(
+                        audio=chunk, sample_rate=16000, num_channels=1, context_id=context_id
+                    )
