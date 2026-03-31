@@ -891,19 +891,6 @@ def traced_gemini_live(operation: str) -> Callable:
                                     :500
                                 ]  # Truncate if very long
 
-                            # Capture context system instructions if available
-                            if hasattr(self, "_context") and self._context:
-                                try:
-                                    context_system = self._context.extract_system_instructions()
-                                    if context_system:
-                                        operation_attrs["context_system_instruction"] = (
-                                            context_system[:500]
-                                        )  # Truncate if very long
-                                except Exception as e:
-                                    logger.warning(
-                                        f"Error extracting context system instructions: {e}"
-                                    )
-
                         elif operation == "llm_tool_call" and args:
                             # Extract tool call information
                             msg = args[0] if args else None
