@@ -65,6 +65,48 @@ def _get_model_name(service) -> str:
     )
 
 
+def _strip_thought_from_id(value):
+    """Strip __thought__ suffix and its encoded content from tool call IDs.
+
+    Some models (e.g., Gemini) append thought/reasoning content to tool call IDs
+    using __thought__ as a delimiter (e.g., ``call_abc__thought__<base64>``).
+    """
+    if not value or not isinstance(value, str) or "__thought__" not in value:
+        return value
+    return value.split("__thought__", 1)[0]
+
+
+def _strip_thought_ids_from_messages(messages):
+    """Strip __thought__ suffixes from tool_call_id fields in traced messages.
+
+    Cleans both tool-role messages (tool_call_id) and assistant-role messages
+    (id inside each entry of tool_calls).
+    """
+    if not messages:
+        return messages
+    cleaned = []
+    for msg in messages:
+        if not isinstance(msg, dict):
+            cleaned.append(msg)
+            continue
+        # Tool result messages: {role: "tool", tool_call_id: "..."}
+        if "tool_call_id" in msg:
+            msg = {**msg, "tool_call_id": _strip_thought_from_id(msg["tool_call_id"])}
+        # Assistant messages with tool_calls: [{id: "...", ...}, ...]
+        if "tool_calls" in msg and isinstance(msg["tool_calls"], list):
+            msg = {
+                **msg,
+                "tool_calls": [
+                    {**tc, "id": _strip_thought_from_id(tc.get("id", ""))}
+                    if isinstance(tc, dict) and "id" in tc
+                    else tc
+                    for tc in msg["tool_calls"]
+                ],
+            }
+        cleaned.append(msg)
+    return cleaned
+
+
 def _noop_decorator(func):
     """No-op fallback decorator when tracing is unavailable.
 
@@ -576,7 +618,9 @@ def traced_llm(func: Optional[Callable] = None, *, name: Optional[str] = None) -
                                                 "function_name": getattr(
                                                     call, "function_name", None
                                                 ),
-                                                "tool_call_id": getattr(call, "tool_call_id", None),
+                                                "tool_call_id": _strip_thought_from_id(
+                                                    getattr(call, "tool_call_id", None)
+                                                ),
                                                 "arguments": getattr(call, "arguments", None),
                                             }
                                         )
@@ -703,7 +747,10 @@ def traced_llm(func: Optional[Callable] = None, *, name: Optional[str] = None) -
                             }
 
                             # Add optional attributes only if they exist
-                            attribute_kwargs["messages"] = messages
+                            # Strip __thought__ from tool_call_ids in messages
+                            attribute_kwargs["messages"] = (
+                                _strip_thought_ids_from_messages(messages) if messages else messages
+                            )
                             attribute_kwargs["tools"] = tools
 
                             # Add all gathered attributes to the span
