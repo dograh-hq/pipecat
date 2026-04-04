@@ -1130,7 +1130,6 @@ class GoogleLLMService(LLMService):
                             function_call_id = None
                             if part.text:
                                 if part.thought:
-                                    text_generated_signal = True
                                     # Gemini emits fully-formed thoughts rather
                                     # than chunks so bracket each thought in
                                     # start/end
@@ -1138,6 +1137,7 @@ class GoogleLLMService(LLMService):
                                     await self.push_frame(LLMThoughtTextFrame(part.text))
                                     await self.push_frame(LLMThoughtEndFrame())
                                 else:
+                                    text_generated_signal = True
                                     accumulated_text += part.text
                                     await self._push_llm_text(part.text)
                             elif part.function_call:
