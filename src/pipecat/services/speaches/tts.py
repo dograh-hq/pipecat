@@ -3,7 +3,12 @@
 from dataclasses import dataclass
 from typing import Optional
 
+from loguru import logger
+from openai import BadRequestError
+
+from pipecat.frames.frames import ErrorFrame, Frame, TTSAudioRawFrame
 from pipecat.services.openai.tts import OpenAITTSService, OpenAITTSSettings
+from pipecat.utils.tracing.service_decorators import traced_tts
 
 
 @dataclass
@@ -43,3 +48,54 @@ class SpeachesTTSService(OpenAITTSService):
             settings=settings,
             **kwargs,
         )
+
+    @traced_tts
+    async def run_tts(self, text: str, context_id: str):
+        """Generate speech using the configured voice string as-is.
+
+        Speaches exposes an OpenAI-compatible API surface, but unlike OpenAI it
+        accepts provider-specific voice identifiers such as ``fettah``. The
+        upstream OpenAI service adapter maps voices through a fixed whitelist,
+        which breaks custom Speaches voices with a ``KeyError``.
+        """
+        logger.debug(f"{self}: Generating TTS [{text}]")
+        try:
+            create_params = {
+                "input": text,
+                "model": self._settings.model,
+                "voice": self._settings.voice,
+                "response_format": "pcm",
+            }
+
+            if self._settings.instructions:
+                create_params["instructions"] = self._settings.instructions
+
+            if self._settings.speed:
+                create_params["speed"] = self._settings.speed
+
+            async with self._client.audio.speech.with_streaming_response.create(
+                **create_params
+            ) as response:
+                if response.status_code != 200:
+                    error = await response.text()
+                    logger.error(
+                        f"{self} error getting audio (status: {response.status_code}, error: {error})"
+                    )
+                    yield ErrorFrame(
+                        error=f"Error getting audio (status: {response.status_code}, error: {error})"
+                    )
+                    return
+
+                await self.start_tts_usage_metrics(text)
+
+                async for chunk in response.iter_bytes(self.chunk_size):
+                    if len(chunk) > 0:
+                        await self.stop_ttfb_metrics()
+                        yield TTSAudioRawFrame(
+                            chunk,
+                            self.sample_rate,
+                            1,
+                            context_id=context_id,
+                        )
+        except BadRequestError as e:
+            yield ErrorFrame(error=f"Unknown error occurred: {e}")
