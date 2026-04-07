@@ -899,8 +899,11 @@ class GeminiLiveLLMService(LLMService):
         if not changed:
             return changed
 
-        if "system_instruction" in changed and changed["system_instruction"] is not None:
-            if self._bot_is_responding:
+        if "system_instruction" in changed:
+            # First time setting system_instruction
+            if not self._session:
+                await self._connect()
+            elif self._bot_is_responding:
                 self._reconnect_pending = True
             else:
                 await self._reconnect()
@@ -977,7 +980,8 @@ class GeminiLiveLLMService(LLMService):
             frame: The start frame.
         """
         await super().start(frame)
-        await self._connect()
+        if self._settings.system_instruction:
+            await self._connect()
 
     async def stop(self, frame: EndFrame):
         """Stop the service and close connections.

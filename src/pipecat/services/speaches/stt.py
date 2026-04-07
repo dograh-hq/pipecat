@@ -31,6 +31,14 @@ class SpeachesSTTService(OpenAISTTService):
         settings: Optional[SpeachesSTTSettings] = None,
         **kwargs,
     ):
+        """Initialize the Speaches STT service.
+
+        Args:
+            api_key: API key for authentication.
+            base_url: Base URL for the Speaches API.
+            settings: Optional STT settings.
+            **kwargs: Additional arguments passed to parent.
+        """
         super().__init__(
             api_key=api_key,
             base_url=base_url,
