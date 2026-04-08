@@ -719,6 +719,28 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
                 logger.warning(
                     f"{self} is calling '{function_call.function_name}', but it's not registered."
                 )
+                # Broadcast in-progress + result so the mute strategy can
+                # track and then release the tool_call_id (prevents permanent
+                # user mute when FunctionCallUserMuteStrategy is active).
+                await self.broadcast_frame(
+                    FunctionCallInProgressFrame,
+                    function_name=function_call.function_name,
+                    tool_call_id=function_call.tool_call_id,
+                    arguments=function_call.arguments,
+                    cancel_on_interruption=False,
+                )
+                registered = [name for name in self._functions.keys() if name is not None]
+                await self.broadcast_frame(
+                    FunctionCallResultFrame,
+                    function_name=function_call.function_name,
+                    tool_call_id=function_call.tool_call_id,
+                    arguments=function_call.arguments,
+                    result=(
+                        f"Error: function '{function_call.function_name}' is not registered. "
+                        f"Available functions: {registered}. "
+                        f"Please call one of the available functions instead."
+                    ),
+                )
                 continue
 
             runner_items.append(

@@ -980,6 +980,11 @@ class GeminiLiveLLMService(LLMService):
             frame: The start frame.
         """
         await super().start(frame)
+        
+        # Dograh: we initiate the pipeline before we set the
+        # system instruction so that pre_call fetching can
+        # populate the context variables. We dont want to 
+        # connect with default system instructions.
         if self._settings.system_instruction:
             await self._connect()
 
