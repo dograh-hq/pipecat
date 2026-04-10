@@ -1354,7 +1354,11 @@ class GeminiLiveLLMService(LLMService):
             else:
                 system_instruction = self._settings.system_instruction
             if system_instruction:
-                logger.debug(f"Setting system instruction: {system_instruction}")
+                if len(system_instruction) > 400:
+                    trimmed = f"{system_instruction[:200]}...{system_instruction[-200:]}"
+                else:
+                    trimmed = system_instruction
+                logger.debug(f"Setting system instruction: {trimmed}")
                 config.system_instruction = system_instruction
             if tools:
                 logger.debug(f"Setting tools: {tools}")
