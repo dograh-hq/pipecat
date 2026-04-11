@@ -1839,14 +1839,12 @@ class GeminiLiveLLMService(LLMService):
             result: Optional LiveServerMessage that triggered this transcription
         """
         await self._handle_user_transcription(text, True, self._settings.language)
-        await self.push_frame(
-            TranscriptionFrame(
-                text=text,
-                user_id="",
-                timestamp=time_now_iso8601(),
-                result=result,
-            ),
-            FrameDirection.UPSTREAM,
+        await self.broadcast_frame(
+            TranscriptionFrame,
+            text=text,
+            user_id="",
+            timestamp=time_now_iso8601(),
+            result=result,
         )
 
     async def _transcription_timeout_handler(self):
