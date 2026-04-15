@@ -55,6 +55,8 @@ from pipecat.frames.frames import (
     TTSStoppedFrame,
     TTSTextFrame,
     UserImageRawFrame,
+    UserMuteStartedFrame,
+    UserMuteStoppedFrame,
     VADUserStartedSpeakingFrame,
     VADUserStoppedSpeakingFrame,
 )
@@ -822,11 +824,23 @@ class GeminiLiveLLMService(LLMService):
 
         self._user_is_speaking = False
         self._bot_is_responding = False
+        # Tracks user-mute state from broadcast UserMute{Started,Stopped}Frames
+        # emitted by the user context aggregator. While muted, we skip
+        # forwarding InputAudioRawFrames to the model so the live session
+        # doesn't react to the user (e.g. when interruption is disabled).
+        self._user_is_muted = False
         self._reconnect_pending = False
         self._pending_function_calls = []
         self._user_audio_buffer = bytearray()
         self._user_transcription_buffer = ""
         self._last_transcription_sent = ""
+        # Set on VADUserStoppedSpeakingFrame; consumed by the next
+        # _push_user_transcription to mark that TranscriptionFrame as
+        # finalized=True. Mirrors Deepgram's request_finalize/confirm_finalize
+        # pattern so TurnAnalyzerUserTurnStopStrategy can trigger
+        # on_user_turn_stopped immediately rather than waiting on the
+        # STT-timeout fallback.
+        self._finalize_pending = False
         self._bot_audio_buffer = bytearray()
         self._bot_text_buffer = ""
         self._llm_output_buffer = ""
@@ -980,10 +994,10 @@ class GeminiLiveLLMService(LLMService):
             frame: The start frame.
         """
         await super().start(frame)
-        
+
         # Dograh: we initiate the pipeline before we set the
         # system instruction so that pre_call fetching can
-        # populate the context variables. We dont want to 
+        # populate the context variables. We dont want to
         # connect with default system instructions.
         if self._settings.system_instruction:
             await self._connect()
@@ -1021,6 +1035,11 @@ class GeminiLiveLLMService(LLMService):
 
     async def _handle_user_started_speaking(self, frame):
         self._user_is_speaking = True
+        # A new VAD start invalidates any pending finalize from a prior stop
+        # that hasn't been paired with a transcription yet. Only the
+        # transcription committed after the *most recent* VAD stop should be
+        # marked finalized.
+        self._finalize_pending = False
         if self._vad_disabled and self._session and self._ready_for_realtime_input:
             try:
                 await self._session.send_realtime_input(activity_start=ActivityStart())
@@ -1030,6 +1049,7 @@ class GeminiLiveLLMService(LLMService):
     async def _handle_user_stopped_speaking(self, frame):
         self._user_is_speaking = False
         self._user_audio_buffer = bytearray()
+        self._finalize_pending = True
         await self.start_ttfb_metrics()
         if self._vad_disabled and self._session and self._ready_for_realtime_input:
             try:
@@ -1077,7 +1097,14 @@ class GeminiLiveLLMService(LLMService):
             await self._send_user_text(frame.text)
             await self.push_frame(frame, direction)
         elif isinstance(frame, InputAudioRawFrame):
-            await self._send_user_audio(frame)
+            if not self._user_is_muted:
+                await self._send_user_audio(frame)
+            await self.push_frame(frame, direction)
+        elif isinstance(frame, UserMuteStartedFrame):
+            self._user_is_muted = True
+            await self.push_frame(frame, direction)
+        elif isinstance(frame, UserMuteStoppedFrame):
+            self._user_is_muted = False
             await self.push_frame(frame, direction)
         elif isinstance(frame, InputImageRawFrame):
             await self._send_user_video(frame)
@@ -1839,12 +1866,15 @@ class GeminiLiveLLMService(LLMService):
             result: Optional LiveServerMessage that triggered this transcription
         """
         await self._handle_user_transcription(text, True, self._settings.language)
+        finalized = self._finalize_pending
+        self._finalize_pending = False
         await self.broadcast_frame(
             TranscriptionFrame,
             text=text,
             user_id="",
             timestamp=time_now_iso8601(),
             result=result,
+            finalized=finalized,
         )
 
     async def _transcription_timeout_handler(self):
