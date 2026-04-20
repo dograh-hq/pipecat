@@ -430,9 +430,17 @@ class TTSTextFrame(AggregatedTextFrame):
 
     Parameters:
         context_id: Unique identifier for the TTS context that generated this text.
+        persist_to_logs: Engine-side flag indicating downstream observers should
+            write this frame's text to the app-level logs buffer. Default False.
+            Do NOT propagate this flag from TTSSpeakFrame onto TTSTextFrames
+            emitted by the TTS service — word-timestamped providers emit one
+            frame per word, which would produce per-word log entries. Set it
+            only at direct construction sites (e.g. a recording-transcript frame
+            constructed outside the TTS service).
     """
 
     context_id: Optional[str] = None
+    persist_to_logs: bool = False
 
 
 @dataclass
@@ -943,10 +951,14 @@ class TTSSpeakFrame(DataFrame):
     Parameters:
         text: The text to be spoken.
         append_to_context: Whether to append the text to the context.
+        persist_to_logs: If True, observers write this text to the app-level
+            logs buffer when the frame is pushed. The flag intentionally does
+            NOT propagate onto TTSTextFrames emitted by the TTS service.
     """
 
     text: str
     append_to_context: Optional[bool] = None
+    persist_to_logs: bool = False
 
 
 @dataclass
