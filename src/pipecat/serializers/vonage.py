@@ -45,11 +45,13 @@ class VonageFrameSerializer(FrameSerializer):
             vonage_sample_rate: Sample rate used by Vonage, defaults to 16000 Hz.
                 Common values: 8000, 16000, 24000 Hz.
             sample_rate: Optional override for pipeline input sample rate.
+            auto_hang_up: Whether to automatically terminate call on EndFrame.
             ignore_rtvi_messages: Inherited from base FrameSerializer, defaults to True.
         """
 
         vonage_sample_rate: int = 16000
         sample_rate: Optional[int] = None
+        auto_hang_up: bool = True
 
     def __init__(
         self,
@@ -77,6 +79,7 @@ class VonageFrameSerializer(FrameSerializer):
 
         self._input_resampler = create_stream_resampler()
         self._output_resampler = create_stream_resampler()
+        self._hangup_attempted = False
 
     async def setup(self, frame: StartFrame):
         """Sets up the serializer with pipeline configuration.
