@@ -965,49 +965,97 @@ def traced_gemini_live(operation: str) -> Callable:
                                     except Exception:
                                         operation_attrs["tool.arguments"] = str(call.args)[:1000]
 
-                        elif operation == "llm_tool_result" and args:
-                            # Extract tool result information
-                            tool_result_message = args[0] if args else None
-                            if tool_result_message and isinstance(tool_result_message, dict):
-                                # Extract the tool call information
-                                tool_call_id = tool_result_message.get("tool_call_id")
-                                tool_call_name = tool_result_message.get("tool_call_name")
-                                result_content = tool_result_message.get("content")
-
-                                if tool_call_id:
-                                    operation_attrs["tool.call_id"] = tool_call_id
-                                if tool_call_name:
-                                    operation_attrs["tool.function_name"] = tool_call_name
-
-                                # Parse and capture the result
-                                if result_content:
+                                    # Set the "output" attribute in ChatML format so Langfuse
+                                    # renders all tool calls in the span's output panel.
+                                    tool_calls_payload = []
+                                    for c in function_calls:
+                                        try:
+                                            arguments = json.dumps(c.args) if c.args else "{}"
+                                        except Exception:
+                                            arguments = str(c.args)
+                                        tool_calls_payload.append(
+                                            {
+                                                "id": _strip_thought_from_id(c.id),
+                                                "type": "function",
+                                                "function": {
+                                                    "name": c.name,
+                                                    "arguments": arguments,
+                                                },
+                                            }
+                                        )
                                     try:
-                                        result = json.loads(result_content)
-                                        # Serialize the result, truncating if too long
-                                        result_str = json.dumps(result)
-                                        if len(result_str) > 2000:  # Larger limit for results
-                                            result_str = result_str[:2000] + "..."
-                                        operation_attrs["tool.result"] = result_str
-
-                                        # Add result status/success indicator if present
-                                        if isinstance(result, dict):
-                                            if "error" in result:
-                                                operation_attrs["tool.result_status"] = "error"
-                                            elif "success" in result:
-                                                operation_attrs["tool.result_status"] = "success"
-                                            else:
-                                                operation_attrs["tool.result_status"] = "completed"
-
-                                    except json.JSONDecodeError:
-                                        operation_attrs["tool.result"] = (
-                                            f"Invalid JSON: {str(result_content)[:500]}"
+                                        current_span.set_attribute(
+                                            "output",
+                                            json.dumps({"tool_calls": tool_calls_payload}),
                                         )
-                                        operation_attrs["tool.result_status"] = "parse_error"
                                     except Exception as e:
-                                        operation_attrs["tool.result"] = (
-                                            f"Error processing result: {str(e)}"
-                                        )
-                                        operation_attrs["tool.result_status"] = "processing_error"
+                                        logger.warning(f"Unable to serialize tool_call output: {e}")
+
+                        elif operation == "llm_tool_result" and args:
+                            # _tool_result(self, tool_call_id, tool_name, tool_result_message)
+                            # so positional args are: (call_id, name, result_dict).
+                            tool_call_id = args[0] if len(args) > 0 else None
+                            tool_call_name = args[1] if len(args) > 1 else None
+                            result_content = args[2] if len(args) > 2 else None
+
+                            if tool_call_id:
+                                operation_attrs["tool.call_id"] = _strip_thought_from_id(
+                                    tool_call_id
+                                )
+                            if tool_call_name:
+                                operation_attrs["tool.function_name"] = tool_call_name
+
+                            # Capture the result. result_content is the raw response dict
+                            # passed to FunctionResponse.response (not a wrapper with
+                            # tool_call_id/content keys).
+                            if result_content is not None:
+                                try:
+                                    if isinstance(result_content, str):
+                                        try:
+                                            parsed = json.loads(result_content)
+                                        except json.JSONDecodeError:
+                                            parsed = result_content
+                                    else:
+                                        parsed = result_content
+
+                                    result_str = (
+                                        json.dumps(parsed)
+                                        if not isinstance(parsed, str)
+                                        else parsed
+                                    )
+                                    if len(result_str) > 2000:
+                                        result_str = result_str[:2000] + "..."
+                                    operation_attrs["tool.result"] = result_str
+
+                                    if isinstance(parsed, dict):
+                                        if "error" in parsed:
+                                            operation_attrs["tool.result_status"] = "error"
+                                        elif "success" in parsed:
+                                            operation_attrs["tool.result_status"] = "success"
+                                        else:
+                                            operation_attrs["tool.result_status"] = "completed"
+                                except Exception as e:
+                                    operation_attrs["tool.result"] = (
+                                        f"Error processing result: {str(e)}"
+                                    )
+                                    operation_attrs["tool.result_status"] = "processing_error"
+
+                            # Set "output" so Langfuse renders the tool-role response in the
+                            # span panel. The corresponding tool_call is already shown on the
+                            # preceding llm_tool_call span, so we don't duplicate it as input.
+                            output_content = operation_attrs.get("tool.result")
+                            if output_content is not None:
+                                try:
+                                    stripped_id = _strip_thought_from_id(tool_call_id) or ""
+                                    output_payload = {
+                                        "role": "tool",
+                                        "tool_call_id": stripped_id,
+                                        "name": tool_call_name or "",
+                                        "content": output_content,
+                                    }
+                                    current_span.set_attribute("output", json.dumps(output_payload))
+                                except Exception as e:
+                                    logger.warning(f"Unable to serialize tool_result output: {e}")
 
                         elif operation == "llm_response" and args:
                             # Extract usage and response metadata from turn complete event

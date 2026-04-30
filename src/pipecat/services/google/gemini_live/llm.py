@@ -1122,7 +1122,10 @@ class GeminiLiveLLMService(LLMService):
             # Ignore this frame. Use the serverContent API message instead
             await self.push_frame(frame, direction)
         elif isinstance(frame, BotStoppedSpeakingFrame):
-            # ignore this frame. Use the serverContent.turnComplete API message
+            # Bot turn-tracking is driven by serverContent.turnComplete, but we
+            # also flush deferred function calls here so they fire as soon as
+            # the bot's audio finishes — even if turnComplete is delayed.
+            await self._run_pending_function_calls()
             await self.push_frame(frame, direction)
         elif isinstance(frame, LLMMessagesAppendFrame):
             # NOTE: handling LLMMessagesAppendFrame here in the LLMService is
@@ -1203,13 +1206,8 @@ class GeminiLiveLLMService(LLMService):
 
         self._bot_is_responding = responding
 
-        if not self._bot_is_responding and self._pending_function_calls:
-            function_calls = self._pending_function_calls
-            self._pending_function_calls = []
-            logger.debug(
-                f"{self}: Executing {len(function_calls)} deferred function calls after bot finished"
-            )
-            await self.run_function_calls(function_calls)
+        if not self._bot_is_responding:
+            await self._run_pending_function_calls()
 
         if not self._bot_is_responding and self._end_frame_pending_bot_turn_finished:
             await self._release_deferred_end_frame()
@@ -1217,6 +1215,17 @@ class GeminiLiveLLMService(LLMService):
         if not self._bot_is_responding and self._reconnect_pending:
             self._reconnect_pending = False
             await self._reconnect()
+
+    async def _run_pending_function_calls(self):
+        """Run any function calls that were deferred while the bot was responding."""
+        if not self._pending_function_calls:
+            return
+        function_calls = self._pending_function_calls
+        self._pending_function_calls = []
+        logger.debug(
+            f"{self}: Executing {len(function_calls)} deferred function calls after bot finished"
+        )
+        await self.run_function_calls(function_calls)
 
     async def _release_deferred_end_frame(self):
         """Release a deferred EndFrame and cancel the deferral timeout."""
