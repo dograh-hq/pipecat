@@ -1460,9 +1460,7 @@ class GeminiLiveLLMService(LLMService):
                                 await self._handle_msg_grounding_metadata(message)
                             if sc and sc.turn_complete:
                                 if not message.usage_metadata:
-                                    logger.warning(
-                                        "Received turn_complete without usage_metadata"
-                                    )
+                                    logger.warning("Received turn_complete without usage_metadata")
                                 await self._handle_msg_turn_complete(message)
                                 if message.usage_metadata:
                                     await self._handle_msg_usage_metadata(message)
