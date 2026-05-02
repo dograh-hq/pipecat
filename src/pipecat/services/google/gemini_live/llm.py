@@ -1407,73 +1407,87 @@ class GeminiLiveLLMService(LLMService):
             await self.push_error(error_msg=f"Initialization error: {e}", exception=e)
 
     async def _connection_task_handler(self, config: LiveConnectConfig):
-        async with self._client.aio.live.connect(
-            model=self._settings.model, config=config
-        ) as session:
-            logger.info("Connected to Gemini service")
+        try:
+            async with self._client.aio.live.connect(
+                model=self._settings.model, config=config
+            ) as session:
+                logger.info("Connected to Gemini service")
 
-            # Mark connection start time
-            self._connection_start_time = time.time()
+                # Mark connection start time
+                self._connection_start_time = time.time()
 
-            await self._handle_session_ready(session)
+                await self._handle_session_ready(session)
 
-            while True:
-                try:
-                    turn = self._session.receive()
-                    async for message in turn:
-                        # Reset failure counter if connection has been stable
-                        self._check_and_reset_failure_counter()
+                while True:
+                    try:
+                        turn = self._session.receive()
+                        async for message in turn:
+                            # Reset failure counter if connection has been stable
+                            self._check_and_reset_failure_counter()
 
-                        # server_content fields are NOT mutually exclusive —
-                        # Gemini 3.x can bundle multiple content fields and
-                        # turn_complete on the same message, so process the
-                        # content-bearing fields before closing the turn.
-                        sc = message.server_content
-                        if sc and sc.interrupted:
-                            # NOTE: while the service triggers interruptions in
-                            # the specific case of barge-ins, it does *not*
-                            # emit UserStarted/StoppedSpeakingFrames, as the
-                            # Gemini Live API does not give us broadly reliable
-                            # signals to base those off of. Pipelines that
-                            # require turn tracking (like those using context
-                            # aggregators) still need an independent way to
-                            # track turns, such as local Silero VAD in
-                            # combination with the context aggregator default
-                            # turn strategies.
-                            logger.debug("Gemini VAD: interrupted signal received")
-                            await self.broadcast_interruption()
-                        if sc and sc.model_turn:
-                            await self._handle_msg_model_turn(message)
-                        if sc and sc.input_transcription:
-                            await self._handle_msg_input_transcription(message)
-                        if sc and sc.output_transcription:
-                            await self._handle_msg_output_transcription(message)
-                        if (
-                            sc
-                            and sc.grounding_metadata
-                            and not sc.model_turn
-                            and not sc.output_transcription
-                        ):
-                            # model_turn/output_transcription already defer
-                            # bundled grounding metadata to turn_complete.
-                            await self._handle_msg_grounding_metadata(message)
-                        if sc and sc.turn_complete:
-                            if not message.usage_metadata:
-                                logger.warning("Received turn_complete without usage_metadata")
-                            await self._handle_msg_turn_complete(message)
-                            if message.usage_metadata:
-                                await self._handle_msg_usage_metadata(message)
-                        if message.tool_call:
-                            await self._handle_msg_tool_call(message)
-                        if message.session_resumption_update:
-                            self._handle_msg_resumption_update(message)
-                except Exception as e:
-                    if not self._disconnecting:
-                        should_reconnect = await self._handle_connection_error(e)
-                        if should_reconnect:
-                            await self._reconnect()
-                            return  # Exit this connection handler, _reconnect will start a new one
-                    break
+                            # server_content fields are NOT mutually exclusive —
+                            # Gemini 3.x can bundle multiple content fields and
+                            # turn_complete on the same message, so process the
+                            # content-bearing fields before closing the turn.
+                            sc = message.server_content
+                            if sc and sc.interrupted:
+                                # NOTE: while the service triggers interruptions in
+                                # the specific case of barge-ins, it does *not*
+                                # emit UserStarted/StoppedSpeakingFrames, as the
+                                # Gemini Live API does not give us broadly reliable
+                                # signals to base those off of. Pipelines that
+                                # require turn tracking (like those using context
+                                # aggregators) still need an independent way to
+                                # track turns, such as local Silero VAD in
+                                # combination with the context aggregator default
+                                # turn strategies.
+                                logger.debug("Gemini VAD: interrupted signal received")
+                                await self.broadcast_interruption()
+                            if sc and sc.model_turn:
+                                await self._handle_msg_model_turn(message)
+                            if sc and sc.input_transcription:
+                                await self._handle_msg_input_transcription(message)
+                            if sc and sc.output_transcription:
+                                await self._handle_msg_output_transcription(message)
+                            if (
+                                sc
+                                and sc.grounding_metadata
+                                and not sc.model_turn
+                                and not sc.output_transcription
+                            ):
+                                # model_turn/output_transcription already defer
+                                # bundled grounding metadata to turn_complete.
+                                await self._handle_msg_grounding_metadata(message)
+                            if sc and sc.turn_complete:
+                                if not message.usage_metadata:
+                                    logger.warning(
+                                        "Received turn_complete without usage_metadata"
+                                    )
+                                await self._handle_msg_turn_complete(message)
+                                if message.usage_metadata:
+                                    await self._handle_msg_usage_metadata(message)
+                            if message.tool_call:
+                                await self._handle_msg_tool_call(message)
+                            if message.session_resumption_update:
+                                self._handle_msg_resumption_update(message)
+                    except Exception as e:
+                        if not self._disconnecting:
+                            should_reconnect = await self._handle_connection_error(e)
+                            if should_reconnect:
+                                await self._reconnect()
+                                return  # Exit this connection handler, _reconnect will start a new one
+                        break
+        except Exception as e:
+            # Connect-time failures (e.g. websocket 1008 "project denied
+            # access") never enter the receive loop above, so they would
+            # otherwise escape this task and be silently caught by the
+            # task manager. Route them through the same error path so an
+            # ErrorFrame is emitted to the pipeline.
+            if self._disconnecting:
+                return
+            should_reconnect = await self._handle_connection_error(e)
+            if should_reconnect:
+                await self._reconnect()
 
     def _check_and_reset_failure_counter(self):
         """Check if connection has been stable long enough to reset the failure counter.
@@ -1507,9 +1521,12 @@ class GeminiLiveLLMService(LLMService):
         )
 
         if self._consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+            # Surface the underlying provider error (e.g. "1008 None. Your
+            # project has been denied access...") so downstream consumers can
+            # show the actual cause rather than the retry-wrapper message.
             error_msg = (
-                f"Max consecutive failures ({MAX_CONSECUTIVE_FAILURES}) reached, "
-                "treating as fatal error"
+                f"Gemini Live connection failed after {MAX_CONSECUTIVE_FAILURES} "
+                f"consecutive attempts: {error}"
             )
             await self.push_error(error_msg=error_msg, exception=error)
             return False
