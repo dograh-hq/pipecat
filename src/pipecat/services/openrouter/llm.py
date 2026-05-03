@@ -11,12 +11,13 @@ extending the base OpenAI LLM service functionality.
 """
 
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any
 
 from loguru import logger
 
 from pipecat.services.openai.base_llm import BaseOpenAILLMService
 from pipecat.services.openai.llm import OpenAILLMService
+from pipecat.services.settings import assert_given
 
 
 @dataclass
@@ -39,10 +40,10 @@ class OpenRouterLLMService(OpenAILLMService):
     def __init__(
         self,
         *,
-        api_key: Optional[str] = None,
-        model: Optional[str] = None,
+        api_key: str | None = None,
+        model: str | None = None,
         base_url: str = "https://openrouter.ai/api/v1",
-        settings: Optional[Settings] = None,
+        settings: Settings | None = None,
         **kwargs,
     ):
         """Initialize the OpenRouter LLM service.
@@ -95,7 +96,7 @@ class OpenRouterLLMService(OpenAILLMService):
         logger.debug(f"Creating OpenRouter client with api {base_url}")
         return super().create_client(api_key, base_url, **kwargs)
 
-    def build_chat_completion_params(self, params_from_context: Dict[str, Any]) -> Dict[str, Any]:
+    def build_chat_completion_params(self, params_from_context: dict[str, Any]) -> dict[str, Any]:
         """Builds chat parameters, handling model-specific constraints.
 
         Args:
@@ -105,7 +106,8 @@ class OpenRouterLLMService(OpenAILLMService):
             Transformed parameters ready for the API call.
         """
         params = super().build_chat_completion_params(params_from_context)
-        if "gemini" in self._settings.model.lower():
+        model = assert_given(self._settings.model)
+        if model is not None and "gemini" in model.lower():
             messages = params.get("messages", [])
             if not messages:
                 return params

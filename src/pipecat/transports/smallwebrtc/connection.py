@@ -13,9 +13,10 @@ for real-time communication applications.
 
 import asyncio
 import json
+import os
 import time
 import uuid
-from typing import Any, List, Literal, Optional, Union
+from typing import Any, Literal
 
 from loguru import logger
 from pydantic import BaseModel, TypeAdapter
@@ -23,6 +24,7 @@ from pydantic import BaseModel, TypeAdapter
 from pipecat.utils.base_object import BaseObject
 
 try:
+    import aiortc.rtcsctptransport as _sctp_transport
     from aiortc import (
         RTCConfiguration,
         RTCIceServer,
@@ -35,6 +37,34 @@ except ModuleNotFoundError as e:
     logger.error(f"Exception: {e}")
     logger.error("In order to use the SmallWebRTC, you need to `pip install pipecat-ai[webrtc]`.")
     raise Exception(f"Missing module: {e}")
+
+# Clamp aiortc's SCTP DATA-chunk payload size so the on-wire UDP packet fits
+# inside the smallest-MTU path we're likely to see (IPv6 minimum 1280,
+# Tailscale overlays default to 1280, some consumer VPNs are lower).
+#
+# aiortc hardcodes USERDATA_MAX_LENGTH = 1200. After adding SCTP (28) +
+# DTLS/GCM (~29) + UDP (8) + IPv6 (40) headers that produces a ~1305-byte
+# UDP datagram — over the 1280 MTU. The kernel rejects it with EMSGSIZE,
+# SCTP retransmits at the same size, and the data channel silently stalls.
+# aiortc has no PMTU discovery (RFC 8831 §6), so there is no auto-recovery.
+#
+# 1100 brings the worst-case datagram to ~1205 bytes (~75 bytes of slack).
+# Throughput cost is negligible: RTVI control frames fragment across one
+# extra chunk at most, and audio uses RTP (a separate path).
+#
+# There is no public API to set this — RTCConfiguration exposes no MTU knob
+# and all method references are bare module-global lookups, so patching the
+# module attribute before any RTCSctpTransport is instantiated is the only
+# option short of forking aiortc.
+#
+# Remove once aiortc ships DPLPMTUD (RFC 8899) or exposes this as a
+# configurable parameter.
+_SCTP_MAX_CHUNK_SIZE_DEFAULT = 1100
+_sctp_max_chunk_size = int(
+    os.environ.get("PIPECAT_SCTP_MAX_CHUNK_SIZE", _SCTP_MAX_CHUNK_SIZE_DEFAULT)
+)
+_sctp_transport.USERDATA_MAX_LENGTH = _sctp_max_chunk_size
+logger.debug(f"[SCTP] USERDATA_MAX_LENGTH set to {_sctp_max_chunk_size}")
 
 SIGNALLING_TYPE = "signalling"
 AUDIO_TRANSCEIVER_INDEX = 0
@@ -89,8 +119,8 @@ class SignallingMessage:
         outbound: Types of messages that can be sent to peers.
     """
 
-    Inbound = Union[TrackStatusMessage]  # in case we need to add new messages in the future
-    outbound = Union[RenegotiateMessage]
+    Inbound = TrackStatusMessage  # in case we need to add new messages in the future
+    outbound = RenegotiateMessage
 
 
 class SmallWebRTCTrack:
@@ -112,7 +142,7 @@ class SmallWebRTCTrack:
         self._track = receiver.track
         self._enabled = True
         self._last_recv_time: float = 0.0
-        self._idle_task: Optional[asyncio.Task] = None
+        self._idle_task: asyncio.Task | None = None
         self._idle_timeout: float = 2.0  # seconds before discarding old frames
 
     def set_enabled(self, enabled: bool) -> None:
@@ -145,7 +175,7 @@ class SmallWebRTCTrack:
                 remote_track._queue.get_nowait()  # Remove the oldest frame
                 remote_track._queue.task_done()
 
-    async def recv(self) -> Optional[Frame]:
+    async def recv(self) -> Frame | None:
         """Receive the next frame from the track.
 
         Enables the internal receiving state and starts idle watcher.
@@ -213,7 +243,7 @@ class SmallWebRTCConnection(BaseObject):
 
     def __init__(
         self,
-        ice_servers: Optional[Union[List[str], List[IceServer]]] = None,
+        ice_servers: list[str] | list[IceServer] | None = None,
         connection_timeout_secs: int = 60,
     ):
         """Initialize the WebRTC connection.
@@ -227,7 +257,7 @@ class SmallWebRTCConnection(BaseObject):
         """
         super().__init__()
         if not ice_servers:
-            self.ice_servers: List[IceServer] = []
+            self.ice_servers: list[IceServer] = []
         elif all(isinstance(s, IceServer) for s in ice_servers):
             self.ice_servers = ice_servers
         elif all(isinstance(s, str) for s in ice_servers):
@@ -281,7 +311,7 @@ class SmallWebRTCConnection(BaseObject):
         logger.debug("Initializing new peer connection")
         rtc_config = RTCConfiguration(iceServers=self.ice_servers)
 
-        self._answer: Optional[RTCSessionDescription] = None
+        self._answer: RTCSessionDescription | None = None
         self._pc = RTCPeerConnection(rtc_config)
         self._pc_id = f"{self.name}-{uuid.uuid4().hex}"
         self._setup_listeners()

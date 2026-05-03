@@ -8,8 +8,8 @@
 
 import io
 import wave
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
-from typing import AsyncGenerator, Optional
 
 from loguru import logger
 from pydantic import BaseModel
@@ -19,7 +19,7 @@ from pipecat.frames.frames import (
     Frame,
     TTSAudioRawFrame,
 )
-from pipecat.services.settings import NOT_GIVEN, TTSSettings, _NotGiven
+from pipecat.services.settings import NOT_GIVEN, TTSSettings, _NotGiven, assert_given
 from pipecat.services.tts_service import TTSService
 from pipecat.transcriptions.language import Language
 from pipecat.utils.tracing.service_decorators import traced_tts
@@ -65,8 +65,8 @@ class GroqTTSService(TTSService):
             speed: Speech speed multiplier. Defaults to 1.0.
         """
 
-        language: Optional[Language] = Language.EN
-        speed: Optional[float] = 1.0
+        language: Language | None = Language.EN
+        speed: float | None = 1.0
 
     GROQ_SAMPLE_RATE = 48000  # Groq TTS only supports 48kHz sample rate
 
@@ -75,11 +75,11 @@ class GroqTTSService(TTSService):
         *,
         api_key: str,
         output_format: str = "wav",
-        params: Optional[InputParams] = None,
-        model_name: Optional[str] = None,
-        voice_id: Optional[str] = None,
-        sample_rate: Optional[int] = GROQ_SAMPLE_RATE,
-        settings: Optional[Settings] = None,
+        params: InputParams | None = None,
+        model_name: str | None = None,
+        voice_id: str | None = None,
+        sample_rate: int | None = GROQ_SAMPLE_RATE,
+        settings: Settings | None = None,
         **kwargs,
     ):
         """Initialize Groq TTS service.
@@ -173,13 +173,20 @@ class GroqTTSService(TTSService):
         logger.debug(f"{self}: Generating TTS [{text}]")
         measuring_ttfb = True
         try:
+            model = assert_given(self._settings.model)
+            voice = assert_given(self._settings.voice)
+            speed = assert_given(self._settings.speed)
+            if model is None:
+                raise ValueError("Groq TTS model must be specified")
+            if speed is None:
+                raise ValueError("Groq TTS speed must be specified")
             response = await self._client.audio.speech.create(
-                model=self._settings.model,
-                voice=self._settings.voice,
+                model=model,
+                voice=voice,
                 response_format=self._output_format,
                 # Note: as of 2026-02-25, only a speed of 1.0 is supported, but
                 # here we pass it for completeness and future-proofing
-                speed=self._settings.speed,
+                speed=speed,
                 input=text,
             )
 

@@ -11,8 +11,9 @@ Speech SDK for real-time audio transcription.
 """
 
 import asyncio
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass
-from typing import Any, AsyncGenerator, Optional
+from typing import Any
 
 from loguru import logger
 
@@ -26,7 +27,7 @@ from pipecat.frames.frames import (
     TranscriptionFrame,
 )
 from pipecat.services.azure.common import language_to_azure_language
-from pipecat.services.settings import STTSettings
+from pipecat.services.settings import STTSettings, assert_given
 from pipecat.services.stt_latency import AZURE_TTFS_P99
 from pipecat.services.stt_service import STTService
 from pipecat.transcriptions.language import Language
@@ -73,13 +74,13 @@ class AzureSTTService(STTService):
         self,
         *,
         api_key: str,
-        region: Optional[str] = None,
-        language: Optional[Language] = Language.EN_US,
-        sample_rate: Optional[int] = None,
-        private_endpoint: Optional[str] = None,
-        endpoint_id: Optional[str] = None,
-        settings: Optional[Settings] = None,
-        ttfs_p99_latency: Optional[float] = AZURE_TTFS_P99,
+        region: str | None = None,
+        language: Language | None = Language.EN_US,
+        sample_rate: int | None = None,
+        private_endpoint: str | None = None,
+        endpoint_id: str | None = None,
+        settings: Settings | None = None,
+        ttfs_p99_latency: float | None = AZURE_TTFS_P99,
         **kwargs,
     ):
         """Initialize the Azure STT service.
@@ -127,9 +128,9 @@ class AzureSTTService(STTService):
             **kwargs,
         )
 
-        recognition_language = default_settings.language or language_to_azure_language(
-            Language.EN_US
-        )
+        recognition_language = assert_given(
+            default_settings.language
+        ) or language_to_azure_language(Language.EN_US)
 
         if not region and not private_endpoint:
             raise ValueError("Either 'region' or 'private_endpoint' must be provided.")
@@ -165,7 +166,7 @@ class AzureSTTService(STTService):
         """
         return True
 
-    def language_to_service_language(self, language: Language) -> Optional[str]:
+    def language_to_service_language(self, language: Language) -> str | None:
         """Convert a Language enum to Azure service-specific language code.
 
         Args:
@@ -190,7 +191,7 @@ class AzureSTTService(STTService):
 
         return changed
 
-    async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame, None]:
+    async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame | None, None]:
         """Process audio data for speech-to-text conversion.
 
         Feeds audio data to the Azure speech recognizer for processing.
@@ -272,14 +273,16 @@ class AzureSTTService(STTService):
 
     @traced_stt
     async def _handle_transcription(
-        self, transcript: str, is_final: bool, language: Optional[Language] = None
+        self, transcript: str, is_final: bool, language: Language | None = None
     ):
         """Handle a transcription result with tracing."""
         await self.stop_processing_metrics()
 
     def _on_handle_recognized(self, event):
         if event.result.reason == ResultReason.RecognizedSpeech and len(event.result.text) > 0:
-            language = getattr(event.result, "language", None) or self._settings.language
+            language = getattr(event.result, "language", None) or assert_given(
+                self._settings.language
+            )
             frame = TranscriptionFrame(
                 event.result.text,
                 self._user_id,
@@ -294,7 +297,9 @@ class AzureSTTService(STTService):
 
     def _on_handle_recognizing(self, event):
         if event.result.reason == ResultReason.RecognizingSpeech and len(event.result.text) > 0:
-            language = getattr(event.result, "language", None) or self._settings.language
+            language = getattr(event.result, "language", None) or assert_given(
+                self._settings.language
+            )
             frame = InterimTranscriptionFrame(
                 event.result.text,
                 self._user_id,

@@ -11,8 +11,8 @@ for image analysis and description generation.
 """
 
 import asyncio
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass
-from typing import AsyncGenerator, Optional
 
 from loguru import logger
 from PIL import Image
@@ -25,7 +25,7 @@ from pipecat.frames.frames import (
     VisionFullResponseStartFrame,
     VisionTextFrame,
 )
-from pipecat.services.settings import VisionSettings
+from pipecat.services.settings import VisionSettings, assert_given
 from pipecat.services.vision_service import VisionService
 
 try:
@@ -85,10 +85,10 @@ class MoondreamService(VisionService):
     def __init__(
         self,
         *,
-        model: Optional[str] = None,
+        model: str | None = None,
         revision="2025-01-09",
         use_cpu=False,
-        settings: Optional[Settings] = None,
+        settings: Settings | None = None,
         **kwargs,
     ):
         """Initialize the Moondream service.
@@ -127,8 +127,11 @@ class MoondreamService(VisionService):
 
         logger.debug("Loading Moondream model...")
 
+        model_path = assert_given(self._settings.model)
+        if model_path is None:
+            raise ValueError("Moondream model must be specified")
         self._model = AutoModelForCausalLM.from_pretrained(
-            self._settings.model,
+            model_path,
             trust_remote_code=True,
             revision=revision,
             device_map={"": device},
@@ -149,7 +152,7 @@ class MoondreamService(VisionService):
 
         logger.debug(f"Analyzing image (bytes length: {len(frame.image)})")
 
-        def get_image_description(image_bytes: bytes, text: Optional[str]) -> str:
+        def get_image_description(image_bytes: bytes, text: str | None) -> str:
             image = Image.frombytes(frame.format, frame.size, image_bytes)
             image_embeds = self._model.encode_image(image)
             description = self._model.query(image_embeds, text)["answer"]

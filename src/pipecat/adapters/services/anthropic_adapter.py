@@ -9,7 +9,7 @@
 import copy
 import json
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, TypedDict
+from typing import Any, TypedDict, TypeGuard, TypeVar
 
 from anthropic import NOT_GIVEN, NotGiven
 from anthropic.types.message_param import MessageParam
@@ -26,13 +26,36 @@ from pipecat.processors.aggregators.llm_context import (
     LLMStandardMessage,
 )
 
+_T = TypeVar("_T")
+
+
+def is_given(value: _T | NotGiven) -> TypeGuard[_T]:
+    """Check whether a value was explicitly provided.
+
+    Typically used when checking whether a parameter or field typed with
+    Anthropic's ``NotGiven`` was set::
+
+        if is_given(system):
+            ...
+
+    Also acts as a type guard: inside a true branch, the value is narrowed
+    to exclude ``NotGiven`` (e.g. ``str | NotGiven`` becomes ``str``).
+
+    Args:
+        value: The value to check.
+
+    Returns:
+        ``True`` if *value* is anything other than ``NOT_GIVEN``.
+    """
+    return not isinstance(value, NotGiven)
+
 
 class AnthropicLLMInvocationParams(TypedDict):
     """Context-based parameters for invoking Anthropic's LLM API."""
 
     system: str | NotGiven
-    messages: List[MessageParam]
-    tools: List[ToolUnionParam]
+    messages: list[MessageParam]
+    tools: list[ToolUnionParam]
 
 
 class AnthropicLLMAdapter(BaseLLMAdapter[AnthropicLLMInvocationParams]):
@@ -51,7 +74,7 @@ class AnthropicLLMAdapter(BaseLLMAdapter[AnthropicLLMInvocationParams]):
         self,
         context: LLMContext,
         enable_prompt_caching: bool,
-        system_instruction: Optional[str] = None,
+        system_instruction: str | None = None,
     ) -> AnthropicLLMInvocationParams:
         """Get Anthropic-specific LLM invocation parameters from a universal LLM context.
 
@@ -68,7 +91,7 @@ class AnthropicLLMAdapter(BaseLLMAdapter[AnthropicLLMInvocationParams]):
             self.get_messages(context), system_instruction=system_instruction
         )
         system = self._resolve_system_instruction(
-            converted.system if converted.system is not NOT_GIVEN else None,
+            converted.system if is_given(converted.system) else None,
             system_instruction,
             discard_context_system=True,
         )
@@ -83,7 +106,7 @@ class AnthropicLLMAdapter(BaseLLMAdapter[AnthropicLLMInvocationParams]):
             "tools": self.from_standard_tools(context.tools) or [],
         }
 
-    def get_messages_for_logging(self, context: LLMContext) -> List[Dict[str, Any]]:
+    def get_messages_for_logging(self, context: LLMContext) -> list[dict[str, Any]]:
         """Get messages from a universal LLM context in a format ready for logging about Anthropic.
 
         Removes or truncates sensitive data like image content for safe logging.
@@ -115,14 +138,14 @@ class AnthropicLLMAdapter(BaseLLMAdapter[AnthropicLLMInvocationParams]):
     class ConvertedMessages:
         """Container for Anthropic-formatted messages converted from universal context."""
 
-        messages: List[MessageParam]
+        messages: list[MessageParam]
         system: str | NotGiven
 
     def _from_universal_context_messages(
         self,
-        universal_context_messages: List[LLMContextMessage],
+        universal_context_messages: list[LLMContextMessage],
         *,
-        system_instruction: Optional[str] = None,
+        system_instruction: str | None = None,
     ) -> ConvertedMessages:
         system = NOT_GIVEN
 
@@ -333,7 +356,7 @@ class AnthropicLLMAdapter(BaseLLMAdapter[AnthropicLLMInvocationParams]):
 
         return message
 
-    def _with_cache_control_markers(self, messages: List[MessageParam]) -> List[MessageParam]:
+    def _with_cache_control_markers(self, messages: list[MessageParam]) -> list[MessageParam]:
         """Add cache control markers to messages for prompt caching.
 
         Args:
@@ -381,7 +404,7 @@ class AnthropicLLMAdapter(BaseLLMAdapter[AnthropicLLMInvocationParams]):
             return messages_with_markers
 
     @staticmethod
-    def _to_anthropic_function_format(function: FunctionSchema) -> Dict[str, Any]:
+    def _to_anthropic_function_format(function: FunctionSchema) -> dict[str, Any]:
         """Convert a single function schema to Anthropic's format.
 
         Args:
@@ -400,7 +423,7 @@ class AnthropicLLMAdapter(BaseLLMAdapter[AnthropicLLMInvocationParams]):
             },
         }
 
-    def to_provider_tools_format(self, tools_schema: ToolsSchema) -> List[Dict[str, Any]]:
+    def to_provider_tools_format(self, tools_schema: ToolsSchema) -> list[dict[str, Any]]:
         """Convert function schemas to Anthropic's function-calling format.
 
         Args:

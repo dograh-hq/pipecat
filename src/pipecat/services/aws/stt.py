@@ -14,8 +14,9 @@ import json
 import os
 import random
 import string
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass
-from typing import Any, AsyncGenerator, Optional
+from typing import Any
 
 from loguru import logger
 
@@ -29,7 +30,7 @@ from pipecat.frames.frames import (
     TranscriptionFrame,
 )
 from pipecat.services.aws.utils import build_event_message, decode_event, get_presigned_url
-from pipecat.services.settings import STTSettings
+from pipecat.services.settings import STTSettings, assert_given
 from pipecat.services.stt_latency import AWS_TRANSCRIBE_TTFS_P99
 from pipecat.services.stt_service import WebsocketSTTService
 from pipecat.transcriptions.language import Language, resolve_language
@@ -66,14 +67,14 @@ class AWSTranscribeSTTService(WebsocketSTTService):
     def __init__(
         self,
         *,
-        api_key: Optional[str] = None,
-        aws_access_key_id: Optional[str] = None,
-        aws_session_token: Optional[str] = None,
-        region: Optional[str] = None,
-        sample_rate: Optional[int] = None,
-        language: Optional[Language] = None,
-        settings: Optional[Settings] = None,
-        ttfs_p99_latency: Optional[float] = AWS_TRANSCRIBE_TTFS_P99,
+        api_key: str | None = None,
+        aws_access_key_id: str | None = None,
+        aws_session_token: str | None = None,
+        region: str | None = None,
+        sample_rate: int | None = None,
+        language: Language | None = None,
+        settings: Settings | None = None,
+        ttfs_p99_latency: float | None = AWS_TRANSCRIBE_TTFS_P99,
         **kwargs,
     ):
         """Initialize the AWS Transcribe STT service.
@@ -195,7 +196,7 @@ class AWSTranscribeSTTService(WebsocketSTTService):
         await super().cancel(frame)
         await self._disconnect()
 
-    async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame, None]:
+    async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame | None, None]:
         """Process audio data and send to AWS Transcribe.
 
         Args:
@@ -259,7 +260,7 @@ class AWSTranscribeSTTService(WebsocketSTTService):
 
             logger.debug("Connecting to AWS Transcribe WebSocket")
 
-            language_code = self._settings.language
+            language_code = assert_given(self._settings.language)
             if not language_code:
                 raise ValueError(f"Unsupported language: {language_code}")
 
@@ -496,7 +497,7 @@ class AWSTranscribeSTTService(WebsocketSTTService):
 
     @traced_stt
     async def _handle_transcription(
-        self, transcript: str, is_final: bool, language: Optional[str] = None
+        self, transcript: str, is_final: bool, language: str | None = None
     ):
         pass
 
@@ -533,20 +534,21 @@ class AWSTranscribeSTTService(WebsocketSTTService):
                             is_final = not result.get("IsPartial", True)
 
                             if transcript:
+                                language = assert_given(self._settings.language)
                                 if is_final:
                                     await self.push_frame(
                                         TranscriptionFrame(
                                             transcript,
                                             self._user_id,
                                             time_now_iso8601(),
-                                            self._settings.language,
+                                            language,
                                             result=result,
                                         )
                                     )
                                     await self._handle_transcription(
                                         transcript,
                                         is_final,
-                                        self._settings.language,
+                                        language,
                                     )
                                     await self.stop_processing_metrics()
                                 else:
@@ -555,7 +557,7 @@ class AWSTranscribeSTTService(WebsocketSTTService):
                                             transcript,
                                             self._user_id,
                                             time_now_iso8601(),
-                                            self._settings.language,
+                                            language,
                                             result=result,
                                         )
                                     )

@@ -7,9 +7,10 @@
 """Piper TTS service implementation."""
 
 import asyncio
+from collections.abc import AsyncGenerator, AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, AsyncGenerator, AsyncIterator, Optional
+from typing import Any
 
 import aiohttp
 from loguru import logger
@@ -19,7 +20,7 @@ from pipecat.frames.frames import (
     Frame,
     TTSStoppedFrame,
 )
-from pipecat.services.settings import TTSSettings
+from pipecat.services.settings import TTSSettings, assert_given
 from pipecat.services.tts_service import TTSService
 from pipecat.utils.tracing.service_decorators import traced_tts
 
@@ -53,11 +54,11 @@ class PiperTTSService(TTSService):
     def __init__(
         self,
         *,
-        voice_id: Optional[str] = None,
-        download_dir: Optional[Path] = None,
+        voice_id: str | None = None,
+        download_dir: Path | None = None,
         force_redownload: bool = False,
         use_cuda: bool = False,
-        settings: Optional[Settings] = None,
+        settings: Settings | None = None,
         **kwargs,
     ):
         """Initialize the Piper TTS service.
@@ -99,7 +100,7 @@ class PiperTTSService(TTSService):
 
         download_dir = download_dir or Path.cwd()
 
-        _voice = self._settings.voice
+        _voice = assert_given(self._settings.voice)
         model_file = f"{_voice}.onnx"
         model_path_resolved = Path(download_dir) / model_file
 
@@ -209,8 +210,8 @@ class PiperHttpTTSService(TTSService):
         *,
         base_url: str,
         aiohttp_session: aiohttp.ClientSession,
-        voice_id: Optional[str] = None,
-        settings: Optional[Settings] = None,
+        voice_id: str | None = None,
+        settings: Settings | None = None,
         **kwargs,
     ):
         """Initialize the Piper TTS service.

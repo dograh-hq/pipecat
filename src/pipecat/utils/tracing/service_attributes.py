@@ -13,6 +13,7 @@ where applicable and Pipecat-specific conventions for additional context.
 
 import json
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 # Import for type checking only
 if TYPE_CHECKING:
@@ -48,7 +49,6 @@ def _get_provider_name_from_service_name(service_name: str) -> str:
         "AzureLLMService": "az.ai.openai",
         # Google
         "GoogleLLMService": "gcp.gemini",
-        "GoogleLLMOpenAIBetaService": "gcp.gemini",
         "GoogleVertexLLMService": "gcp.vertex_ai",
         # Others
         "GrokLLMService": "xai",
@@ -70,11 +70,11 @@ def add_tts_span_attributes(
     service_name: str,
     model: str,
     voice_id: str,
-    text: Optional[str] = None,
+    text: str | None = None,
     settings: Optional["ServiceSettings"] = None,
-    character_count: Optional[int] = None,
+    character_count: int | None = None,
     operation_name: str = "tts",
-    ttfb: Optional[float] = None,
+    ttfb: float | None = None,
     **kwargs,
 ) -> None:
     """Add TTS-specific attributes to a span.
@@ -125,13 +125,13 @@ def add_stt_span_attributes(
     service_name: str,
     model: str,
     operation_name: str = "stt",
-    transcript: Optional[str] = None,
-    is_final: Optional[bool] = None,
-    language: Optional[str] = None,
-    user_id: Optional[str] = None,
+    transcript: str | None = None,
+    is_final: bool | None = None,
+    language: str | None = None,
+    user_id: str | None = None,
     settings: Optional["ServiceSettings"] = None,
     vad_enabled: bool = False,
-    ttfb: Optional[float] = None,
+    ttfb: float | None = None,
     **kwargs,
 ) -> None:
     """Add STT-specific attributes to a span.
@@ -189,13 +189,13 @@ def add_llm_span_attributes(
     service_name: str,
     model: str,
     stream: bool = True,
-    messages: Optional[Dict[str, Any] | str] = None,
-    tools: Optional[Dict[str, Any] | str] = None,
-    output: Optional[str] = None,
-    tool_choice: Optional[str] = None,
-    parameters: Optional[Dict[str, Any]] = None,
-    extra_parameters: Optional[Dict[str, Any]] = None,
-    ttfb: Optional[float] = None,
+    messages: Dict[str, Any] | str | None = None,
+    tools: Dict[str, Any] | str | None = None,
+    output: str | None = None,
+    tool_choice: str | None = None,
+    parameters: Dict[str, Any] | None = None,
+    extra_parameters: dict[str, Any] | None = None,
+    ttfb: float | None = None,
     **kwargs,
 ) -> None:
     """Add LLM-specific attributes to a span.
@@ -277,16 +277,16 @@ def add_gemini_live_span_attributes(
     service_name: str,
     model: str,
     operation_name: str,
-    voice_id: Optional[str] = None,
-    language: Optional[str] = None,
-    modalities: Optional[str] = None,
+    voice_id: str | None = None,
+    language: str | None = None,
+    modalities: str | None = None,
     settings: Optional["ServiceSettings"] = None,
-    tools: Optional[List[Dict]] = None,
-    tools_serialized: Optional[str] = None,
-    transcript: Optional[str] = None,
-    is_input: Optional[bool] = None,
-    text_output: Optional[str] = None,
-    audio_data_size: Optional[int] = None,
+    tools: list[dict] | None = None,
+    tools_serialized: str | None = None,
+    transcript: str | None = None,
+    is_input: bool | None = None,
+    text_output: str | None = None,
+    audio_data_size: int | None = None,
     **kwargs,
 ) -> None:
     """Add Gemini Live specific attributes to a span.
@@ -382,14 +382,14 @@ def add_openai_realtime_span_attributes(
     service_name: str,
     model: str,
     operation_name: str,
-    session_properties: Optional[Dict[str, Any]] = None,
-    transcript: Optional[str] = None,
-    is_input: Optional[bool] = None,
-    context_messages: Optional[str] = None,
-    function_calls: Optional[List[Dict]] = None,
-    tools: Optional[List[Dict]] = None,
-    tools_serialized: Optional[str] = None,
-    audio_data_size: Optional[int] = None,
+    session_properties: dict[str, Any] | None = None,
+    transcript: str | None = None,
+    is_input: bool | None = None,
+    context_messages: str | None = None,
+    function_calls: list[dict] | None = None,
+    tools: list[dict] | None = None,
+    tools_serialized: str | None = None,
+    audio_data_size: int | None = None,
     **kwargs,
 ) -> None:
     """Add OpenAI Realtime specific attributes to a span.
@@ -437,7 +437,7 @@ def add_openai_realtime_span_attributes(
             if isinstance(tool, dict) and "name" in tool:
                 tool_names.append(tool["name"])
             elif hasattr(tool, "name"):
-                tool_names.append(tool.name)
+                tool_names.append(getattr(tool, "name"))
             elif isinstance(tool, dict) and "function" in tool and "name" in tool["function"]:
                 tool_names.append(tool["function"]["name"])
 
@@ -452,7 +452,7 @@ def add_openai_realtime_span_attributes(
         if function_calls:
             call = function_calls[0]
             if hasattr(call, "name"):
-                span.set_attribute("function_calls.first_name", call.name)
+                span.set_attribute("function_calls.first_name", getattr(call, "name"))
             elif isinstance(call, dict) and "name" in call:
                 span.set_attribute("function_calls.first_name", call["name"])
 

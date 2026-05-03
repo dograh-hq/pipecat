@@ -10,8 +10,9 @@ This module provides integration with Coqui XTTS streaming server for
 text-to-speech synthesis using local Docker deployment.
 """
 
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass
-from typing import Any, AsyncGenerator, Dict, Optional
+from typing import Any
 
 import aiohttp
 from loguru import logger
@@ -23,7 +24,7 @@ from pipecat.frames.frames import (
     StartFrame,
     TTSAudioRawFrame,
 )
-from pipecat.services.settings import TTSSettings
+from pipecat.services.settings import TTSSettings, assert_given
 from pipecat.services.tts_service import TTSService
 from pipecat.transcriptions.language import Language, resolve_language
 from pipecat.utils.tracing.service_decorators import traced_tts
@@ -36,7 +37,7 @@ from pipecat.utils.tracing.service_decorators import traced_tts
 # https://github.com/coqui-ai/xtts-streaming-server
 
 
-def language_to_xtts_language(language: Language) -> Optional[str]:
+def language_to_xtts_language(language: Language) -> str | None:
     """Convert a Language enum to XTTS language code.
 
     Args:
@@ -89,12 +90,12 @@ class XTTSService(TTSService):
     def __init__(
         self,
         *,
-        voice_id: Optional[str] = None,
+        voice_id: str | None = None,
         base_url: str,
         aiohttp_session: aiohttp.ClientSession,
         language: Language = Language.EN,
-        sample_rate: Optional[int] = None,
-        settings: Optional[Settings] = None,
+        sample_rate: int | None = None,
+        settings: Settings | None = None,
         **kwargs,
     ):
         """Initialize the XTTS service.
@@ -149,7 +150,7 @@ class XTTSService(TTSService):
         # Init-only fields (not runtime-updatable)
         self._base_url = base_url
 
-        self._studio_speakers: Optional[Dict[str, Any]] = None
+        self._studio_speakers: dict[str, Any] | None = None
         self._aiohttp_session = aiohttp_session
 
         self._resampler = create_stream_resampler()
@@ -162,7 +163,7 @@ class XTTSService(TTSService):
         """
         return True
 
-    def language_to_service_language(self, language: Language) -> Optional[str]:
+    def language_to_service_language(self, language: Language) -> str | None:
         """Convert a Language enum to XTTS service language format.
 
         Args:
@@ -210,7 +211,7 @@ class XTTSService(TTSService):
             logger.error(f"{self} no studio speakers available")
             return
 
-        embeddings = self._studio_speakers[self._settings.voice]
+        embeddings = self._studio_speakers[assert_given(self._settings.voice)]
 
         url = self._base_url + "/tts_stream"
 

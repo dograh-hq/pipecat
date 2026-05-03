@@ -8,7 +8,6 @@
 
 import base64
 import json
-from typing import Optional
 
 from loguru import logger
 
@@ -48,10 +47,10 @@ class ExotelFrameSerializer(FrameSerializer):
         """
 
         exotel_sample_rate: int = 8000
-        sample_rate: Optional[int] = None
+        sample_rate: int | None = None
 
     def __init__(
-        self, stream_sid: str, call_sid: Optional[str] = None, params: Optional[InputParams] = None
+        self, stream_sid: str, call_sid: str | None = None, params: InputParams | None = None
     ):
         """Initialize the ExotelFrameSerializer.
 
@@ -60,7 +59,9 @@ class ExotelFrameSerializer(FrameSerializer):
             call_sid: The associated Exotel Call SID (optional, not used in this implementation).
             params: Configuration parameters.
         """
-        super().__init__(params or ExotelFrameSerializer.InputParams())
+        params = params or ExotelFrameSerializer.InputParams()
+        super().__init__(params)
+        self._params: ExotelFrameSerializer.InputParams = params
 
         self._stream_sid = stream_sid
         self._call_sid = call_sid

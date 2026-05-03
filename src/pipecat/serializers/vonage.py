@@ -7,7 +7,6 @@
 """Vonage Audio Connector WebSocket serializer for Pipecat."""
 
 import json
-from typing import Optional
 
 from loguru import logger
 
@@ -50,15 +49,15 @@ class VonageFrameSerializer(FrameSerializer):
         """
 
         vonage_sample_rate: int = 16000
-        sample_rate: Optional[int] = None
+        sample_rate: int | None = None
         auto_hang_up: bool = True
 
     def __init__(
         self,
         call_uuid: str,
-        application_id: Optional[str] = None,
-        private_key: Optional[str] = None,
-        params: Optional[InputParams] = None,
+        application_id: str | None = None,
+        private_key: str | None = None,
+        params: InputParams | None = None,
     ):
         """Initialize the VonageFrameSerializer.
 
@@ -68,7 +67,9 @@ class VonageFrameSerializer(FrameSerializer):
             private_key: Private key for JWT generation (required for call control).
             params: Configuration parameters.
         """
-        super().__init__(params or VonageFrameSerializer.InputParams())
+        params = params or VonageFrameSerializer.InputParams()
+        super().__init__(params)
+        self._params: VonageFrameSerializer.InputParams = params
 
         self._call_uuid = call_uuid
         self._application_id = application_id

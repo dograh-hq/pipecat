@@ -10,9 +10,10 @@ import base64
 import io
 import json
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from dataclasses import fields as dataclass_fields
-from typing import Any, Dict, Mapping, Optional, Type
+from typing import Any
 
 from loguru import logger
 from PIL import Image
@@ -48,21 +49,13 @@ from pipecat.frames.frames import (
 )
 from pipecat.metrics.metrics import LLMTokenUsage
 from pipecat.processors.aggregators.llm_context import LLMContext
-from pipecat.processors.aggregators.llm_response import (
-    LLMAssistantAggregatorParams,
-    LLMUserAggregatorParams,
-)
-from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
-from pipecat.processors.aggregators.openai_llm_context import (
-    OpenAILLMContext,
-    OpenAILLMContextFrame,
-)
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.llm_service import FunctionCallFromLLM, LLMService
 from pipecat.services.settings import (
     NOT_GIVEN,
     LLMSettings,
     _NotGiven,
+    assert_given,
     is_given,
 )
 from pipecat.transcriptions.language import Language
@@ -126,7 +119,7 @@ class OpenAIRealtimeLLMSettings(LLMSettings):
 
     # -- apply_update override -----------------------------------------------
 
-    def apply_update(self, delta: "OpenAIRealtimeLLMService.Settings") -> Dict[str, Any]:
+    def apply_update(self, delta: "OpenAIRealtimeLLMService.Settings") -> dict[str, Any]:
         """Merge a delta, keeping ``model``/``system_instruction`` in sync with SP.
 
         When the delta contains ``session_properties``, it **replaces** the
@@ -164,7 +157,7 @@ class OpenAIRealtimeLLMSettings(LLMSettings):
 
     @classmethod
     def from_mapping(
-        cls: Type["OpenAIRealtimeLLMService.Settings"], settings: Mapping[str, Any]
+        cls: type["OpenAIRealtimeLLMService.Settings"], settings: Mapping[str, Any]
     ) -> "OpenAIRealtimeLLMService.Settings":
         """Build a delta from a plain dict, routing SP keys into ``session_properties``.
 
@@ -175,9 +168,9 @@ class OpenAIRealtimeLLMSettings(LLMSettings):
         # Determine which keys belong to our own dataclass fields.
         own_field_names = {f.name for f in dataclass_fields(cls)} - {"extra"}
 
-        top: Dict[str, Any] = {}
-        sp_dict: Dict[str, Any] = {}
-        extra: Dict[str, Any] = {}
+        top: dict[str, Any] = {}
+        sp_dict: dict[str, Any] = {}
+        extra: dict[str, Any] = {}
 
         # Build the SP field set without instantiating (avoid __post_init__
         # cost for every from_mapping call).
@@ -219,14 +212,13 @@ class OpenAIRealtimeLLMService(LLMService):
         self,
         *,
         api_key: str,
-        model: Optional[str] = None,
+        model: str | None = None,
         base_url: str = "wss://api.openai.com/v1/realtime",
-        session_properties: Optional[events.SessionProperties] = None,
-        settings: Optional[Settings] = None,
+        session_properties: events.SessionProperties | None = None,
+        settings: Settings | None = None,
         start_audio_paused: bool = False,
         start_video_paused: bool = False,
         video_frame_detail: str = "auto",
-        send_transcription_frames: Optional[bool] = None,
         **kwargs,
     ):
         """Initialize the OpenAI Realtime LLM service.
@@ -255,26 +247,8 @@ class OpenAIRealtimeLLMService(LLMService):
                 This sets the image_detail parameter in the OpenAI Realtime API.
                 "auto" lets the model decide, "low" is faster and uses fewer tokens,
                 "high" provides more detail. Defaults to "auto".
-            send_transcription_frames: Whether to emit transcription frames.
-
-                .. deprecated:: 0.0.92
-                    This parameter is deprecated and will be removed in a future version.
-                    Transcription frames are always sent.
-
             **kwargs: Additional arguments passed to parent LLMService.
         """
-        if send_transcription_frames is not None:
-            import warnings
-
-            with warnings.catch_warnings():
-                warnings.simplefilter("always")
-                warnings.warn(
-                    "`send_transcription_frames` is deprecated and will be removed in a future version. "
-                    "Transcription frames are always sent.",
-                    DeprecationWarning,
-                    stacklevel=2,
-                )
-
         # 1. Initialize default_settings with hardcoded defaults
         default_settings = self.Settings(
             model="gpt-realtime-1.5",
@@ -297,11 +271,7 @@ class OpenAIRealtimeLLMService(LLMService):
             default_settings.model = model
 
         if session_properties is not None:
-            _warn_deprecated_param(
-                "session_properties",
-                self.Settings,
-                "session_properties",
-            )
+            self._warn_init_param_moved_to_settings("session_properties", "session_properties")
             default_settings.session_properties = session_properties
             # Sync model/instructions from the deprecated SP arg to top-level,
             # but only if the deprecated `model` arg didn't already set it.
@@ -390,12 +360,18 @@ class OpenAIRealtimeLLMService(LLMService):
 
     def _is_modality_enabled(self, modality: str) -> bool:
         """Check if a specific modality is enabled, "text" or "audio"."""
-        modalities = self._settings.session_properties.output_modalities or ["audio", "text"]
+        modalities = assert_given(self._settings.session_properties).output_modalities or [
+            "audio",
+            "text",
+        ]
         return modality in modalities
 
     def _get_enabled_modalities(self) -> list[str]:
         """Get the list of enabled modalities."""
-        modalities = self._settings.session_properties.output_modalities or ["audio", "text"]
+        modalities = assert_given(self._settings.session_properties).output_modalities or [
+            "audio",
+            "text",
+        ]
         # API only supports single modality responses: either ["text"] or ["audio"]
         if "audio" in modalities:
             return ["audio"]
@@ -467,10 +443,11 @@ class OpenAIRealtimeLLMService(LLMService):
     async def _handle_interruption(self):
         # None and False are different. Check for False. None means we're using OpenAI's
         # built-in turn detection defaults.
+        session_properties = assert_given(self._settings.session_properties)
         turn_detection_disabled = (
-            self._settings.session_properties.audio
-            and self._settings.session_properties.audio.input
-            and self._settings.session_properties.audio.input.turn_detection is False
+            session_properties.audio
+            and session_properties.audio.input
+            and session_properties.audio.input.turn_detection is False
         )
         if turn_detection_disabled:
             await self.send_client_event(events.InputAudioBufferClearEvent())
@@ -489,10 +466,11 @@ class OpenAIRealtimeLLMService(LLMService):
     async def _handle_user_stopped_speaking(self, frame):
         # None and False are different. Check for False. None means we're using OpenAI's
         # built-in turn detection defaults.
+        session_properties = assert_given(self._settings.session_properties)
         turn_detection_disabled = (
-            self._settings.session_properties.audio
-            and self._settings.session_properties.audio.input
-            and self._settings.session_properties.audio.input.turn_detection is False
+            session_properties.audio
+            and session_properties.audio.input
+            and session_properties.audio.input.turn_detection is False
         )
         if turn_detection_disabled:
             await self.send_client_event(events.InputAudioBufferCommitEvent())
@@ -564,13 +542,8 @@ class OpenAIRealtimeLLMService(LLMService):
 
         if isinstance(frame, TranscriptionFrame):
             pass
-        elif isinstance(frame, (LLMContextFrame, OpenAILLMContextFrame)):
-            context = (
-                frame.context
-                if isinstance(frame, LLMContextFrame)
-                else LLMContext.from_openai_context(frame.context)
-            )
-            await self._handle_context(context)
+        elif isinstance(frame, LLMContextFrame):
+            await self._handle_context(frame.context)
         elif isinstance(frame, InputAudioRawFrame):
             if not self._audio_input_paused:
                 await self._send_user_audio(frame)
@@ -683,12 +656,13 @@ class OpenAIRealtimeLLMService(LLMService):
         return changed
 
     async def _send_session_update(self):
-        settings = self._settings.session_properties
+        settings = assert_given(self._settings.session_properties)
         adapter: OpenAIRealtimeLLMAdapter = self.get_llm_adapter()
 
         if self._context:
             llm_invocation_params = adapter.get_llm_invocation_params(
-                self._context, system_instruction=self._settings.system_instruction
+                self._context,
+                system_instruction=assert_given(self._settings.system_instruction),
             )
 
             # tools given in the context override the tools in the session properties
@@ -844,7 +818,7 @@ class OpenAIRealtimeLLMService(LLMService):
 
     @traced_stt
     async def _handle_user_transcription(
-        self, transcript: str, is_final: bool, language: Optional[Language] = None
+        self, transcript: str, is_final: bool, language: Language | None = None
     ):
         """Handle a transcription result with tracing."""
         pass
@@ -1133,74 +1107,3 @@ class OpenAIRealtimeLLMService(LLMService):
             output=json.dumps(result, ensure_ascii=False),
         )
         await self.send_client_event(events.ConversationItemCreateEvent(item=item))
-
-    def create_context_aggregator(
-        self,
-        context: OpenAILLMContext,
-        *,
-        user_params: LLMUserAggregatorParams = LLMUserAggregatorParams(),
-        assistant_params: LLMAssistantAggregatorParams = LLMAssistantAggregatorParams(),
-    ) -> LLMContextAggregatorPair:
-        """Create an instance of OpenAIContextAggregatorPair from an OpenAILLMContext.
-
-        NOTE: this method exists only for backward compatibility. New code
-        should instead do::
-
-            context = LLMContext(...)
-            context_aggregator = LLMContextAggregatorPair(context)
-
-        Constructor keyword arguments for both the user and assistant aggregators can be provided.
-
-        Args:
-            context: The LLM context.
-            user_params: User aggregator parameters.
-            assistant_params: Assistant aggregator parameters.
-
-        Returns:
-            OpenAIContextAggregatorPair: A pair of context aggregators, one for
-            the user and one for the assistant, encapsulated in an
-            OpenAIContextAggregatorPair.
-
-        .. deprecated:: 0.0.99
-            `create_context_aggregator()` is deprecated and will be removed in a future version.
-            Use the universal `LLMContext` and `LLMContextAggregatorPair` instead.
-            See `OpenAILLMContext` docstring for migration guide.
-        """
-        # Log warning about transcription frame direction change in 0.0.92.
-        # We're putting this warning here rather than in the constructor so
-        # that it shows up for folks who haven't updated their code at all
-        # since 0.0.92, gives them a way to acknowledge and dismiss the
-        # warning, and encourages adoption of a new preferred pattern.
-        logger.warning(
-            "As of version 0.0.92, TranscriptionFrames and InterimTranscriptionFrames "
-            "now go upstream from OpenAIRealtimeLLMService, so if you're using "
-            "TranscriptProcessor, say, you'll want to adjust accordingly:\n\n"
-            "pipeline = Pipeline(\n"
-            "  [\n"
-            "    transport.input(),\n"
-            "    context_aggregator.user(),\n\n"
-            "    # BEFORE\n"
-            "    llm,\n"
-            "    transcript.user(),\n\n"
-            "    # AFTER\n"
-            "    transcript.user(),\n"
-            "    llm,\n\n"
-            "    transport.output(),\n"
-            "    transcript.assistant(),\n"
-            "    context_aggregator.assistant(),\n"
-            "  ]\n"
-            ")\n\n"
-            "Also, LLMTextFrames are no longer pushed from "
-            "OpenAIRealtimeLLMService when it's configured with "
-            "output_modalities=['audio']. Listen for TTSTextFrames instead.\n\n"
-            "Once you've made the appropriate changes (if needed), you can "
-            "dismiss this warning by updating to the new context-setup pattern:\n\n"
-            "  context = LLMContext(messages, tools)\n"
-            "  context_aggregator = LLMContextAggregatorPair(context)\n"
-        )
-        # from_openai_context handles deprecation warning already
-        context = LLMContext.from_openai_context(context)
-        assistant_params.expect_stripped_words = False
-        return LLMContextAggregatorPair(
-            context, user_params=user_params, assistant_params=assistant_params
-        )

@@ -6,23 +6,22 @@
 
 """Base classes for Large Language Model services with function calling support."""
 
+from __future__ import annotations
+
 import asyncio
-import inspect
+import json
+import uuid
 import warnings
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import (
     Any,
-    Awaitable,
-    Callable,
-    Dict,
-    Mapping,
-    Optional,
     Protocol,
-    Sequence,
-    Type,
 )
 
 from loguru import logger
+from websockets.exceptions import ConnectionClosed
+from websockets.protocol import State
 
 from pipecat.adapters.base_llm_adapter import BaseLLMAdapter
 from pipecat.adapters.schemas.direct_function import DirectFunction, DirectFunctionWrapper
@@ -30,6 +29,7 @@ from pipecat.adapters.services.open_ai_adapter import OpenAILLMAdapter
 from pipecat.frames.frames import (
     CancelFrame,
     EndFrame,
+    ErrorFrame,
     Frame,
     FunctionCallCancelFrame,
     FunctionCallFromLLM,
@@ -46,21 +46,21 @@ from pipecat.frames.frames import (
     LLMTextFrame,
     LLMUpdateSettingsFrame,
     StartFrame,
-    UserImageRequestFrame,
 )
 from pipecat.processors.aggregators.llm_context import (
     LLMContext,
     LLMSpecificMessage,
 )
-from pipecat.processors.aggregators.llm_response import (
-    LLMAssistantAggregatorParams,
-    LLMUserAggregatorParams,
-)
-from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
-from pipecat.processors.frame_processor import FrameDirection
+from pipecat.processors.frame_processor import FrameDirection, FrameProcessorSetup
 from pipecat.services.ai_service import AIService
-from pipecat.services.settings import LLMSettings
+from pipecat.services.settings import LLMSettings, assert_given
+from pipecat.services.websocket_service import WebsocketService
 from pipecat.turns.user_turn_completion_mixin import UserTurnCompletionLLMServiceMixin
+from pipecat.utils.async_tool_cancellation import (
+    ASYNC_TOOL_CANCELLATION_INSTRUCTIONS,
+    CANCEL_ASYNC_TOOL_NAME,
+    CANCEL_ASYNC_TOOL_SCHEMA,
+)
 from pipecat.utils.context.llm_context_summarization import (
     DEFAULT_SUMMARIZATION_TIMEOUT,
     LLMContextSummarizationUtil,
@@ -74,17 +74,21 @@ FunctionCallHandler = Callable[["FunctionCallParams"], Awaitable[None]]
 class FunctionCallResultCallback(Protocol):
     """Protocol for function call result callbacks.
 
-    Handles the result of an LLM function call execution.
+    Used for both final results and intermediate updates. Pass
+    ``properties=FunctionCallResultProperties(is_final=False)`` to send an
+    intermediate update (only valid for async function calls registered with
+    ``cancel_on_interruption=False``).
     """
 
     async def __call__(
-        self, result: Any, *, properties: Optional[FunctionCallResultProperties] = None
+        self, result: Any, *, properties: FunctionCallResultProperties | None = None
     ) -> None:
         """Call the result callback.
 
         Args:
-            result: The result of the function call.
-            properties: Optional properties for the result.
+            result: The result of the function call, or an intermediate update.
+            properties: Optional properties. Set ``is_final=False`` to send an
+                intermediate update instead of the final result.
         """
         ...
 
@@ -99,15 +103,22 @@ class FunctionCallParams:
         arguments: The arguments for the function.
         llm: The LLMService instance being used.
         context: The LLM context.
-        result_callback: Callback to handle the result of the function call.
+        result_callback: Callback to deliver the result of the function call.
+            For async function calls (``cancel_on_interruption=False``), call
+            it with ``properties=FunctionCallResultProperties(is_final=False)``
+            to push intermediate updates before the final result.
+        tool_resources: Application-defined bag of resources (DB handles, clients,
+            state, etc.) shared across tool calls for the pipeline session. Set
+            via ``PipelineTask(..., tool_resources=...)`` and passed by reference.
     """
 
     function_name: str
     tool_call_id: str
     arguments: Mapping[str, Any]
-    llm: "LLMService"
-    context: OpenAILLMContext | LLMContext
+    llm: LLMService
+    context: LLMContext
     result_callback: FunctionCallResultCallback
+    tool_resources: Any = None
 
 
 @dataclass
@@ -120,15 +131,17 @@ class FunctionCallRegistryItem:
         function_name: The name of the function (None for catch-all handler).
         handler: The handler for processing function call parameters.
         cancel_on_interruption: Whether to cancel the call on interruption.
+            When ``False`` the call is treated as asynchronous: the LLM
+            continues the conversation immediately without waiting for the
+            result, and the result is injected later via a developer message.
         timeout_secs: Optional per-tool timeout in seconds. Overrides the global
             ``function_call_timeout_secs`` for this specific function.
     """
 
-    function_name: Optional[str]
-    handler: FunctionCallHandler | "DirectFunctionWrapper"
+    function_name: str | None
+    handler: FunctionCallHandler | DirectFunctionWrapper
     cancel_on_interruption: bool
-    handler_deprecated: bool
-    timeout_secs: Optional[float] = None
+    timeout_secs: float | None = None
 
 
 @dataclass
@@ -144,14 +157,18 @@ class FunctionCallRunnerItem:
         arguments: The arguments for the function.
         context: The LLM context.
         run_llm: Optional flag to control LLM execution after function call.
+        group_id: Shared identifier for all function calls from the same LLM
+            response batch. Used to trigger the LLM exactly once when the last
+            call in the group completes.
     """
 
     registry_item: FunctionCallRegistryItem
     function_name: str
     tool_call_id: str
     arguments: Mapping[str, Any]
-    context: OpenAILLMContext | LLMContext
-    run_llm: Optional[bool] = None
+    context: LLMContext
+    run_llm: bool | None = None
+    group_id: str | None = None
 
 
 class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
@@ -165,7 +182,10 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
 
     - on_completion_timeout: Called when an LLM completion timeout occurs
     - on_function_calls_started: Called when function calls are received and
-      execution is about to start
+      execution is about to start. Built-in tools (e.g. ``cancel_async_tool_call``)
+      are excluded from this event.
+    - on_function_calls_cancelled: Called after one or more async tool calls are
+      cancelled.
 
     Example::
 
@@ -174,21 +194,27 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
             logger.warning("LLM completion timed out")
 
         @task.event_handler("on_function_calls_started")
-        async def on_function_calls_started(service, function_calls):
+        async def on_function_calls_started(service, function_calls: List[FunctionCallFromLLM]):
             logger.info(f"Starting {len(function_calls)} function calls")
+
+        @task.event_handler("on_function_calls_cancelled")
+        async def on_function_calls_cancelled(service, function_calls: List[FunctionCallFromLLM]):
+            logger.info(f"Cancelled {len(function_calls)} function calls")
     """
 
     _settings: LLMSettings
 
     # OpenAILLMAdapter is used as the default adapter since it aligns with most LLM implementations.
     # However, subclasses should override this with a more specific adapter when necessary.
-    adapter_class: Type[BaseLLMAdapter] = OpenAILLMAdapter
+    adapter_class: type[BaseLLMAdapter] = OpenAILLMAdapter
 
     def __init__(
         self,
         run_in_parallel: bool = True,
-        function_call_timeout_secs: float = 10.0,
-        settings: Optional[LLMSettings] = None,
+        group_parallel_tools: bool = True,
+        function_call_timeout_secs: float | None = None,
+        enable_async_tool_cancellation: bool = False,
+        settings: LLMSettings | None = None,
         **kwargs,
     ):
         """Initialize the LLM service.
@@ -196,8 +222,16 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
         Args:
             run_in_parallel: Whether to run function calls in parallel or sequentially.
                 Defaults to True.
-            function_call_timeout_secs: Timeout in seconds for deferred function calls.
-                Defaults to 10.0 seconds.
+            group_parallel_tools: Whether to group parallel function calls so the LLM
+                is triggered exactly once after all calls in the batch complete. When
+                False, each function call result triggers the LLM independently as it
+                arrives. Defaults to True.
+            function_call_timeout_secs: Optional timeout in seconds for deferred function
+                calls.
+            enable_async_tool_cancellation: When True and at least one async function
+                (``cancel_on_interruption=False``) is registered, automatically injects
+                the ``cancel_async_tool_call`` built-in tool and its system instructions
+                so the LLM can cancel stale in-progress calls. Defaults to False.
             settings: The runtime-updatable settings for the LLM service.
             **kwargs: Additional arguments passed to the parent AIService.
 
@@ -210,18 +244,22 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
             **kwargs,
         )
         self._run_in_parallel = run_in_parallel
+        self._group_parallel_tools = group_parallel_tools
         self._function_call_timeout_secs = function_call_timeout_secs
+        self._enable_async_tool_cancellation: bool = enable_async_tool_cancellation
         self._filter_incomplete_user_turns: bool = False
-        self._base_system_instruction: Optional[str] = None
-        self._start_callbacks = {}
+        self._async_tool_cancellation_enabled: bool = False
+        self._base_system_instruction: str | None = None
         self._adapter = self.adapter_class()
-        self._functions: Dict[Optional[str], FunctionCallRegistryItem] = {}
-        self._function_call_tasks: Dict[Optional[asyncio.Task], FunctionCallRunnerItem] = {}
-        self._sequential_runner_task: Optional[asyncio.Task] = None
-        self._skip_tts: Optional[bool] = None
-        self._summary_task: Optional[asyncio.Task] = None
+        self._functions: dict[str | None, FunctionCallRegistryItem] = {}
+        self._function_call_tasks: dict[asyncio.Task | None, FunctionCallRunnerItem] = {}
+        self._sequential_runner_task: asyncio.Task | None = None
+        self._skip_tts: bool | None = None
+        self._summary_task: asyncio.Task | None = None
+        self._tool_resources: Any = None
 
         self._register_event_handler("on_function_calls_started")
+        self._register_event_handler("on_function_calls_cancelled")
         self._register_event_handler("on_completion_timeout")
 
     def get_llm_adapter(self) -> BaseLLMAdapter:
@@ -245,10 +283,10 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
 
     async def run_inference(
         self,
-        context: LLMContext | OpenAILLMContext,
-        max_tokens: Optional[int] = None,
-        system_instruction: Optional[str] = None,
-    ) -> Optional[str]:
+        context: LLMContext,
+        max_tokens: int | None = None,
+        system_instruction: str | None = None,
+    ) -> str | None:
         """Run a one-shot, out-of-band (i.e. out-of-pipeline) inference with the given LLM context.
 
         Must be implemented by subclasses.
@@ -265,40 +303,14 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
         """
         raise NotImplementedError(f"run_inference() not supported by {self.__class__.__name__}")
 
-    def create_context_aggregator(
-        self,
-        context: OpenAILLMContext,
-        *,
-        user_params: LLMUserAggregatorParams = LLMUserAggregatorParams(),
-        assistant_params: LLMAssistantAggregatorParams = LLMAssistantAggregatorParams(),
-    ) -> Any:
-        """Create a context aggregator for managing LLM conversation context.
-
-        Must be implemented by subclasses.
+    async def setup(self, setup: FrameProcessorSetup):
+        """Set up the LLM service.
 
         Args:
-            context: The LLM context to create an aggregator for.
-            user_params: Parameters for user message aggregation.
-            assistant_params: Parameters for assistant message aggregation.
-
-        Returns:
-            A context aggregator instance.
-
-        .. deprecated:: 0.0.99
-            `create_context_aggregator()` is deprecated and will be removed in a future version.
-            Use the universal `LLMContext` and `LLMContextAggregatorPair` instead.
-            See `OpenAILLMContext` docstring for migration guide.
+            setup: The frame processor setup data.
         """
-        with warnings.catch_warnings():
-            warnings.simplefilter("always")
-            warnings.warn(
-                "create_context_aggregator() is deprecated and will be removed in a future version. "
-                "Use the universal LLMContext and LLMContextAggregatorPair directly instead. "
-                "See OpenAILLMContext docstring for migration guide.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-        pass
+        await super().setup(setup)
+        self._tool_resources = setup.tool_resources
 
     async def start(self, frame: StartFrame):
         """Start the LLM service.
@@ -309,6 +321,8 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
         await super().start(frame)
         if not self._run_in_parallel:
             await self._create_sequential_runner_task()
+        if self._enable_async_tool_cancellation and self._has_async_tools():
+            self._setup_async_tool_cancellation()
 
     async def stop(self, frame: EndFrame):
         """Stop the LLM service.
@@ -333,17 +347,21 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
         await self._cancel_summary_task()
 
     def _compose_system_instruction(self):
-        """Compose system_instruction by appending turn completion instructions.
+        """Compose system_instruction from the base and all active addon instructions.
 
         Combines the base system instruction with turn completion instructions
-        and writes the result to ``self._settings.system_instruction``.
+        (when enabled) and async tool cancellation instructions (when enabled),
+        writing the result to ``self._settings.system_instruction``.
         """
         base = self._base_system_instruction
-        completion_instructions = self._user_turn_completion_config.completion_instructions
-        if base:
-            self._settings.system_instruction = f"{base}\n\n{completion_instructions}"
-        else:
-            self._settings.system_instruction = completion_instructions
+        parts = [base] if base else []
+        if self._filter_incomplete_user_turns:
+            parts.append(self._user_turn_completion_config.completion_instructions)
+        if self._async_tool_cancellation_enabled:
+            parts.append(ASYNC_TOOL_CANCELLATION_INSTRUCTIONS)
+        composed = "\n\n".join(p for p in parts if p)
+        self._settings.system_instruction = composed or None
+        logger.debug(f"{self}: System instruction composed: {self._settings.system_instruction}")
 
     async def _update_settings(self, delta: LLMSettings) -> dict[str, Any]:
         """Apply a settings delta, handling turn-completion fields.
@@ -374,15 +392,17 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
                 self._base_system_instruction = None
 
         if "user_turn_completion_config" in changed and self._filter_incomplete_user_turns:
-            self.set_user_turn_completion_config(self._settings.user_turn_completion_config)
+            self.set_user_turn_completion_config(
+                assert_given(self._settings.user_turn_completion_config)
+            )
             self._compose_system_instruction()
 
         if (
             "system_instruction" in changed
-            and self._filter_incomplete_user_turns
+            and (self._filter_incomplete_user_turns or self._async_tool_cancellation_enabled)
             and "filter_incomplete_user_turns" not in changed
         ):
-            # system_instruction changed while turn completion is active.
+            # system_instruction changed while composition is active.
             # Treat the new value as the new base and recompose.
             self._base_system_instruction = self._settings.system_instruction
             self._compose_system_instruction()
@@ -487,7 +507,7 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
                 self._generate_summary(frame),
                 timeout=timeout,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             await self.push_error(error_msg=f"Context summarization timed out after {timeout}s")
         except Exception as e:
             error = f"Error generating context summary: {e}"
@@ -572,12 +592,11 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
 
     def register_function(
         self,
-        function_name: Optional[str],
+        function_name: str | None,
         handler: Any,
-        start_callback=None,
         *,
         cancel_on_interruption: bool = True,
-        timeout_secs: Optional[float] = None,
+        timeout_secs: float | None = None,
     ):
         """Register a function handler for LLM function calls.
 
@@ -586,55 +605,35 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
                 all function calls with a catch-all handler.
             handler: The function handler. Should accept a single FunctionCallParams
                 parameter.
-            start_callback: Legacy callback function (deprecated). Put initialization
-                code at the top of your handler instead.
-
-                .. deprecated:: 0.0.59
-                    The `start_callback` parameter is deprecated and will be removed in a future version.
-
             cancel_on_interruption: Whether to cancel this function call when an
-                interruption occurs. Defaults to True.
+                interruption occurs. When ``False`` the call is treated as
+                asynchronous: the LLM continues the conversation immediately
+                without waiting for the result, and the result is injected later
+                via a developer message. Defaults to True.
             timeout_secs: Optional per-tool timeout in seconds. Overrides the global
                 ``function_call_timeout_secs`` for this specific function. Defaults to
                 None, which uses the global timeout.
         """
-        signature = inspect.signature(handler)
-        handler_deprecated = len(signature.parameters) > 1
-        if handler_deprecated:
-            with warnings.catch_warnings():
-                warnings.simplefilter("always")
-                warnings.warn(
-                    "Function calls with parameters `(function_name, tool_call_id, arguments, llm, context, result_callback)` are deprecated, use a single `FunctionCallParams` parameter instead.",
-                    DeprecationWarning,
-                )
-
+        if function_name == CANCEL_ASYNC_TOOL_NAME:
+            raise ValueError(
+                f"'{CANCEL_ASYNC_TOOL_NAME}' is a reserved built-in tool name and cannot be "
+                "registered by user code."
+            )
         # Registering a function with the function_name set to None will run
         # that handler for all functions
         self._functions[function_name] = FunctionCallRegistryItem(
             function_name=function_name,
             handler=handler,
             cancel_on_interruption=cancel_on_interruption,
-            handler_deprecated=handler_deprecated,
             timeout_secs=timeout_secs,
         )
-
-        # Start callbacks are now deprecated.
-        if start_callback:
-            with warnings.catch_warnings():
-                warnings.simplefilter("always")
-                warnings.warn(
-                    "Parameter 'start_callback' is deprecated, just put your code on top of the actual function call instead.",
-                    DeprecationWarning,
-                )
-
-            self._start_callbacks[function_name] = start_callback
 
     def register_direct_function(
         self,
         handler: DirectFunction,
         *,
         cancel_on_interruption: bool = True,
-        timeout_secs: Optional[float] = None,
+        timeout_secs: float | None = None,
     ):
         """Register a direct function handler for LLM function calls.
 
@@ -645,29 +644,36 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
         Args:
             handler: The direct function to register. Must follow DirectFunction protocol.
             cancel_on_interruption: Whether to cancel this function call when an
-                interruption occurs. Defaults to True.
+                interruption occurs. When ``False`` the call is treated as
+                asynchronous: the LLM continues the conversation immediately
+                without waiting for the result, and the result is injected later
+                via a developer message. Defaults to True.
             timeout_secs: Optional per-tool timeout in seconds. Overrides the global
                 ``function_call_timeout_secs`` for this specific function. Defaults to
                 None, which uses the global timeout.
         """
         wrapper = DirectFunctionWrapper(handler)
+        if wrapper.name == CANCEL_ASYNC_TOOL_NAME:
+            raise ValueError(
+                f"'{CANCEL_ASYNC_TOOL_NAME}' is a reserved built-in tool name and cannot be "
+                "registered by user code."
+            )
         self._functions[wrapper.name] = FunctionCallRegistryItem(
             function_name=wrapper.name,
             handler=wrapper,
             cancel_on_interruption=cancel_on_interruption,
-            handler_deprecated=False,
             timeout_secs=timeout_secs,
         )
 
-    def unregister_function(self, function_name: Optional[str]):
+    def unregister_function(self, function_name: str | None):
         """Remove a registered function handler.
 
         Args:
             function_name: The name of the function handler to remove.
         """
         del self._functions[function_name]
-        if function_name in self._start_callbacks:
-            del self._start_callbacks[function_name]
+        if self._async_tool_cancellation_enabled and not self._has_async_tools():
+            self._teardown_async_tool_cancellation()
 
     def unregister_direct_function(self, handler: Any):
         """Remove a registered direct function handler.
@@ -678,6 +684,8 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
         wrapper = DirectFunctionWrapper(handler)
         del self._functions[wrapper.name]
         # Note: no need to remove start callback here, as direct functions don't support start callbacks.
+        if self._async_tool_cancellation_enabled and not self._has_async_tools():
+            self._teardown_async_tool_cancellation()
 
     def has_function(self, function_name: str):
         """Check if a function handler is registered.
@@ -705,9 +713,19 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
         if len(function_calls) == 0:
             return
 
-        await self._call_event_handler("on_function_calls_started", function_calls)
+        # Exclude the built-in cancel tool — it's an internal mechanism and
+        # should not be surfaced to user-facing event handlers or frames.
+        user_visible_calls = [
+            fc for fc in function_calls if fc.function_name != CANCEL_ASYNC_TOOL_NAME
+        ]
+        if user_visible_calls:
+            await self._call_event_handler("on_function_calls_started", user_visible_calls)
+            await self.broadcast_frame(FunctionCallsStartedFrame, function_calls=user_visible_calls)
 
-        await self.broadcast_frame(FunctionCallsStartedFrame, function_calls=function_calls)
+        # When group_parallel_tools is True all calls share a group_id so the
+        # aggregator triggers the LLM exactly once after the last one completes.
+        # When False, group_id is None and each result triggers inference independently.
+        group_id = str(uuid.uuid4()) if self._group_parallel_tools else None
 
         runner_items = []
         for function_call in function_calls:
@@ -719,29 +737,7 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
                 logger.warning(
                     f"{self} is calling '{function_call.function_name}', but it's not registered."
                 )
-                # Broadcast in-progress + result so the mute strategy can
-                # track and then release the tool_call_id (prevents permanent
-                # user mute when FunctionCallUserMuteStrategy is active).
-                await self.broadcast_frame(
-                    FunctionCallInProgressFrame,
-                    function_name=function_call.function_name,
-                    tool_call_id=function_call.tool_call_id,
-                    arguments=function_call.arguments,
-                    cancel_on_interruption=False,
-                )
-                registered = [name for name in self._functions.keys() if name is not None]
-                await self.broadcast_frame(
-                    FunctionCallResultFrame,
-                    function_name=function_call.function_name,
-                    tool_call_id=function_call.tool_call_id,
-                    arguments=function_call.arguments,
-                    result=(
-                        f"Error: function '{function_call.function_name}' is not registered. "
-                        f"Available functions: {registered}. "
-                        f"Please call one of the available functions instead."
-                    ),
-                )
-                continue
+                item = self._build_missing_function_call_registry_item(function_call.function_name)
 
             runner_items.append(
                 FunctionCallRunnerItem(
@@ -750,6 +746,7 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
                     tool_call_id=function_call.tool_call_id,
                     arguments=function_call.arguments,
                     context=function_call.context,
+                    group_id=group_id,
                 )
             )
 
@@ -757,56 +754,6 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
             await self._run_parallel_function_calls(runner_items)
         else:
             await self._run_sequential_function_calls(runner_items)
-
-    async def request_image_frame(
-        self,
-        user_id: str,
-        *,
-        function_name: Optional[str] = None,
-        tool_call_id: Optional[str] = None,
-        text_content: Optional[str] = None,
-        video_source: Optional[str] = None,
-        timeout: Optional[float] = 10.0,
-    ):
-        """Request an image from a user.
-
-        Pushes a UserImageRequestFrame upstream to request an image from the
-        specified user. The user image can then be processed by the LLM.
-
-        Use this function from a function call if you want the LLM to process
-        the image. If you expect the image to be processed by a vision service,
-        you might want to push a UserImageRequestFrame upstream directly.
-
-        .. deprecated:: 0.0.92
-            This method is deprecated, push a `UserImageRequestFrame` instead.
-
-        Args:
-            user_id: The ID of the user to request an image from.
-            function_name: Optional function name associated with the request.
-            tool_call_id: Optional tool call ID associated with the request.
-            text_content: Optional text content/context for the image request.
-            video_source: Optional video source identifier.
-            timeout: Optional timeout for the requested image to be added to the LLM context.
-
-        """
-        with warnings.catch_warnings():
-            warnings.simplefilter("always")
-            warnings.warn(
-                "Method `request_image_frame()` is deprecated, push a `UserImageRequestFrame` instead.",
-                DeprecationWarning,
-            )
-        await self.push_frame(
-            UserImageRequestFrame(
-                user_id=user_id,
-                text=text_content,
-                append_to_context=True,
-                function_name=function_name,
-                tool_call_id=tool_call_id,
-                # Deprecated fields below.
-                context=text_content,
-            ),
-            FrameDirection.UPSTREAM,
-        )
 
     async def _create_sequential_runner_task(self):
         if not self._sequential_runner_task:
@@ -846,28 +793,26 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
         for runner_item in runner_items:
             await self._sequential_runner_queue.put(runner_item)
 
-    async def _call_start_function(
-        self, context: OpenAILLMContext | LLMContext, function_name: str
-    ):
-        if function_name in self._start_callbacks.keys():
-            await self._start_callbacks[function_name](function_name, self, context)
-        elif None in self._start_callbacks.keys():
-            return await self._start_callbacks[None](function_name, self, context)
-
     async def _run_function_call(self, runner_item: FunctionCallRunnerItem):
+        # Re-resolve the registry item at execution time. The function may have
+        # been unregistered between queuing and execution, in which case we
+        # fall back to the missing-function handler so the call still terminates
+        # with a normal tool result.
         if runner_item.function_name in self._functions.keys():
             item = self._functions[runner_item.function_name]
         elif None in self._functions.keys():
             item = self._functions[None]
+        elif runner_item.registry_item.handler == self._missing_function_call_handler:
+            item = runner_item.registry_item
         else:
-            return
+            logger.warning(
+                f"{self} is calling '{runner_item.function_name}', but it was just unregistered."
+            )
+            item = self._build_missing_function_call_registry_item(runner_item.function_name)
 
         logger.debug(
             f"{self} Calling function [{runner_item.function_name}:{runner_item.tool_call_id}] with arguments {runner_item.arguments}"
         )
-
-        # NOTE(aleix): This needs to be removed after we remove the deprecation.
-        await self._call_start_function(runner_item.context, runner_item.function_name)
 
         # Broadcast function call in-progress. This frame will let our assistant
         # context aggregator know that we are in the middle of a function
@@ -879,14 +824,26 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
             tool_call_id=runner_item.tool_call_id,
             arguments=runner_item.arguments,
             cancel_on_interruption=item.cancel_on_interruption,
+            group_id=runner_item.group_id,
         )
 
-        timeout_task: Optional[asyncio.Task] = None
+        timeout_task: asyncio.Task | None = None
 
-        # Define a callback function that pushes a FunctionCallResultFrame upstream & downstream.
+        # Single callback for both intermediate updates and final results.
+        # Pass properties=FunctionCallResultProperties(is_final=False) for updates.
         async def function_call_result_callback(
-            result: Any, *, properties: Optional[FunctionCallResultProperties] = None
+            result: Any, *, properties: FunctionCallResultProperties | None = None
         ):
+            is_final = properties.is_final if properties else True
+            if not is_final and item.cancel_on_interruption:
+                logger.warning(
+                    f"{self} result_callback called with is_final=False on sync function call"
+                    f" [{runner_item.function_name}:{runner_item.tool_call_id}]."
+                    " Intermediate updates are only valid for async function calls"
+                    " (cancel_on_interruption=False)."
+                )
+                return
+
             nonlocal timeout_task
 
             # Cancel timeout task if it exists
@@ -906,11 +863,7 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
         # Start a timeout task for deferred function calls
         async def timeout_handler():
             try:
-                effective_timeout = (
-                    item.timeout_secs
-                    if item.timeout_secs is not None
-                    else self._function_call_timeout_secs
-                )
+                effective_timeout = item.timeout_secs or self._function_call_timeout_secs
                 await asyncio.sleep(effective_timeout)
                 logger.warning(
                     f"{self} Function call [{runner_item.function_name}:{runner_item.tool_call_id}] timed out after {effective_timeout} seconds."
@@ -921,13 +874,15 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
             except asyncio.CancelledError:
                 raise
 
-        timeout_task = self.create_task(timeout_handler())
+        if item.timeout_secs or self._function_call_timeout_secs:
+            timeout_task = self.create_task(timeout_handler())
+
+        # Yield to the event loop so the timeout task coroutine gets entered
+        # before it could be cancelled. Without this, cancelling the task before
+        # it starts would leave the coroutine in a "never awaited" state.
+        await asyncio.sleep(0)
 
         try:
-            # Yield to the event loop so the timeout task coroutine gets entered
-            # before it could be cancelled. Without this, cancelling the task before
-            # it starts would leave the coroutine in a "never awaited" state.
-            await asyncio.sleep(0)
             if isinstance(item.handler, DirectFunctionWrapper):
                 # Handler is a DirectFunctionWrapper
                 await item.handler.invoke(
@@ -939,29 +894,21 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
                         llm=self,
                         context=runner_item.context,
                         result_callback=function_call_result_callback,
+                        tool_resources=self._tool_resources,
                     ),
                 )
             else:
                 # Handler is a FunctionCallHandler
-                if item.handler_deprecated:
-                    await item.handler(
-                        runner_item.function_name,
-                        runner_item.tool_call_id,
-                        runner_item.arguments,
-                        self,
-                        runner_item.context,
-                        function_call_result_callback,
-                    )
-                else:
-                    params = FunctionCallParams(
-                        function_name=runner_item.function_name,
-                        tool_call_id=runner_item.tool_call_id,
-                        arguments=runner_item.arguments,
-                        llm=self,
-                        context=runner_item.context,
-                        result_callback=function_call_result_callback,
-                    )
-                    await item.handler(params)
+                params = FunctionCallParams(
+                    function_name=runner_item.function_name,
+                    tool_call_id=runner_item.tool_call_id,
+                    arguments=runner_item.arguments,
+                    llm=self,
+                    context=runner_item.context,
+                    result_callback=function_call_result_callback,
+                    tool_resources=self._tool_resources,
+                )
+                await item.handler(params)
         except Exception as e:
             error_message = f"Error executing function call [{runner_item.function_name}]: {e}"
             logger.error(f"{self} {error_message}")
@@ -970,8 +917,132 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
             if timeout_task and not timeout_task.done():
                 await self.cancel_task(timeout_task)
 
-    async def _cancel_function_call(self, function_name: Optional[str]):
+    def _build_missing_function_call_registry_item(
+        self, function_name: str
+    ) -> FunctionCallRegistryItem:
+        """Build a registry item that routes to the missing-function handler."""
+        return FunctionCallRegistryItem(
+            function_name=function_name,
+            handler=self._missing_function_call_handler,
+            cancel_on_interruption=True,
+        )
+
+    async def _missing_function_call_handler(self, params: FunctionCallParams):
+        """Return a terminal tool result when the LLM calls an unknown function."""
+        await params.result_callback(f"Error: function '{params.function_name}' is not registered.")
+
+    def _has_async_tools(self) -> bool:
+        """Return True if at least one non-builtin async tool is registered."""
+        return any(
+            not item.cancel_on_interruption
+            for name, item in self._functions.items()
+            if name != CANCEL_ASYNC_TOOL_NAME
+        )
+
+    def _setup_async_tool_cancellation(self):
+        """Enable async tool cancellation.
+
+        Saves the base system instruction, recomposes to include cancellation
+        instructions, registers the built-in ``cancel_async_tool_call`` handler,
+        and injects its schema into the adapter's built-in tool dict.
+        """
+        logger.debug(f"{self}: Enabling async tool cancellation")
+
+        self._async_tool_cancellation_enabled = True
+
+        if self._base_system_instruction is None:
+            self._base_system_instruction = self._settings.system_instruction
+
+        self._compose_system_instruction()
+
+        self._adapter.builtin_tools[CANCEL_ASYNC_TOOL_NAME] = CANCEL_ASYNC_TOOL_SCHEMA
+
+        if CANCEL_ASYNC_TOOL_NAME not in self._functions:
+            self._functions[CANCEL_ASYNC_TOOL_NAME] = FunctionCallRegistryItem(
+                function_name=CANCEL_ASYNC_TOOL_NAME,
+                handler=self._cancel_async_tool_call_handler,
+                cancel_on_interruption=True,
+            )
+
+    def _teardown_async_tool_cancellation(self):
+        """Disable async tool cancellation.
+
+        Removes the built-in ``cancel_async_tool_call`` handler and its schema,
+        recomposes the system instruction without cancellation instructions.
+        """
+        logger.debug(f"{self}: Disabling async tool cancellation")
+
+        self._async_tool_cancellation_enabled = False
+        self._adapter.builtin_tools.pop(CANCEL_ASYNC_TOOL_NAME, None)
+        self._functions.pop(CANCEL_ASYNC_TOOL_NAME, None)
+        self._compose_system_instruction()
+
+    async def _cancel_async_tool_call_handler(self, params: FunctionCallParams):
+        """Handle a ``cancel_async_tool_call`` invocation from the LLM.
+
+        Args:
+            params: Function call parameters containing ``tool_call_id`` to cancel.
+        """
+        logger.debug(f"{self}: cancel_async_tool_call invoked")
+
+        tool_call_id: str | None = params.arguments.get("tool_call_id")
+        if not tool_call_id:
+            logger.warning(f"{self} cancel_async_tool_call called with no tool_call_id")
+            await params.result_callback({"cancelled": None})
+            return
+
+        await self._cancel_function_calls_by_tool_call_id(tool_call_id)
+        await params.result_callback(
+            {"cancelled": tool_call_id},
+            properties=FunctionCallResultProperties(run_llm=True),
+        )
+
+    async def _cancel_function_calls_by_tool_call_id(self, tool_call_id: str):
+        """Cancel in-progress function call tasks by their tool_call_id.
+
+        Args:
+            tool_call_id: tool_call_id to cancel.
+        """
         cancelled_tasks = set()
+        cancelled_items = []
+        for task, runner_item in self._function_call_tasks.items():
+            if runner_item.tool_call_id == tool_call_id:
+                name = runner_item.function_name
+                tool_call_id = runner_item.tool_call_id
+
+                logger.debug(
+                    f"{self} Cancelling async function call [{name}:{tool_call_id}] "
+                    "by LLM request..."
+                )
+
+                if task:
+                    task.remove_done_callback(self._function_call_task_finished)
+                    await self.cancel_task(task)
+                    cancelled_tasks.add(task)
+
+                await self.broadcast_frame(
+                    FunctionCallCancelFrame, function_name=name, tool_call_id=tool_call_id
+                )
+
+                cancelled_items.append(
+                    FunctionCallFromLLM(
+                        function_name=runner_item.function_name,
+                        tool_call_id=runner_item.tool_call_id,
+                        arguments=runner_item.arguments,
+                        context=runner_item.context,
+                    )
+                )
+                logger.debug(f"{self} Async function call [{name}:{tool_call_id}] cancelled")
+
+        for task in cancelled_tasks:
+            self._function_call_task_finished(task)
+
+        if cancelled_items:
+            await self._call_event_handler("on_function_calls_cancelled", cancelled_items)
+
+    async def _cancel_function_call(self, function_name: str | None):
+        cancelled_tasks = set()
+        cancelled_items = []
         for task, runner_item in self._function_call_tasks.items():
             if runner_item.registry_item.function_name == function_name:
                 name = runner_item.function_name
@@ -991,12 +1062,210 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
                     FunctionCallCancelFrame, function_name=name, tool_call_id=tool_call_id
                 )
 
+                cancelled_items.append(
+                    FunctionCallFromLLM(
+                        function_name=runner_item.function_name,
+                        tool_call_id=runner_item.tool_call_id,
+                        arguments=runner_item.arguments,
+                        context=runner_item.context,
+                    )
+                )
                 logger.debug(f"{self} Function call [{name}:{tool_call_id}] has been cancelled")
 
         # Remove all cancelled tasks from our set.
         for task in cancelled_tasks:
             self._function_call_task_finished(task)
 
+        if cancelled_items:
+            await self._call_event_handler("on_function_calls_cancelled", cancelled_items)
+
     def _function_call_task_finished(self, task: asyncio.Task):
         if task in self._function_call_tasks:
             del self._function_call_tasks[task]
+
+
+# ---------------------------------------------------------------------------
+# WebSocket LLM service base
+# ---------------------------------------------------------------------------
+
+
+class WebsocketReconnectedError(Exception):
+    """Raised by ``_ws_send``/``_ws_recv`` after a transparent reconnection.
+
+    Signals that the WebSocket connection was lost and automatically
+    re-established.  The current inference should be restarted — any
+    connection-local state on the server (e.g. cached responses) is gone.
+    """
+
+    pass
+
+
+class WebsocketLLMService(LLMService, WebsocketService):
+    """Base class for websocket-based LLM services.
+
+    Each LLM inference is a discrete request/response exchange: send one
+    request, receive events inline until a terminal event, then wait for
+    the next frame to trigger an inference.  This contrasts with
+    ``WebsocketTTSService`` / ``WebsocketSTTService`` which stream data
+    continuously via a background receive loop
+    (``_receive_task_handler``).  This class does **not** start a
+    background receive loop.
+
+    Provides connection lifecycle management (connect on start, disconnect
+    on stop/cancel), automatic reconnection with exponential backoff, and
+    three helpers for running each inference:
+
+    1. ``_ensure_connected()`` — verify the websocket is alive, reconnect
+       with exponential backoff if not.
+    2. ``_ws_send(message)`` — send the inference request as JSON.
+    3. ``_ws_recv()`` — receive and parse response events one at a time
+       until the caller sees a terminal event.
+
+    ``_ws_send`` and ``_ws_recv`` catch ``ConnectionClosed`` transparently,
+    auto-reconnect via ``_try_reconnect``, and raise
+    ``WebsocketReconnectedError`` so callers know the inference must be
+    restarted.  If reconnection fails, the original ``ConnectionClosed``
+    propagates.
+
+    Subclasses must implement:
+        ``_connect_websocket()``: Establish the websocket connection.
+        ``_disconnect_websocket()``: Close the websocket and clean up.
+
+    Event handlers:
+        on_connection_error: Called when a websocket connection error occurs.
+
+    Example::
+
+        @llm.event_handler("on_connection_error")
+        async def on_connection_error(llm: LLMService, error: str):
+            logger.error(f"LLM connection error: {error}")
+    """
+
+    def __init__(self, *, reconnect_on_error: bool = True, **kwargs):
+        """Initialize the Websocket LLM service.
+
+        Args:
+            reconnect_on_error: Whether to automatically reconnect on websocket errors.
+            **kwargs: Additional arguments passed to parent classes.
+        """
+        LLMService.__init__(self, **kwargs)
+        WebsocketService.__init__(self, reconnect_on_error=reconnect_on_error, **kwargs)
+        self._register_event_handler("on_connection_error")
+
+    # -- lifecycle ------------------------------------------------------------
+
+    async def _connect(self):
+        """Connect: reset flags and establish the websocket."""
+        await super()._connect()
+        await self._connect_websocket()
+
+    async def _disconnect(self):
+        """Disconnect: set flags and close the websocket."""
+        await super()._disconnect()
+        await self._disconnect_websocket()
+
+    async def start(self, frame: StartFrame):
+        """Start the service and establish WebSocket connection.
+
+        Args:
+            frame: The start frame triggering service initialization.
+        """
+        await super().start(frame)
+        await self._connect()
+
+    async def stop(self, frame: EndFrame):
+        """Stop the service and close WebSocket connection.
+
+        Args:
+            frame: The end frame triggering service shutdown.
+        """
+        await super().stop(frame)
+        await self._disconnect()
+
+    async def cancel(self, frame: CancelFrame):
+        """Cancel the service and close WebSocket connection.
+
+        Args:
+            frame: The cancel frame triggering service cancellation.
+        """
+        await super().cancel(frame)
+        await self._disconnect()
+
+    # -- per-inference helpers ------------------------------------------------
+
+    async def _ws_send(self, message: dict):
+        """Send a JSON message over the websocket.
+
+        Guards against sends during intentional disconnect.  If the send
+        fails with ``ConnectionClosed``, attempts to reconnect and raises
+        ``WebsocketReconnectedError`` on success so the caller can restart
+        the inference.  If reconnection fails, the original
+        ``ConnectionClosed`` propagates.
+
+        Args:
+            message: The message dict to serialize and send.
+        """
+        if self._disconnecting or not self._websocket:
+            return
+        try:
+            await self._websocket.send(json.dumps(message))
+        except ConnectionClosed:
+            if self._disconnecting:
+                return
+            success = await self._try_reconnect(report_error=self._report_error)
+            if success:
+                raise WebsocketReconnectedError()
+            raise
+
+    async def _ws_recv(self) -> dict:
+        """Receive and parse a JSON message from the websocket.
+
+        If the receive fails with ``ConnectionClosed``, attempts to
+        reconnect and raises ``WebsocketReconnectedError`` on success.
+        If reconnection fails, the original ``ConnectionClosed``
+        propagates.
+
+        Returns:
+            The parsed JSON message as a dict.
+        """
+        try:
+            raw = await self._websocket.recv()
+            return json.loads(raw)
+        except ConnectionClosed:
+            if self._disconnecting:
+                raise
+            success = await self._try_reconnect(report_error=self._report_error)
+            if success:
+                raise WebsocketReconnectedError()
+            raise
+
+    async def _ensure_connected(self):
+        """Ensure the websocket is connected, reconnecting if needed.
+
+        Uses ``_try_reconnect`` with exponential backoff.
+
+        Raises:
+            ConnectionError: If the connection could not be established.
+        """
+        if self._websocket and self._websocket.state is not State.CLOSED:
+            return
+        success = await self._try_reconnect(report_error=self._report_error)
+        if not success:
+            raise ConnectionError(f"{self} failed to establish WebSocket connection")
+
+    # -- WebsocketService interface -------------------------------------------
+
+    async def _receive_messages(self):
+        """Not used — messages are received inline during each inference.
+
+        This satisfies the ``WebsocketService`` abstract method but is never
+        called because ``_receive_task_handler`` is never started.
+        """
+        raise NotImplementedError(
+            "WebsocketLLMService receives messages inline during inference, "
+            "not via a continuous background loop"
+        )
+
+    async def _report_error(self, error: ErrorFrame):
+        await self._call_event_handler("on_connection_error", error.error)
+        await self.push_error_frame(error)

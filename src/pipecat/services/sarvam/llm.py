@@ -6,13 +6,15 @@
 
 """Sarvam LLM service implementation using OpenAI-compatible interface."""
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Literal, Mapping, Optional
+from typing import Literal
 
 from loguru import logger
 from openai import NOT_GIVEN
 
 from pipecat.adapters.services.open_ai_adapter import OpenAILLMInvocationParams
+from pipecat.adapters.services.open_ai_adapter import is_given as openai_is_given
 from pipecat.services.openai.base_llm import OpenAILLMSettings
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.services.sarvam._sdk import sdk_headers
@@ -57,8 +59,8 @@ class SarvamLLMService(OpenAILLMService):
         *,
         api_key: str,
         base_url: str = "https://api.sarvam.ai/v1",
-        settings: Optional[Settings] = None,
-        default_headers: Optional[Mapping[str, str]] = None,
+        settings: Settings | None = None,
+        default_headers: Mapping[str, str] | None = None,
         **kwargs,
     ):
         """Initialize Sarvam LLM service.
@@ -82,7 +84,10 @@ class SarvamLLMService(OpenAILLMService):
         if settings is not None:
             default_settings.apply_update(settings)
 
-        self._validate_model(default_settings.model)
+        model = default_settings.model
+        if not isinstance(model, str):
+            raise ValueError("Sarvam LLM requires a non-empty model string.")
+        self._validate_model(model)
 
         super().__init__(
             api_key=api_key,
@@ -154,11 +159,11 @@ class SarvamLLMService(OpenAILLMService):
         tool_choice = params_from_context.get("tool_choice", NOT_GIVEN)
 
         has_tools = (
-            tools is not NOT_GIVEN
+            openai_is_given(tools)
             and tools is not None
             and (not isinstance(tools, list) or len(tools) > 0)
         )
-        has_tool_choice = tool_choice is not NOT_GIVEN and tool_choice is not None
+        has_tool_choice = openai_is_given(tool_choice) and tool_choice is not None
 
         if has_tool_choice and not has_tools:
             raise ValueError("Sarvam requires non-empty `tools` when `tool_choice` is provided.")

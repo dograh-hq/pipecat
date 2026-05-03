@@ -13,8 +13,9 @@ WebSocket API for streaming audio transcription.
 import asyncio
 import base64
 import json
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
-from typing import Any, AsyncGenerator, Optional
+from typing import Any
 
 from loguru import logger
 from pydantic import BaseModel
@@ -30,7 +31,7 @@ from pipecat.frames.frames import (
     VADUserStoppedSpeakingFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection
-from pipecat.services.settings import NOT_GIVEN, STTSettings, _NotGiven
+from pipecat.services.settings import NOT_GIVEN, STTSettings, _NotGiven, assert_given
 from pipecat.services.stt_latency import GRADIUM_TTFS_P99
 from pipecat.services.stt_service import WebsocketSTTService
 from pipecat.transcriptions.language import Language, resolve_language
@@ -78,7 +79,7 @@ def _input_format_from_encoding(encoding: str, sample_rate: int) -> str:
     return encoding
 
 
-def language_to_gradium_language(language: Language) -> Optional[str]:
+def language_to_gradium_language(language: Language) -> str | None:
     """Convert a Language enum to Gradium's language code format.
 
     Args:
@@ -109,7 +110,7 @@ class GradiumSTTSettings(STTSettings):
             Default is 10 (800ms). Lower values like 7-8 give faster response.
     """
 
-    delay_in_frames: Optional[int] | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    delay_in_frames: int | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
 
 
 class GradiumSTTService(WebsocketSTTService):
@@ -139,8 +140,8 @@ class GradiumSTTService(WebsocketSTTService):
                 Default is 10 (800ms). Lower values like 7-8 give faster response.
         """
 
-        language: Optional[Language] = None
-        delay_in_frames: Optional[int] = None
+        language: Language | None = None
+        delay_in_frames: int | None = None
 
     def __init__(
         self,
@@ -148,11 +149,11 @@ class GradiumSTTService(WebsocketSTTService):
         api_key: str,
         api_endpoint_base_url: str = "wss://eu.api.gradium.ai/api/speech/asr",
         encoding: str = "pcm",
-        sample_rate: Optional[int] = None,
-        params: Optional[InputParams] = None,
-        json_config: Optional[str] = None,
-        settings: Optional[Settings] = None,
-        ttfs_p99_latency: Optional[float] = GRADIUM_TTFS_P99,
+        sample_rate: int | None = None,
+        params: InputParams | None = None,
+        json_config: str | None = None,
+        settings: Settings | None = None,
+        ttfs_p99_latency: float | None = GRADIUM_TTFS_P99,
         **kwargs,
     ):
         """Initialize the Gradium STT service.
@@ -239,7 +240,7 @@ class GradiumSTTService(WebsocketSTTService):
         # and pushed as a TranscriptionFrame.
         self._accumulated_text: list[str] = []
         self._flush_counter = 0
-        self._transcript_aggregation_task: Optional[asyncio.Task] = None
+        self._transcript_aggregation_task: asyncio.Task | None = None
 
     def can_generate_metrics(self) -> bool:
         """Check if the service can generate metrics.
@@ -332,7 +333,7 @@ class GradiumSTTService(WebsocketSTTService):
         except Exception as e:
             logger.warning(f"Failed to send flush: {e}")
 
-    async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame, None]:
+    async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame | None, None]:
         """Process audio data for speech-to-text conversion.
 
         Args:
@@ -349,7 +350,11 @@ class GradiumSTTService(WebsocketSTTService):
             chunk = base64.b64encode(chunk).decode("utf-8")
             msg = {"type": "audio", "audio": chunk}
             if self._websocket and self._websocket.state is State.OPEN:
-                await self._websocket.send(json.dumps(msg))
+                try:
+                    await self._websocket.send(json.dumps(msg))
+                except Exception as e:
+                    logger.warning(f"{self}: send failed: {e}")
+                    break
 
         yield None
 
@@ -392,8 +397,9 @@ class GradiumSTTService(WebsocketSTTService):
             json_config = {}
             if self._json_config:
                 json_config = json.loads(self._json_config)
-            if self._settings.language:
-                gradium_language = language_to_gradium_language(self._settings.language)
+            language = assert_given(self._settings.language)
+            if language:
+                gradium_language = language_to_gradium_language(language)
                 if gradium_language:
                     json_config["language"] = gradium_language
             if self._settings.delay_in_frames:
@@ -477,7 +483,7 @@ class GradiumSTTService(WebsocketSTTService):
                 text=accumulated,
                 user_id=self._user_id,
                 timestamp=time_now_iso8601(),
-                language=self._settings.language,
+                language=assert_given(self._settings.language),
             )
         )
         await self.stop_processing_metrics()
@@ -509,12 +515,13 @@ class GradiumSTTService(WebsocketSTTService):
         text = " ".join(self._accumulated_text)
         self._accumulated_text.clear()
         logger.debug(f"Final transcription: [{text}]")
+        language = assert_given(self._settings.language)
         await self.push_frame(
             TranscriptionFrame(
                 text,
                 self._user_id,
                 time_now_iso8601(),
-                self._settings.language,
+                language,
             )
         )
-        await self._trace_transcription(text, is_final=True, language=self._settings.language)
+        await self._trace_transcription(text, is_final=True, language=language)

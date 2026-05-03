@@ -7,8 +7,8 @@
 """Speechmatics TTS service integration."""
 
 import asyncio
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
-from typing import AsyncGenerator, Optional
 from urllib.parse import urlencode
 
 import aiohttp
@@ -20,7 +20,7 @@ from pipecat.frames.frames import (
     Frame,
     TTSAudioRawFrame,
 )
-from pipecat.services.settings import NOT_GIVEN, TTSSettings, _NotGiven
+from pipecat.services.settings import NOT_GIVEN, TTSSettings, _NotGiven, assert_given
 from pipecat.services.tts_service import TTSService
 from pipecat.utils.network import exponential_backoff_time
 from pipecat.utils.tracing.service_decorators import traced_tts
@@ -43,6 +43,9 @@ class SpeechmaticsTTSSettings(TTSSettings):
         max_retries: Maximum number of retries for HTTP requests.
     """
 
+    # Speechmatics requires a voice (the URL path includes it), so narrow
+    # the inherited TTSSettings.voice field to disallow None.
+    voice: str | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
     max_retries: int | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
 
 
@@ -75,11 +78,11 @@ class SpeechmaticsTTSService(TTSService):
         *,
         api_key: str,
         base_url: str = "https://preview.tts.speechmatics.com",
-        voice_id: Optional[str] = None,
+        voice_id: str | None = None,
         aiohttp_session: aiohttp.ClientSession,
-        sample_rate: Optional[int] = SPEECHMATICS_SAMPLE_RATE,
-        params: Optional[InputParams] = None,
-        settings: Optional[Settings] = None,
+        sample_rate: int | None = SPEECHMATICS_SAMPLE_RATE,
+        params: InputParams | None = None,
+        settings: Settings | None = None,
         **kwargs,
     ):
         """Initialize the Speechmatics TTS service.
@@ -183,7 +186,9 @@ class SpeechmaticsTTSService(TTSService):
         }
 
         # Complete HTTP URL
-        url = _get_endpoint_url(self._base_url, self._settings.voice, self.sample_rate)
+        url = _get_endpoint_url(
+            self._base_url, assert_given(self._settings.voice), self.sample_rate
+        )
 
         try:
             # Track attempt
@@ -208,7 +213,8 @@ class SpeechmaticsTTSService(TTSService):
                             attempt += 1
 
                             # Check if we've exceeded the maximum number of attempts
-                            if attempt >= self._settings.max_retries:
+                            max_retries = assert_given(self._settings.max_retries)
+                            if max_retries is not None and attempt >= max_retries:
                                 raise ValueError()
 
                             # Report error frame

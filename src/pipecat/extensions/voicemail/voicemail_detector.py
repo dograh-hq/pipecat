@@ -16,7 +16,6 @@ Note:
 """
 
 import asyncio
-from typing import List, Optional
 
 from loguru import logger
 
@@ -41,7 +40,7 @@ from pipecat.frames.frames import (
     UserStoppedSpeakingFrame,
 )
 from pipecat.pipeline.parallel_pipeline import ParallelPipeline
-from pipecat.processors.aggregators.llm_context import LLMContext
+from pipecat.processors.aggregators.llm_context import LLMContext, LLMContextMessage
 from pipecat.processors.aggregators.llm_response_universal import (
     LLMContextAggregatorPair,
     LLMUserAggregatorParams,
@@ -77,7 +76,7 @@ class NotifierGate(FrameProcessor):
         self._notifier = notifier
         self._task_name = task_name
         self._gate_opened = True
-        self._gate_task: Optional[asyncio.Task] = None
+        self._gate_task: asyncio.Task | None = None
 
     async def setup(self, setup: FrameProcessorSetup):
         """Set up the processor with required components.
@@ -149,7 +148,7 @@ class ClassifierGate(NotifierGate):
         super().__init__(gate_notifier, task_name="classifier_gate")
         self._conversation_notifier = conversation_notifier
         self._conversation_detected = False
-        self._conversation_task: Optional[asyncio.Task] = None
+        self._conversation_task: asyncio.Task | None = None
 
     async def setup(self, setup: FrameProcessorSetup):
         """Set up the processor with required components.
@@ -440,10 +439,10 @@ class TTSGate(FrameProcessor):
         super().__init__()
         self._conversation_notifier = conversation_notifier
         self._voicemail_notifier = voicemail_notifier
-        self._frame_buffer: List[tuple[Frame, FrameDirection]] = []
+        self._frame_buffer: list[tuple[Frame, FrameDirection]] = []
         self._gating_active = True
-        self._conversation_task: Optional[asyncio.Task] = None
-        self._voicemail_task: Optional[asyncio.Task] = None
+        self._conversation_task: asyncio.Task | None = None
+        self._voicemail_task: asyncio.Task | None = None
 
     async def setup(self, setup: FrameProcessorSetup):
         """Set up the processor with required components.
@@ -705,8 +704,8 @@ VOICEMAIL SYSTEM (respond "VOICEMAIL"):
         self,
         *,
         llm: LLMService,
-        custom_system_prompt: Optional[str] = None,
-        long_speech_timeout: Optional[float] = None,
+        custom_system_prompt: str | None = None,
+        long_speech_timeout: float | None = None,
     ):
         """Initialize the voicemail detector with classification and buffering components.
 

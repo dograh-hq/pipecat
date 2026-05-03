@@ -7,9 +7,9 @@
 """Kokoro TTS service implementation using kokoro-onnx."""
 
 import os
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import AsyncGenerator, Optional
 
 import numpy as np
 from loguru import logger
@@ -21,7 +21,7 @@ from pipecat.frames.frames import (
     Frame,
     TTSAudioRawFrame,
 )
-from pipecat.services.settings import TTSSettings
+from pipecat.services.settings import TTSSettings, assert_given
 from pipecat.services.tts_service import TTSService
 from pipecat.transcriptions.language import Language, resolve_language
 from pipecat.utils.tracing.service_decorators import traced_tts
@@ -119,11 +119,11 @@ class KokoroTTSService(TTSService):
     def __init__(
         self,
         *,
-        voice_id: Optional[str] = None,
-        model_path: Optional[str] = None,
-        voices_path: Optional[str] = None,
-        params: Optional[InputParams] = None,
-        settings: Optional[Settings] = None,
+        voice_id: str | None = None,
+        model_path: str | None = None,
+        voices_path: str | None = None,
+        params: InputParams | None = None,
+        settings: Settings | None = None,
         **kwargs,
     ):
         """Initialize the Kokoro TTS service.
@@ -215,9 +215,11 @@ class KokoroTTSService(TTSService):
         try:
             await self.start_tts_usage_metrics(text)
 
-            stream = self._kokoro.create_stream(
-                text, voice=self._settings.voice, lang=self._settings.language, speed=1.0
-            )
+            voice = assert_given(self._settings.voice)
+            lang = assert_given(self._settings.language)
+            if lang is None:
+                raise ValueError("Kokoro TTS language must be specified")
+            stream = self._kokoro.create_stream(text, voice=voice, lang=lang, speed=1.0)
 
             async for samples, sample_rate in stream:
                 await self.stop_ttfb_metrics()

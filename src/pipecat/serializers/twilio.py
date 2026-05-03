@@ -9,6 +9,7 @@
 import base64
 import json
 from typing import TYPE_CHECKING, Optional
+from typing import cast
 
 import aiohttp
 from loguru import logger
@@ -57,20 +58,20 @@ class TwilioFrameSerializer(FrameSerializer):
         """
 
         twilio_sample_rate: int = 8000
-        sample_rate: Optional[int] = None
+        sample_rate: int | None = None
         auto_hang_up: bool = True
 
     def __init__(
         self,
         stream_sid: str,
-        call_sid: Optional[str] = None,
-        account_sid: Optional[str] = None,
-        auth_token: Optional[str] = None,
-        region: Optional[str] = None,
-        edge: Optional[str] = None,
-        transfer_strategy: Optional["TransferStrategy"] = None,
-        hangup_strategy: Optional["HangupStrategy"] = None,
-        params: Optional[InputParams] = None,
+        call_sid: str | None = None,
+        account_sid: str | None = None,
+        auth_token: str | None = None,
+        region: str | None = None,
+        edge: str | None = None,
+        transfer_strategy: "TransferStrategy" | None = None,
+        hangup_strategy: "HangupStrategy" | None = None,
+        params: InputParams | None = None,
     ):
         """Initialize the TwilioFrameSerializer.
 
@@ -85,7 +86,9 @@ class TwilioFrameSerializer(FrameSerializer):
             hangup_strategy: Strategy for handling call hangups.
             params: Configuration parameters.
         """
-        super().__init__(params or TwilioFrameSerializer.InputParams())
+        params = params or TwilioFrameSerializer.InputParams()
+        super().__init__(params)
+        self._params: TwilioFrameSerializer.InputParams = params
 
         # Validate hangup-related parameters if auto_hang_up is enabled
         if self._params.auto_hang_up:

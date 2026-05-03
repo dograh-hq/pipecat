@@ -37,7 +37,6 @@ Example::
 import os
 import time
 import uuid
-from typing import Dict, List, Optional
 
 import aiohttp
 from loguru import logger
@@ -64,7 +63,7 @@ class DailyRoomConfig(BaseModel):
 
     room_url: str
     token: str
-    sip_endpoint: Optional[str] = None
+    sip_endpoint: str | None = None
 
     def __iter__(self):
         """Enable tuple unpacking for backward compatibility.
@@ -78,18 +77,18 @@ class DailyRoomConfig(BaseModel):
 async def configure(
     aiohttp_session: aiohttp.ClientSession,
     *,
-    api_key: Optional[str] = None,
+    api_key: str | None = None,
     room_exp_duration: float = 2.0,
     token_exp_duration: float = 2.0,
-    sip_caller_phone: Optional[str] = None,
+    sip_caller_phone: str | None = None,
     sip_enable_video: bool = False,
     sip_num_endpoints: int = 1,
     enable_dialout: bool = False,
-    sip_codecs: Optional[Dict[str, List[str]]] = None,
-    sip_provider: Optional[str] = None,
-    room_geo: Optional[str] = None,
-    room_properties: Optional[DailyRoomProperties] = None,
-    token_properties: Optional[DailyMeetingTokenProperties] = None,
+    sip_codecs: dict[str, list[str]] | None = None,
+    sip_provider: str | None = None,
+    room_geo: str | None = None,
+    room_properties: DailyRoomProperties | None = None,
+    token_properties: DailyMeetingTokenProperties | None = None,
 ) -> DailyRoomConfig:
     """Configure Daily room URL and token with optional SIP capabilities.
 
@@ -229,7 +228,7 @@ async def configure(
             room_properties.enable_dialout = True
 
         # Add SIP configuration if enabled
-        if sip_enabled:
+        if sip_enabled and sip_caller_phone:
             sip_params = DailyRoomSipParams(
                 display_name=sip_caller_phone,
                 video=sip_enable_video,
@@ -275,32 +274,3 @@ async def configure(
         error_msg = f"Error creating Daily room: {e}"
         logger.error(error_msg)
         raise
-
-
-# Keep this for backwards compatibility, but mark as deprecated
-async def configure_with_args(aiohttp_session: aiohttp.ClientSession, parser=None):
-    """Configure Daily room with command-line argument parsing.
-
-    .. deprecated:: 0.0.78
-        This function is deprecated. Use configure() instead which uses
-        environment variables only.
-
-    Args:
-        aiohttp_session: HTTP session for making API requests.
-        parser: Ignored. Kept for backwards compatibility.
-
-    Returns:
-        Tuple containing room URL, authentication token, and None (for args).
-    """
-    import warnings
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("always")
-        warnings.warn(
-            "configure_with_args is deprecated. Use configure() instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-
-    room_url, token = await configure(aiohttp_session)
-    return (room_url, token, None)

@@ -16,8 +16,9 @@ Provides two STT services:
 
 import base64
 import json
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
-from typing import Any, AsyncGenerator, Literal, Optional, Union
+from typing import Any, Literal
 
 from loguru import logger
 
@@ -35,7 +36,7 @@ from pipecat.frames.frames import (
     VADUserStoppedSpeakingFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection
-from pipecat.services.settings import NOT_GIVEN, STTSettings, _NotGiven
+from pipecat.services.settings import NOT_GIVEN, STTSettings, _NotGiven, assert_given
 from pipecat.services.stt_latency import OPENAI_REALTIME_TTFS_P99, OPENAI_TTFS_P99
 from pipecat.services.stt_service import WebsocketSTTService
 from pipecat.services.whisper.base_stt import (
@@ -74,14 +75,14 @@ class OpenAISTTService(BaseWhisperSTTService):
     def __init__(
         self,
         *,
-        model: Optional[str] = None,
-        api_key: Optional[str] = None,
-        base_url: Optional[str] = None,
-        language: Optional[Language] = Language.EN,
-        prompt: Optional[str] = None,
-        temperature: Optional[float] = None,
-        settings: Optional[Settings] = None,
-        ttfs_p99_latency: Optional[float] = OPENAI_TTFS_P99,
+        model: str | None = None,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        language: Language | None = Language.EN,
+        prompt: str | None = None,
+        temperature: float | None = None,
+        settings: Settings | None = None,
+        ttfs_p99_latency: float | None = OPENAI_TTFS_P99,
         **kwargs,
     ):
         """Initialize OpenAI STT service.
@@ -239,15 +240,15 @@ class OpenAIRealtimeSTTService(WebsocketSTTService):
         self,
         *,
         api_key: str,
-        model: Optional[str] = None,
+        model: str | None = None,
         base_url: str = "wss://api.openai.com/v1/realtime",
-        language: Optional[Language] = Language.EN,
-        prompt: Optional[str] = None,
-        turn_detection: Optional[Union[dict, Literal[False]]] = False,
-        noise_reduction: Optional[Literal["near_field", "far_field"]] = None,
+        language: Language | None = Language.EN,
+        prompt: str | None = None,
+        turn_detection: dict | Literal[False] | None = False,
+        noise_reduction: Literal["near_field", "far_field"] | None = None,
         should_interrupt: bool = True,
-        settings: Optional[Settings] = None,
-        ttfs_p99_latency: Optional[float] = OPENAI_REALTIME_TTFS_P99,
+        settings: Settings | None = None,
+        ttfs_p99_latency: float | None = OPENAI_REALTIME_TTFS_P99,
         **kwargs,
     ):
         """Initialize the OpenAI Realtime STT service.
@@ -414,7 +415,7 @@ class OpenAIRealtimeSTTService(WebsocketSTTService):
         await super().cancel(frame)
         await self._disconnect()
 
-    async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame, None]:
+    async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame | None, None]:
         """Send audio data to the transcription session.
 
         Audio is streamed over the WebSocket. Transcription results arrive
@@ -533,9 +534,8 @@ class OpenAIRealtimeSTTService(WebsocketSTTService):
         """Send ``session.update`` to configure the transcription session."""
         transcription: dict = {"model": self._settings.model}
 
-        language_code = (
-            self._language_to_code(self._settings.language) if self._settings.language else None
-        )
+        language = assert_given(self._settings.language)
+        language_code = self._language_to_code(language) if language else None
         if language_code:
             transcription["language"] = language_code
 
@@ -712,7 +712,7 @@ class OpenAIRealtimeSTTService(WebsocketSTTService):
         self,
         transcript: str,
         is_final: bool,
-        language: Optional[Language] = None,
+        language: Language | None = None,
     ):
         """Record transcription result for tracing.
 

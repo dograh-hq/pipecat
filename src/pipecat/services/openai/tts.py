@@ -10,8 +10,9 @@ This module provides integration with OpenAI's text-to-speech API for
 generating high-quality synthetic speech from text input.
 """
 
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
-from typing import AsyncGenerator, Dict, Literal, Optional
+from typing import Literal
 
 from loguru import logger
 from openai import AsyncOpenAI, BadRequestError
@@ -23,7 +24,7 @@ from pipecat.frames.frames import (
     StartFrame,
     TTSAudioRawFrame,
 )
-from pipecat.services.settings import NOT_GIVEN, TTSSettings, _NotGiven
+from pipecat.services.settings import NOT_GIVEN, TTSSettings, _NotGiven, assert_given
 from pipecat.services.tts_service import TTSService
 from pipecat.utils.tracing.service_decorators import traced_tts
 
@@ -43,7 +44,7 @@ ValidVoice = Literal[
     "verse",
 ]
 
-VALID_VOICES: Dict[str, ValidVoice] = {
+VALID_VOICES: dict[str, ValidVoice] = {
     "alloy": "alloy",
     "ash": "ash",
     "ballad": "ballad",
@@ -69,8 +70,8 @@ class OpenAITTSSettings(TTSSettings):
         speed: Voice speed control (0.25 to 4.0, default 1.0).
     """
 
-    instructions: str | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
-    speed: float | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    instructions: str | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    speed: float | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
 
 
 class OpenAITTSService(TTSService):
@@ -97,21 +98,21 @@ class OpenAITTSService(TTSService):
             speed: Voice speed control (0.25 to 4.0, default 1.0).
         """
 
-        instructions: Optional[str] = None
-        speed: Optional[float] = None
+        instructions: str | None = None
+        speed: float | None = None
 
     def __init__(
         self,
         *,
-        api_key: Optional[str] = None,
-        base_url: Optional[str] = None,
-        voice: Optional[str] = None,
-        model: Optional[str] = None,
-        sample_rate: Optional[int] = None,
-        instructions: Optional[str] = None,
-        speed: Optional[float] = None,
-        params: Optional[InputParams] = None,
-        settings: Optional[Settings] = None,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        voice: str | None = None,
+        model: str | None = None,
+        sample_rate: int | None = None,
+        instructions: str | None = None,
+        speed: float | None = None,
+        params: InputParams | None = None,
+        settings: Settings | None = None,
         **kwargs,
     ):
         """Initialize OpenAI TTS service.
@@ -239,7 +240,7 @@ class OpenAITTSService(TTSService):
             create_params = {
                 "input": text,
                 "model": self._settings.model,
-                "voice": VALID_VOICES[self._settings.voice],
+                "voice": VALID_VOICES[assert_given(self._settings.voice)],
                 "response_format": "pcm",
             }
 
