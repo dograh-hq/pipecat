@@ -1,6 +1,6 @@
 """Cloudonix Media Streams WebSocket protocol serializer for Pipecat."""
 
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from loguru import logger
 
@@ -26,7 +26,7 @@ class CloudonixFrameSerializer(TwilioFrameSerializer):
         bearer_token: str | None = None,
         region: str | None = None,
         edge: str | None = None,
-        hangup_strategy: Optional["HangupStrategy"] = None,
+        hangup_strategy: "HangupStrategy | None" = None,
         params: TwilioFrameSerializer.InputParams | None = None,
     ):
         """Initialize the CloudonixFrameSerializer.
