@@ -28,7 +28,7 @@ class SpeachesSTTService(OpenAISTTService):
         *,
         api_key: str = "none",
         base_url: str = "http://localhost:8000/v1",
-        settings: Optional[SpeachesSTTSettings] = None,
+        settings: SpeachesSTTSettings | None = None,
         **kwargs,
     ):
         """Initialize the Speaches STT service.

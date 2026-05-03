@@ -40,7 +40,7 @@ class MockInputTransport(FrameProcessor):
 
     def __init__(
         self,
-        params: Optional[TransportParams] = None,
+        params: TransportParams | None = None,
         *,
         generate_audio: bool = False,
         audio_interval_ms: int = 20,
@@ -64,7 +64,7 @@ class MockInputTransport(FrameProcessor):
         self._audio_interval_ms = audio_interval_ms
         self._sample_rate = sample_rate
         self._num_channels = num_channels
-        self._audio_task: Optional[asyncio.Task] = None
+        self._audio_task: asyncio.Task | None = None
         self._running = False
 
     async def _generate_audio_frames(self):
@@ -142,7 +142,7 @@ class MockOutputTransport(BaseOutputTransport):
 
     def __init__(
         self,
-        params: Optional[TransportParams] = None,
+        params: TransportParams | None = None,
         *,
         audio_write_succeeds: bool = True,
         fail_after_n_frames: int = 0,
@@ -213,10 +213,10 @@ class MockTransport(BaseTransport):
 
     def __init__(
         self,
-        params: Optional[TransportParams] = None,
+        params: TransportParams | None = None,
         *,
-        input_name: Optional[str] = None,
-        output_name: Optional[str] = None,
+        input_name: str | None = None,
+        output_name: str | None = None,
         generate_audio: bool = False,
         audio_interval_ms: int = 20,
         audio_sample_rate: int = 16000,

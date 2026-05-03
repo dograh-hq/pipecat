@@ -24,7 +24,7 @@ class SpeachesLLMService(OpenAILLMService):
         *,
         api_key: str = "none",
         base_url: str = "http://localhost:11434/v1",
-        settings: Optional[SpeachesLLMSettings] = None,
+        settings: SpeachesLLMSettings | None = None,
         **kwargs,
     ):
         """Initialize the Speaches LLM service.

@@ -5,7 +5,7 @@ chan_websocket / externalMedia over binary WebSocket frames.
 """
 
 import json
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from loguru import logger
 
@@ -47,7 +47,7 @@ class AsteriskFrameSerializer(FrameSerializer):
         """
 
         asterisk_sample_rate: int = 8000
-        sample_rate: Optional[int] = None
+        sample_rate: int | None = None
         auto_hang_up: bool = True
 
     def __init__(
@@ -56,9 +56,9 @@ class AsteriskFrameSerializer(FrameSerializer):
         ari_endpoint: str,
         app_name: str,
         app_password: str,
-        transfer_strategy: Optional["TransferStrategy"] = None,
-        hangup_strategy: Optional["HangupStrategy"] = None,
-        params: Optional[InputParams] = None,
+        transfer_strategy: "TransferStrategy | None" = None,
+        hangup_strategy: "HangupStrategy | None" = None,
+        params: InputParams | None = None,
     ):
         """Initialize the AsteriskFrameSerializer.
 
@@ -71,7 +71,9 @@ class AsteriskFrameSerializer(FrameSerializer):
             hangup_strategy: Strategy for handling call hangups.
             params: Configuration parameters.
         """
-        super().__init__(params or AsteriskFrameSerializer.InputParams())
+        params = params or AsteriskFrameSerializer.InputParams()
+        super().__init__(params)
+        self._params: AsteriskFrameSerializer.InputParams = params
 
         self._channel_id = channel_id
         self._ari_endpoint = ari_endpoint

@@ -12,7 +12,8 @@ syntax aloud.
 """
 
 import re
-from typing import Any, Mapping, Optional
+from collections.abc import Mapping
+from typing import Any, Optional
 
 from loguru import logger
 
@@ -36,7 +37,7 @@ class XMLFunctionTagFilter(BaseTextFilter):
     def __init__(
         self,
         *,
-        custom_patterns: Optional[list[str]] = None,
+        custom_patterns: list[str] | None = None,
         preserve_whitespace: bool = True,
     ):
         """Initialize the XML function tag filter.

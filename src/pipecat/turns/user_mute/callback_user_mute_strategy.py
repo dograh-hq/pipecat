@@ -6,7 +6,7 @@
 
 """User mute strategy that delegates mute decisions to an external callback."""
 
-from typing import Awaitable, Callable
+from collections.abc import Awaitable, Callable
 
 from pipecat.frames.frames import Frame
 from pipecat.turns.user_mute.base_user_mute_strategy import BaseUserMuteStrategy

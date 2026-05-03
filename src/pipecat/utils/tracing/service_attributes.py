@@ -12,8 +12,7 @@ where applicable and Pipecat-specific conventions for additional context.
 """
 
 import json
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 # Import for type checking only
 if TYPE_CHECKING:
@@ -71,7 +70,7 @@ def add_tts_span_attributes(
     model: str,
     voice_id: str,
     text: str | None = None,
-    settings: Optional["ServiceSettings"] = None,
+    settings: "ServiceSettings | None" = None,
     character_count: int | None = None,
     operation_name: str = "tts",
     ttfb: float | None = None,
@@ -129,7 +128,7 @@ def add_stt_span_attributes(
     is_final: bool | None = None,
     language: str | None = None,
     user_id: str | None = None,
-    settings: Optional["ServiceSettings"] = None,
+    settings: "ServiceSettings | None" = None,
     vad_enabled: bool = False,
     ttfb: float | None = None,
     **kwargs,
@@ -189,11 +188,11 @@ def add_llm_span_attributes(
     service_name: str,
     model: str,
     stream: bool = True,
-    messages: Dict[str, Any] | str | None = None,
-    tools: Dict[str, Any] | str | None = None,
+    messages: dict[str, Any] | str | None = None,
+    tools: dict[str, Any] | str | None = None,
     output: str | None = None,
     tool_choice: str | None = None,
-    parameters: Dict[str, Any] | None = None,
+    parameters: dict[str, Any] | None = None,
     extra_parameters: dict[str, Any] | None = None,
     ttfb: float | None = None,
     **kwargs,
@@ -280,7 +279,7 @@ def add_gemini_live_span_attributes(
     voice_id: str | None = None,
     language: str | None = None,
     modalities: str | None = None,
-    settings: Optional["ServiceSettings"] = None,
+    settings: "ServiceSettings | None" = None,
     tools: list[dict] | None = None,
     tools_serialized: str | None = None,
     transcript: str | None = None,

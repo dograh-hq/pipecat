@@ -6,10 +6,10 @@
 
 """Audio utilities for calculating chunk sizes and durations."""
 
-from enum import Enum
+from enum import StrEnum
 
 
-class AudioEncoding(str, Enum):
+class AudioEncoding(StrEnum):
     """Supported audio encoding formats."""
 
     PCM = "pcm"

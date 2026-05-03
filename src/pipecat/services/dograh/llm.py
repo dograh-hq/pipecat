@@ -6,11 +6,12 @@
 
 """Dograh LLM Service implementation using OpenAI-compatible interface."""
 
-from typing import Dict, Optional
-
 from loguru import logger
+from openai import AsyncStream
+from openai.types.chat import ChatCompletionChunk
 
 from pipecat.frames.frames import ErrorFrame, Frame, StartFrame
+from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.openai.base_llm import OpenAILLMInvocationParams, OpenAILLMSettings
 from pipecat.services.openai.llm import OpenAILLMService
@@ -29,7 +30,7 @@ class DograhLLMService(OpenAILLMService):
         *,
         api_key: str,
         base_url: str = "https://services.dograh.com/api/v1/llm",
-        settings: Optional[OpenAILLMSettings] = None,
+        settings: OpenAILLMSettings | None = None,
         **kwargs,
     ):
         """Initialize Dograh LLM service.
@@ -43,6 +44,7 @@ class DograhLLMService(OpenAILLMService):
         default_settings = OpenAILLMSettings(model="default")
         if settings is not None:
             default_settings.apply_update(settings)
+        self._base_url = base_url
         super().__init__(api_key=api_key, base_url=base_url, settings=default_settings, **kwargs)
         self._start_metadata = None
 
@@ -67,7 +69,7 @@ class DograhLLMService(OpenAILLMService):
 
         await super().process_frame(frame, direction)
 
-    def build_chat_completion_params(self, params_from_context: OpenAILLMInvocationParams) -> Dict:
+    def build_chat_completion_params(self, params_from_context: OpenAILLMInvocationParams) -> dict:
         """Build parameters for chat completion request with workflow_run_id.
 
         Overrides the base method to include workflow_run_id from StartFrame metadata
@@ -94,20 +96,22 @@ class DograhLLMService(OpenAILLMService):
 
         return params
 
-    async def get_chat_completions(self, params: Dict) -> Optional:
+    async def get_chat_completions(
+        self, context: LLMContext
+    ) -> AsyncStream[ChatCompletionChunk] | None:
         """Override to handle Dograh-specific quota errors.
 
         Args:
-            params: Parameters for the chat completion request
+            context: Context to use for the chat completion.
 
         Returns:
-            The chat completion response
+            The chat completion response, or None if a quota error was handled.
 
         Raises:
             Pushes a fatal ErrorFrame for quota errors
         """
         try:
-            return await super().get_chat_completions(params)
+            return await super().get_chat_completions(context)
         except Exception as e:
             # Check if this is a quota error (PermissionDeniedError with quota_exceeded)
             error_str = str(e)

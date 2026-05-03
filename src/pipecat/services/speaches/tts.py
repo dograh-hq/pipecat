@@ -29,7 +29,7 @@ class SpeachesTTSService(OpenAITTSService):
         api_key: str = "none",
         base_url: str = "http://localhost:8000/v1",
         sample_rate: int = 24000,
-        settings: Optional[SpeachesTTSSettings] = None,
+        settings: SpeachesTTSSettings | None = None,
         **kwargs,
     ):
         """Initialize the Speaches TTS service.

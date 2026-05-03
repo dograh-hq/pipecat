@@ -16,16 +16,16 @@ import contextvars
 from typing import Optional
 
 # Context variable for tracking the current workflow run ID across the pipeline
-run_id_var: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("run_id", default=None)
+run_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar("run_id", default=None)
 
 # Context variable for tracking the current organization ID across the pipeline
-org_id_var: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("org_id", default=None)
+org_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar("org_id", default=None)
 
 # Context variable for tracking the current turn number in a conversation
 turn_var: contextvars.ContextVar[int] = contextvars.ContextVar("turn", default=0)
 
 
-def get_current_run_id() -> Optional[str]:
+def get_current_run_id() -> str | None:
     """Get the current workflow run ID from the context.
 
     Returns:
@@ -34,7 +34,7 @@ def get_current_run_id() -> Optional[str]:
     return run_id_var.get()
 
 
-def set_current_run_id(run_id: Optional[str | int]) -> None:
+def set_current_run_id(run_id: str | int | None) -> None:
     """Set the current workflow run ID in the context.
 
     Args:
@@ -46,7 +46,7 @@ def set_current_run_id(run_id: Optional[str | int]) -> None:
     run_id_var.set(run_id)
 
 
-def get_current_org_id() -> Optional[str]:
+def get_current_org_id() -> str | None:
     """Get the current organization ID from the context.
 
     Returns:
@@ -55,7 +55,7 @@ def get_current_org_id() -> Optional[str]:
     return org_id_var.get()
 
 
-def set_current_org_id(org_id: Optional[str | int]) -> None:
+def set_current_org_id(org_id: str | int | None) -> None:
     """Set the current organization ID in the context.
 
     Args:

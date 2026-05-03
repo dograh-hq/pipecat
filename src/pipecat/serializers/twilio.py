@@ -8,8 +8,7 @@
 
 import base64
 import json
-from typing import TYPE_CHECKING, Optional
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import aiohttp
 from loguru import logger
@@ -69,8 +68,8 @@ class TwilioFrameSerializer(FrameSerializer):
         auth_token: str | None = None,
         region: str | None = None,
         edge: str | None = None,
-        transfer_strategy: "TransferStrategy" | None = None,
-        hangup_strategy: "HangupStrategy" | None = None,
+        transfer_strategy: "TransferStrategy | None" = None,
+        hangup_strategy: "HangupStrategy | None" = None,
         params: InputParams | None = None,
     ):
         """Initialize the TwilioFrameSerializer.

@@ -242,7 +242,7 @@ class ClassifierUpstreamGate(FrameProcessor):
         super().__init__()
         self._conversation_notifier = conversation_notifier
         self._gate_open = True
-        self._conversation_task: Optional[asyncio.Task] = None
+        self._conversation_task: asyncio.Task | None = None
 
     async def setup(self, setup: FrameProcessorSetup):
         """Set up the processor with required components.
@@ -549,10 +549,10 @@ class LLMGate(FrameProcessor):
         super().__init__()
         self._conversation_notifier = conversation_notifier
         self._voicemail_notifier = voicemail_notifier
-        self._buffered_context_frame: Optional[tuple[Frame, FrameDirection]] = None
+        self._buffered_context_frame: tuple[Frame, FrameDirection] | None = None
         self._gating_active = True
-        self._conversation_task: Optional[asyncio.Task] = None
-        self._voicemail_task: Optional[asyncio.Task] = None
+        self._conversation_task: asyncio.Task | None = None
+        self._voicemail_task: asyncio.Task | None = None
 
     async def setup(self, setup: FrameProcessorSetup):
         """Set up the processor with required components.
@@ -773,7 +773,7 @@ VOICEMAIL SYSTEM (respond "VOICEMAIL"):
             )
 
         # Build classification branch
-        classification_pipeline = [self._classifier_gate]
+        classification_pipeline: list[FrameProcessor] = [self._classifier_gate]
         if self._first_turn_speech_monitor:
             classification_pipeline.append(self._first_turn_speech_monitor)
         classification_pipeline.extend(

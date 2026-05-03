@@ -5,7 +5,7 @@ to delegate call operations (transfer, hangup) to provider-specific implementati
 """
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict
+from typing import Any
 
 from loguru import logger
 
@@ -23,7 +23,7 @@ class TransferStrategy(CallOperationStrategy):
     """
 
     @abstractmethod
-    async def execute_transfer(self, context: Dict[str, Any]) -> bool:
+    async def execute_transfer(self, context: dict[str, Any]) -> bool:
         """Execute call transfer with provider-specific logic.
 
         Args:
@@ -43,7 +43,7 @@ class HangupStrategy(CallOperationStrategy):
     """Strategy for handling call hangup operations."""
 
     @abstractmethod
-    async def execute_hangup(self, context: Dict[str, Any]) -> bool:
+    async def execute_hangup(self, context: dict[str, Any]) -> bool:
         """Execute call hangup with provider-specific logic.
 
         Args:

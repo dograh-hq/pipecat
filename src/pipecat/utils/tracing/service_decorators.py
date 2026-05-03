@@ -15,11 +15,10 @@ import contextlib
 import functools
 import inspect
 import json
-from multiprocessing import Value
-from typing import TYPE_CHECKING, Callable, Optional, TypeVar
 import logging
 from collections.abc import Callable
-from typing import TYPE_CHECKING, TypeVar
+from multiprocessing import Value
+from typing import TYPE_CHECKING, Any, Optional, TypeVar
 
 from loguru import logger
 
@@ -662,7 +661,7 @@ def traced_llm(func: Callable | None = None, *, name: str | None = None) -> Call
                             # Get tools
                             # Use adapter's from_standard_tools() to convert ToolsSchema
                             tools = None
-                            
+
                             if hasattr(self, "get_llm_adapter") and hasattr(context, "tools"):
                                 adapter = self.get_llm_adapter()
                                 tools = adapter.from_standard_tools(context.tools)
@@ -741,7 +740,7 @@ def traced_llm(func: Callable | None = None, *, name: str | None = None) -> Call
 
                         # Append JSON dump of function calls to the output text so that
                         # the consumer can see both in a single attribute.
-                        span_output = {"content": output_text}
+                        span_output: dict[str, Any] = {"content": output_text}
                         if function_calls_info:
                             span_output["tool_calls"] = function_calls_info
 

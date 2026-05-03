@@ -9,8 +9,8 @@
 import asyncio
 import json
 import time
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass
-from typing import AsyncGenerator, Dict, Optional
 
 from loguru import logger
 
@@ -67,12 +67,12 @@ class DograhSTTService(STTService, WebsocketService):
         api_key: str,
         base_url: str = "wss://services.dograh.com",
         ws_path: str = "/api/v1/stt/stream",
-        sample_rate: Optional[int] = None,
+        sample_rate: int | None = None,
         interim_results: bool = True,
         vad_events: bool = False,
-        keyterms: Optional[list[str]] = None,
-        settings: Optional[DograhSTTSettings] = None,
-        ttfs_p99_latency: Optional[float] = DOGRAH_TTFS_P99,
+        keyterms: list[str] | None = None,
+        settings: DograhSTTSettings | None = None,
+        ttfs_p99_latency: float | None = DOGRAH_TTFS_P99,
         **kwargs,
     ):
         """Initialize STT service.
@@ -114,7 +114,7 @@ class DograhSTTService(STTService, WebsocketService):
         self._keepalive_task = None
 
         # Session tracking for metrics
-        self._session_start_time: Optional[float] = None
+        self._session_start_time: float | None = None
         self._start_metadata = None
 
         # Register event handlers if VAD is enabled
@@ -152,7 +152,8 @@ class DograhSTTService(STTService, WebsocketService):
             }
 
             logger.debug(f"Connecting to STT WebSocket at {url}")
-            self._websocket = await websocket_connect(url, additional_headers=headers)
+            ws = await websocket_connect(url, additional_headers=headers)
+            self._websocket = ws
 
             # Send initial configuration
             config_msg = {
@@ -172,7 +173,7 @@ class DograhSTTService(STTService, WebsocketService):
             if self._start_metadata and "workflow_run_id" in self._start_metadata:
                 config_msg["correlation_id"] = self._start_metadata["workflow_run_id"]
 
-            await self._websocket.send(json.dumps(config_msg))
+            await ws.send(json.dumps(config_msg))
 
             logger.info("Connected to STT service")
 
@@ -324,7 +325,7 @@ class DograhSTTService(STTService, WebsocketService):
 
     @traced_stt
     async def _handle_transcription_traced(
-        self, transcript: str, is_final: bool, language: Optional[Language] = None
+        self, transcript: str, is_final: bool, language: Language | None = None
     ):
         """Handle a transcription result with tracing."""
         pass
@@ -336,7 +337,7 @@ class DograhSTTService(STTService, WebsocketService):
             await self._websocket.send(finalize_msg)
             logger.trace("Sent finalize to STT server")
 
-    async def _handle_transcription(self, msg: Dict):
+    async def _handle_transcription(self, msg: dict):
         """Process transcription message from Dograh."""
         transcript = msg.get("text", "")
         is_final = msg.get("is_final", False)
@@ -345,12 +346,14 @@ class DograhSTTService(STTService, WebsocketService):
         language_code = msg.get("language")
 
         # Parse language if provided
-        language = None
+        language: Language | None = None
         if language_code:
             try:
                 language = Language(language_code)
             except ValueError:
-                language = self._settings.language
+                settings_language = self._settings.language
+                if isinstance(settings_language, Language):
+                    language = settings_language
 
         if transcript:
             if is_final:
@@ -382,7 +385,7 @@ class DograhSTTService(STTService, WebsocketService):
                     )
                 )
 
-    async def _handle_speech_started(self, msg: Dict):
+    async def _handle_speech_started(self, msg: dict):
         """Handle speech started event."""
         logger.debug("Speech started detected")
         await self.start_ttfb_metrics()
@@ -390,7 +393,7 @@ class DograhSTTService(STTService, WebsocketService):
         await self.push_frame(UserStartedSpeakingFrame())
         await self._call_event_handler("on_speech_started")
 
-    async def _handle_speech_ended(self, msg: Dict):
+    async def _handle_speech_ended(self, msg: dict):
         """Handle speech ended event."""
         logger.debug("Speech ended detected")
         await self.push_frame(UserStoppedSpeakingFrame())
@@ -443,7 +446,7 @@ class DograhSTTService(STTService, WebsocketService):
                 await self._send_finalize()
                 logger.trace(f"Triggered finalize event on: {frame.name=}, {direction=}")
 
-    async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame, None]:
+    async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame | None, None]:
         """Send audio data to Dograh for transcription.
 
         Args:

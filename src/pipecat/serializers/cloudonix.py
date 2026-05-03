@@ -22,12 +22,12 @@ class CloudonixFrameSerializer(TwilioFrameSerializer):
         self,
         call_id: str,
         stream_sid: str,
-        domain_id: Optional[str] = None,
-        bearer_token: Optional[str] = None,
-        region: Optional[str] = None,
-        edge: Optional[str] = None,
+        domain_id: str | None = None,
+        bearer_token: str | None = None,
+        region: str | None = None,
+        edge: str | None = None,
         hangup_strategy: Optional["HangupStrategy"] = None,
-        params: Optional[TwilioFrameSerializer.InputParams] = None,
+        params: TwilioFrameSerializer.InputParams | None = None,
     ):
         """Initialize the CloudonixFrameSerializer.
 

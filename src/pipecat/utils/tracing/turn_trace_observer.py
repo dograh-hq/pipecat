@@ -275,7 +275,7 @@ class TurnTraceObserver(BaseObserver):
 
         return self._trace_context_map.get(turn_number)
 
-    def get_trace_id(self) -> Optional[str]:
+    def get_trace_id(self) -> str | None:
         """Get the trace ID for the current conversation.
 
         Returns:
@@ -292,7 +292,7 @@ class TurnTraceObserver(BaseObserver):
             logger.warning(f"Failed to get trace ID: {e}")
             return None
 
-    def get_trace_url(self) -> Optional[str]:
+    def get_trace_url(self) -> str | None:
         """Get the Langfuse URL for the current conversation trace.
 
         This URL can be used to view the trace in the Langfuse UI.

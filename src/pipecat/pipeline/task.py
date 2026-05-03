@@ -421,7 +421,7 @@ class PipelineTask(BasePipelineTask):
         return self._turn_trace_observer
 
     @property
-    def user_bot_latency_observer(self) -> Optional[UserBotLatencyObserver]:
+    def user_bot_latency_observer(self) -> UserBotLatencyObserver | None:
         """Get the user-bot latency observer if turn tracking is enabled.
 
         Returns:

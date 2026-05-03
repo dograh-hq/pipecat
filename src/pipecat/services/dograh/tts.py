@@ -9,8 +9,9 @@
 import asyncio
 import base64
 import json
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
-from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
+from typing import Any
 
 from loguru import logger
 
@@ -42,8 +43,8 @@ except ModuleNotFoundError as e:
 
 
 def calculate_word_times(
-    alignment_info: Dict[str, Any], cumulative_time: float
-) -> List[Tuple[str, float]]:
+    alignment_info: dict[str, Any], cumulative_time: float
+) -> list[tuple[str, float]]:
     """Calculate word timestamps from alignment information.
 
     Args:
@@ -96,9 +97,9 @@ class DograhTTSService(WebsocketTTSService):
         api_key: str,
         base_url: str = "wss://services.dograh.com",
         ws_path: str = "/api/v1/tts/stream",
-        sample_rate: Optional[int] = None,
-        settings: Optional[DograhTTSSettings] = None,
-        text_aggregation_mode: Optional[TextAggregationMode] = None,
+        sample_rate: int | None = None,
+        settings: DograhTTSSettings | None = None,
+        text_aggregation_mode: TextAggregationMode | None = None,
         **kwargs,
     ):
         """Initialize Dograh TTS service.
@@ -188,7 +189,8 @@ class DograhTTSService(WebsocketTTSService):
             }
 
             logger.debug(f"Connecting to Dograh TTS WebSocket at {url}")
-            self._websocket = await websocket_connect(url, additional_headers=headers)
+            ws = await websocket_connect(url, additional_headers=headers)
+            self._websocket = ws
 
             # Send initial configuration
             config_msg = {
@@ -203,7 +205,7 @@ class DograhTTSService(WebsocketTTSService):
             if self._start_metadata and "workflow_run_id" in self._start_metadata:
                 config_msg["correlation_id"] = self._start_metadata["workflow_run_id"]
 
-            await self._websocket.send(json.dumps(config_msg))
+            await ws.send(json.dumps(config_msg))
 
             logger.info(f"Connected to Dograh TTS service")
 
@@ -401,7 +403,7 @@ class DograhTTSService(WebsocketTTSService):
             await self._websocket.send(json.dumps(msg))
 
     @traced_tts
-    async def run_tts(self, text: str, context_id: str) -> AsyncGenerator[Frame, None]:
+    async def run_tts(self, text: str, context_id: str) -> AsyncGenerator[Frame | None, None]:
         """Generate speech from text using Dograh's streaming WebSocket API.
 
         Args:
@@ -437,7 +439,7 @@ class DograhTTSService(WebsocketTTSService):
                     if self._start_metadata and "workflow_run_id" in self._start_metadata:
                         context_msg["correlation_id"] = self._start_metadata["workflow_run_id"]
 
-                    await self._websocket.send(json.dumps(context_msg))
+                    await self._get_websocket().send(json.dumps(context_msg))
                     logger.trace(f"Created new context {context_id} with voice settings")
 
                 # Send text for synthesis
@@ -484,7 +486,7 @@ class DograhTTSService(WebsocketTTSService):
         """Close the Dograh context after all audio has been played."""
         await self._close_context(context_id)
 
-    async def flush_audio(self, context_id: Optional[str] = None):
+    async def flush_audio(self, context_id: str | None = None):
         """Flush any pending audio and finalize the current context.
 
         Args:

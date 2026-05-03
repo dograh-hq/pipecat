@@ -7,7 +7,7 @@
 """Mock TTS service for testing XMLFunctionTagFilter integration."""
 
 import asyncio
-from typing import AsyncGenerator, Optional
+from collections.abc import AsyncGenerator
 
 from pipecat.frames.frames import (
     Frame,
@@ -29,8 +29,8 @@ class MockTTSService(TTSService):
     def __init__(
         self,
         *,
-        mock_audio_data: Optional[bytes] = None,
-        mock_audio_duration_ms: Optional[int] = 1000,
+        mock_audio_data: bytes | None = None,
+        mock_audio_duration_ms: int = 1000,
         chunk_size: int = 1024,
         frame_delay: float = 0.01,
         pause_frame_processing: bool = True,

@@ -56,10 +56,10 @@ from pipecat.frames.frames import (
     UserImageRawFrame,
     UserMuteStartedFrame,
     UserMuteStoppedFrame,
-    VADUserStartedSpeakingFrame,
-    VADUserStoppedSpeakingFrame,
     UserStartedSpeakingFrame,
     UserStoppedSpeakingFrame,
+    VADUserStartedSpeakingFrame,
+    VADUserStoppedSpeakingFrame,
 )
 from pipecat.metrics.metrics import LLMTokenUsage
 from pipecat.processors.aggregators.llm_context import LLMContext
@@ -1397,7 +1397,7 @@ class GeminiLiveLLMService(LLMService):
                 await self._session.send_client_content(
                     turns=messages, turn_complete=self._inference_on_context_initialization
                 )
-                
+
             # Gemini 3.x wants turn_complete=True, but also won't run inference without a realtime input
             if self._is_gemini_3 and trigger_inference:
                 await self._session.send_realtime_input(text=" ")

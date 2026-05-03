@@ -9,7 +9,7 @@
 import asyncio
 import json
 import time
-from typing import AsyncIterator, List, Optional
+from collections.abc import AsyncIterator
 
 from loguru import logger
 from openai.types.chat import ChatCompletionChunk
@@ -21,7 +21,7 @@ from openai.types.chat.chat_completion_chunk import (
 )
 
 from pipecat.processors.aggregators.llm_context import LLMContext
-from pipecat.services.openai.base_llm import OpenAILLMContext, OpenAILLMSettings
+from pipecat.services.openai.base_llm import OpenAILLMSettings
 from pipecat.services.openai.llm import OpenAILLMService
 
 
@@ -39,9 +39,9 @@ class MockLLMService(OpenAILLMService):
     def __init__(
         self,
         *,
-        mock_chunks: Optional[List[ChatCompletionChunk]] = None,
-        mock_steps: Optional[List[List[ChatCompletionChunk]]] = None,
-        mock_inference_responses: Optional[List[str]] = None,
+        mock_chunks: list[ChatCompletionChunk] | None = None,
+        mock_steps: list[list[ChatCompletionChunk]] | None = None,
+        mock_inference_responses: list[str] | None = None,
         chunk_delay: float = 0.01,
         **kwargs,
     ):
@@ -68,7 +68,7 @@ class MockLLMService(OpenAILLMService):
         self._chunk_delay = chunk_delay
         self._mock_inference_responses = mock_inference_responses or []
 
-    def _get_current_chunks(self) -> List[ChatCompletionChunk]:
+    def _get_current_chunks(self) -> list[ChatCompletionChunk]:
         """Get the chunks for the current step."""
         if self._mock_steps:
             if self._current_step < len(self._mock_steps):
@@ -106,12 +106,13 @@ class MockLLMService(OpenAILLMService):
             self._advance_step()
 
     async def _stream_chat_completions_specific_context(
-        self, context: OpenAILLMContext
+        self, context: LLMContext
     ) -> AsyncIterator[ChatCompletionChunk]:
         """Override to return mock chunks instead of API call."""
         # The base class awaits this method, so it should return an async iterator directly
+        adapter = self.get_llm_adapter()
         logger.debug(
-            f"{self}: Generating chat from LLM-specific context {context.get_messages_for_logging()}"
+            f"{self}: Generating chat from LLM-specific context {adapter.get_messages_for_logging(context)}"
         )
         return self._stream_mock_chunks()
 
@@ -127,7 +128,7 @@ class MockLLMService(OpenAILLMService):
         )
         return self._stream_mock_chunks()
 
-    def set_mock_chunks(self, chunks: List[ChatCompletionChunk]):
+    def set_mock_chunks(self, chunks: list[ChatCompletionChunk]):
         """Update the mock chunks to stream.
 
         Args:
@@ -135,7 +136,7 @@ class MockLLMService(OpenAILLMService):
         """
         self._mock_chunks = chunks
 
-    def set_mock_steps(self, steps: List[List[ChatCompletionChunk]]):
+    def set_mock_steps(self, steps: list[list[ChatCompletionChunk]]):
         """Update the mock steps for multi-step responses.
 
         Args:
@@ -148,7 +149,7 @@ class MockLLMService(OpenAILLMService):
         """Reset the step counter to start from the beginning."""
         self._current_step = 0
 
-    def set_mock_inference_responses(self, responses: List[str]):
+    def set_mock_inference_responses(self, responses: list[str]):
         """Update the mock inference responses indexed by step.
 
         Args:
@@ -159,9 +160,9 @@ class MockLLMService(OpenAILLMService):
     async def run_inference(
         self,
         context,
-        max_tokens: Optional[int] = None,
-        system_instruction: Optional[str] = None,
-    ) -> Optional[str]:
+        max_tokens: int | None = None,
+        system_instruction: str | None = None,
+    ) -> str | None:
         """Override to return mock response for the current step.
 
         Uses the same step counter as streaming methods. Does NOT advance
@@ -191,7 +192,7 @@ class MockLLMService(OpenAILLMService):
 
     # Helper methods for creating chunks
     @staticmethod
-    def create_text_chunks(text: str, chunk_size: int = 10) -> List[ChatCompletionChunk]:
+    def create_text_chunks(text: str, chunk_size: int = 10) -> list[ChatCompletionChunk]:
         """Helper to create text streaming chunks from a string.
 
         Args:
@@ -237,7 +238,7 @@ class MockLLMService(OpenAILLMService):
         tool_call_id: str = "call_mock123",
         index: int = 0,
         chunk_arguments: bool = True,
-    ) -> List[ChatCompletionChunk]:
+    ) -> list[ChatCompletionChunk]:
         """Helper to create function call chunks.
 
         Args:
@@ -350,7 +351,7 @@ class MockLLMService(OpenAILLMService):
     @staticmethod
     def create_mixed_chunks(
         text: str, function_name: str, arguments: dict, tool_call_id: str = "call_mock123"
-    ) -> List[ChatCompletionChunk]:
+    ) -> list[ChatCompletionChunk]:
         """Helper to create chunks with both text and function calls.
 
         Args:
@@ -377,7 +378,7 @@ class MockLLMService(OpenAILLMService):
         return chunks
 
     @staticmethod
-    def create_multiple_function_call_chunks(functions: List[dict]) -> List[ChatCompletionChunk]:
+    def create_multiple_function_call_chunks(functions: list[dict]) -> list[ChatCompletionChunk]:
         """Helper to create chunks with multiple function calls.
 
         Args:
@@ -416,10 +417,10 @@ class MockLLMService(OpenAILLMService):
 
     @staticmethod
     def create_multi_step_responses(
-        first_step_chunks: List[ChatCompletionChunk],
+        first_step_chunks: list[ChatCompletionChunk],
         num_text_steps: int = 1,
         step_prefix: str = "Response",
-    ) -> List[List[ChatCompletionChunk]]:
+    ) -> list[list[ChatCompletionChunk]]:
         """Create a list of chunk lists for multi-step responses.
 
         This helper creates a sequence of responses where the first step uses
