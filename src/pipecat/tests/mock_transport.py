@@ -15,7 +15,7 @@ and _bot_currently_speaking methods.
 """
 
 import asyncio
-from typing import Optional
+from collections.abc import Awaitable, Callable
 
 from pipecat.frames.frames import (
     CancelFrame,
@@ -46,6 +46,8 @@ class MockInputTransport(FrameProcessor):
         audio_interval_ms: int = 20,
         sample_rate: int = 16000,
         num_channels: int = 1,
+        on_client_connected: Callable[[], Awaitable[None]] | None = None,
+        on_client_disconnected: Callable[[], Awaitable[None]] | None = None,
         **kwargs,
     ):
         """Initialize the mock input transport.
@@ -56,6 +58,10 @@ class MockInputTransport(FrameProcessor):
             audio_interval_ms: Interval between audio frames in milliseconds (default: 20ms).
             sample_rate: Audio sample rate in Hz (default: 16000).
             num_channels: Number of audio channels (default: 1).
+            on_client_connected: Optional async callback fired on StartFrame to
+                simulate a client connecting at pipeline start.
+            on_client_disconnected: Optional async callback fired on EndFrame /
+                CancelFrame to simulate client disconnect at pipeline shutdown.
             **kwargs: Additional arguments passed to parent class.
         """
         super().__init__(**kwargs)
@@ -66,6 +72,8 @@ class MockInputTransport(FrameProcessor):
         self._num_channels = num_channels
         self._audio_task: asyncio.Task | None = None
         self._running = False
+        self._on_client_connected = on_client_connected
+        self._on_client_disconnected = on_client_disconnected
 
     async def _generate_audio_frames(self):
         """Generate audio frames at regular intervals."""
@@ -115,8 +123,12 @@ class MockInputTransport(FrameProcessor):
 
         if isinstance(frame, StartFrame):
             self._start_audio_generation()
+            if self._on_client_connected:
+                await self._on_client_connected()
         elif isinstance(frame, (EndFrame, CancelFrame)):
             self._stop_audio_generation()
+            if self._on_client_disconnected:
+                await self._on_client_disconnected()
 
         await self.push_frame(frame, direction)
 
@@ -179,6 +191,11 @@ class MockOutputTransport(BaseOutputTransport):
         True, the bot speaking events are emitted. When it returns False
         repeatedly, the handler will break out after 10 consecutive failures.
 
+        Sleeps for the chunk's wall-clock duration to mimic the back-pressure
+        a real transport applies (network/encoder/jitter buffer), so downstream
+        timing — BotSpeakingFrame cadence, VAD silence detection, interruption
+        ordering — behaves like a live call.
+
         Args:
             frame: The audio frame to write.
 
@@ -186,6 +203,10 @@ class MockOutputTransport(BaseOutputTransport):
             True if write succeeds, False to simulate write failure.
         """
         self._write_attempts += 1
+
+        bytes_per_sec = frame.sample_rate * frame.num_channels * 2
+        if bytes_per_sec > 0:
+            await asyncio.sleep(len(frame.audio) / bytes_per_sec)
 
         if self._audio_write_succeeds:
             self._frames_written += 1
@@ -209,6 +230,13 @@ class MockTransport(BaseTransport):
 
     The output transport uses the real BaseOutputTransport MediaSender machinery
     to properly simulate bot speaking events and audio write handling.
+
+    Event handlers available:
+
+    - on_client_connected(transport, client): Fired when the input transport
+      receives StartFrame, simulating a client connecting at pipeline start.
+    - on_client_disconnected(transport, client): Fired when the input transport
+      receives EndFrame or CancelFrame.
     """
 
     def __init__(
@@ -241,6 +269,8 @@ class MockTransport(BaseTransport):
         """
         super().__init__(input_name=input_name, output_name=output_name)
         self._params = params or TransportParams()
+        self._register_event_handler("on_client_connected")
+        self._register_event_handler("on_client_disconnected")
         self._input = MockInputTransport(
             self._params,
             name=self._input_name,
@@ -248,6 +278,8 @@ class MockTransport(BaseTransport):
             audio_interval_ms=audio_interval_ms,
             sample_rate=audio_sample_rate,
             num_channels=audio_num_channels,
+            on_client_connected=self._fire_client_connected,
+            on_client_disconnected=self._fire_client_disconnected,
         )
         self._output = MockOutputTransport(
             self._params,
@@ -255,6 +287,12 @@ class MockTransport(BaseTransport):
             fail_after_n_frames=fail_after_n_frames,
             name=self._output_name,
         )
+
+    async def _fire_client_connected(self):
+        await self._call_event_handler("on_client_connected", None)
+
+    async def _fire_client_disconnected(self):
+        await self._call_event_handler("on_client_disconnected", None)
 
     def input(self) -> FrameProcessor:
         """Get the mock input transport processor.
