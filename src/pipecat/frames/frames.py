@@ -382,7 +382,7 @@ class TTSTextFrame(AggregatedTextFrame):
 
 
 @dataclass
-class TranscriptionFrame(TextFrame, UninterruptibleFrame):
+class TranscriptionFrame(TextFrame):
     """Text frame containing speech transcription data.
 
     A text frame with transcription-specific data. The `result` field

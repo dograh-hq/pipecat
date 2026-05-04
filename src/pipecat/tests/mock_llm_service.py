@@ -10,6 +10,7 @@ import asyncio
 import json
 import time
 from collections.abc import AsyncIterator
+from typing import Any, cast
 
 from loguru import logger
 from openai.types.chat import ChatCompletionChunk
@@ -20,6 +21,7 @@ from openai.types.chat.chat_completion_chunk import (
     ChoiceDeltaToolCallFunction,
 )
 
+from pipecat.adapters.services.open_ai_adapter import OpenAILLMInvocationParams
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.services.openai.base_llm import OpenAILLMSettings
 from pipecat.services.openai.llm import OpenAILLMService
@@ -105,27 +107,29 @@ class MockLLMService(OpenAILLMService):
         finally:
             self._advance_step()
 
-    async def _stream_chat_completions_specific_context(
+    async def get_chat_completions(  # type: ignore[override]
         self, context: LLMContext
     ) -> AsyncIterator[ChatCompletionChunk]:
-        """Override to return mock chunks instead of API call."""
-        # The base class awaits this method, so it should return an async iterator directly
-        adapter = self.get_llm_adapter()
-        logger.debug(
-            f"{self}: Generating chat from LLM-specific context {adapter.get_messages_for_logging(context)}"
-        )
-        return self._stream_mock_chunks()
+        """Override to return mock chunks instead of calling the OpenAI API.
 
-    async def _stream_chat_completions_universal_context(
-        self, context: LLMContext
-    ) -> AsyncIterator[ChatCompletionChunk]:
-        """Override to return mock chunks for universal context."""
-        # The base class awaits this method, so it should return an async iterator directly
+        Mirrors the real ``BaseOpenAILLMService.get_chat_completions`` flow
+        (adapter call, invocation params, parameter building) so adapter and
+        param-building logic is exercised under test, then returns mock chunks
+        in place of the network call.
+        """
         adapter = self.get_llm_adapter()
-        messages_for_log = adapter.get_messages_for_logging(context)
         logger.debug(
-            f"{self}: Generating chat from universal context [{self._settings.system_instruction}] | {messages_for_log}"
+            f"{self}: Generating chat from context (mock) {adapter.get_messages_for_logging(context)}"
         )
+
+        params_from_context: OpenAILLMInvocationParams = adapter.get_llm_invocation_params(
+            context,
+            system_instruction=self._settings.system_instruction,
+            convert_developer_to_user=not self.supports_developer_role,
+        )
+
+        self.build_chat_completion_params(params_from_context)
+
         return self._stream_mock_chunks()
 
     def set_mock_chunks(self, chunks: list[ChatCompletionChunk]):
@@ -442,3 +446,71 @@ class MockLLMService(OpenAILLMService):
             steps.append(text_chunks)
 
         return steps
+
+
+class ContextCapturingMockLLM(MockLLMService):
+    """A MockLLMService that snapshots the LLM context at each generation.
+
+    Useful for tests that need to verify what the LLM sees on each completion
+    (e.g. that a tool call result was added to the context, or that the system
+    prompt was updated, before the next generation was triggered).
+    """
+
+    def __init__(self, *args, **kwargs):
+        """Initialize and prepare the captured-contexts buffer.
+
+        Args:
+            *args: Positional arguments forwarded to MockLLMService.
+            **kwargs: Keyword arguments forwarded to MockLLMService.
+        """
+        super().__init__(*args, **kwargs)
+        self.captured_contexts: list[dict[str, Any]] = []
+
+    async def get_chat_completions(  # type: ignore[override]
+        self, context: LLMContext
+    ) -> AsyncIterator[ChatCompletionChunk]:
+        """Capture context state before delegating to the parent mock stream."""
+        messages_snapshot: list[dict[str, Any]] = []
+        for msg in context.messages:
+            msg_copy: dict[str, Any] = dict(cast(dict[str, Any], msg))
+            if "content" in msg_copy:
+                msg_copy["content"] = str(msg_copy["content"]) if msg_copy["content"] else None
+            messages_snapshot.append(msg_copy)
+
+        self.captured_contexts.append(
+            {
+                "step": self._current_step,
+                "messages": messages_snapshot,
+                "system_prompt": self._settings.system_instruction,
+            }
+        )
+
+        return await super().get_chat_completions(context)
+
+    def get_context_at_step(self, step: int) -> dict[str, Any] | None:
+        """Get the captured context at a specific step (0-indexed)."""
+        for ctx in self.captured_contexts:
+            if ctx["step"] == step:
+                return ctx
+        return None
+
+    def has_tool_call_result_at_step(self, step: int, function_name: str) -> bool:
+        """Check if a tool call result for the given function exists at step."""
+        ctx = self.get_context_at_step(step)
+        if not ctx:
+            return False
+
+        for msg in ctx["messages"]:
+            if msg.get("role") == "tool" and msg.get("name") == function_name:
+                return True
+            if msg.get("tool_call_id") and function_name in str(msg.get("name", "")):
+                return True
+
+        return False
+
+    def get_system_prompt_at_step(self, step: int) -> str:
+        """Get the system prompt that was active at a specific step."""
+        ctx = self.get_context_at_step(step)
+        if ctx:
+            return ctx.get("system_prompt") or ""
+        return ""

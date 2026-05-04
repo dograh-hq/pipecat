@@ -484,7 +484,7 @@ class LLMContext:
                 f"In LLMContext, tools must be a ToolsSchema object or NOT_GIVEN. Got type: {type(tools)}",
             )
 
-    def set_otel_span_name(self, span_name: Optional[str]):
+    def set_otel_span_name(self, span_name: str | None):
         """Attach the current OTel span name to the context.
 
         This value is later accessed by the tracing decorators so that span names can
@@ -492,6 +492,6 @@ class LLMContext:
         """
         self._otel_span_name = span_name
 
-    def get_otel_span_name(self) -> Optional[str]:
+    def get_otel_span_name(self) -> str | None:
         """Return the OTel span name previously set with `set_otel_span_name` (if any)."""
         return self._otel_span_name
