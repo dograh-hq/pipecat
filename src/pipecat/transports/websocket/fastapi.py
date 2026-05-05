@@ -171,7 +171,7 @@ class FastAPIWebsocketClient:
                 # blocks pipeline shutdown. The application-state is already
                 # DISCONNECTED by this point, so abandoning the wait is safe.
                 await asyncio.wait_for(self._websocket.close(), timeout=1.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 logger.warning(
                     f"{self} websocket close handshake timed out — "
                     f"application_state={self._websocket.application_state} "
