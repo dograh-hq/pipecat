@@ -165,7 +165,18 @@ class FastAPIWebsocketClient:
         if self.is_connected and not self.is_closing:
             self._closing = True
             try:
-                await self._websocket.close()
+                # Cap the close handshake — some peers (notably telephony
+                # providers torn down via a separate REST call) can take the
+                # full 10s websockets-library default to ACK the close, which
+                # blocks pipeline shutdown. The application-state is already
+                # DISCONNECTED by this point, so abandoning the wait is safe.
+                await asyncio.wait_for(self._websocket.close(), timeout=1.0)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"{self} websocket close handshake timed out — "
+                    f"application_state={self._websocket.application_state} "
+                    f"client_state={self._websocket.client_state}"
+                )
             except Exception as e:
                 logger.error(f"{self} exception while closing the websocket: {e}")
 
