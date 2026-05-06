@@ -53,13 +53,10 @@ from pipecat.frames.frames import (
     TTSStartedFrame,
     TTSStoppedFrame,
     TTSTextFrame,
-    UserImageRawFrame,
     UserMuteStartedFrame,
     UserMuteStoppedFrame,
     UserStartedSpeakingFrame,
     UserStoppedSpeakingFrame,
-    VADUserStartedSpeakingFrame,
-    VADUserStoppedSpeakingFrame,
 )
 from pipecat.metrics.metrics import LLMTokenUsage
 from pipecat.processors.aggregators.llm_context import LLMContext
@@ -530,12 +527,6 @@ class GeminiLiveLLMService(LLMService):
         self._user_audio_buffer = bytearray()
         self._user_transcription_buffer = ""
         self._last_transcription_sent = ""
-        # Set on VADUserStoppedSpeakingFrame; consumed by the next
-        # _push_user_transcription to mark that TranscriptionFrame as
-        # finalized=True. Mirrors Deepgram's request_finalize/confirm_finalize
-        # pattern so TurnAnalyzerUserTurnStopStrategy can trigger
-        # on_user_turn_stopped immediately rather than waiting on the
-        # STT-timeout fallback.
         self._finalize_pending = False
         self._bot_audio_buffer = bytearray()
         self._bot_text_buffer = ""
