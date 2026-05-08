@@ -92,6 +92,14 @@ class ConVoxFrameSerializer(FrameSerializer):
         self._input_resampler = create_stream_resampler()
         self._output_resampler = create_stream_resampler()
 
+        # Debug counters — used to diagnose "client hears nothing but recording is fine".
+        self._out_audio_serialized = 0
+        self._out_audio_dropped = 0
+        self._in_audio_received = 0
+        self._in_audio_dropped = 0
+        self._first_out_audio_logged = False
+        self._first_in_audio_logged = False
+
     async def setup(self, frame: StartFrame):
         """Sets up the serializer with pipeline configuration.
 
@@ -124,13 +132,24 @@ class ConVoxFrameSerializer(FrameSerializer):
                 "reason": "hangup",
                 "context": {},
             }
-            logger.info(f"Sending ConVox endOfInteraction for stream {self._stream_sid}")
+            logger.info(
+                f"Sending ConVox endOfInteraction for stream {self._stream_sid} — "
+                f"session totals: outbound_audio_serialized={self._out_audio_serialized} "
+                f"(dropped={self._out_audio_dropped}), inbound_audio_received={self._in_audio_received} "
+                f"(dropped={self._in_audio_dropped}), final_seq={self._sequence_number}, "
+                f"final_chunk={self._chunk}"
+            )
             return json.dumps(answer)
         elif isinstance(frame, InterruptionFrame):
             # ConVox uses the simple "clear" format (spec page 8): only event
             # and stream_sid, no other fields.
             self._sequence_number += 1
             answer = {"event": "clear", "stream_sid": self._stream_sid}
+            logger.info(
+                f"ConVox serializer: sending 'clear' (interruption) for stream "
+                f"{self._stream_sid}, seq={self._sequence_number}, "
+                f"audio_frames_serialized_so_far={self._out_audio_serialized}"
+            )
             return json.dumps(answer)
         elif isinstance(frame, AudioRawFrame):
             data = frame.audio
@@ -142,6 +161,14 @@ class ConVoxFrameSerializer(FrameSerializer):
             )
             if serialized_data is None or len(serialized_data) == 0:
                 # Ignoring in case we don't have audio
+                self._out_audio_dropped += 1
+                if self._out_audio_dropped <= 3 or self._out_audio_dropped % 100 == 0:
+                    logger.warning(
+                        f"ConVox serializer: dropped outbound audio frame "
+                        f"#{self._out_audio_dropped} (resampler returned empty) — "
+                        f"in_rate={frame.sample_rate}, out_rate={self._convox_sample_rate}, "
+                        f"raw_bytes={len(data)}, stream_sid={self._stream_sid}"
+                    )
                 return None
 
             # Spec note: payload is "typically 320 bytes" (160 samples * 2
@@ -151,6 +178,7 @@ class ConVoxFrameSerializer(FrameSerializer):
 
             self._sequence_number += 1
             self._chunk += 1
+            self._out_audio_serialized += 1
             answer = {
                 "event": "media",
                 "sequence_number": self._sequence_number,
@@ -161,7 +189,27 @@ class ConVoxFrameSerializer(FrameSerializer):
                     "payload": payload,
                 },
             }
-            return json.dumps(answer)
+            serialized = json.dumps(answer)
+
+            if not self._first_out_audio_logged:
+                self._first_out_audio_logged = True
+                logger.info(
+                    f"ConVox serializer: first outbound audio frame — "
+                    f"stream_sid={self._stream_sid}, call_sid={self._call_sid}, "
+                    f"in_rate={frame.sample_rate}Hz, out_rate={self._convox_sample_rate}Hz, "
+                    f"raw_bytes={len(data)}, resampled_bytes={len(serialized_data)}, "
+                    f"payload_b64_chars={len(payload)}, json_bytes={len(serialized)}, "
+                    f"seq={self._sequence_number}, chunk={self._chunk}, "
+                    f"sample_envelope='{serialized[:160]}...'"
+                )
+            elif self._out_audio_serialized % 100 == 0:
+                logger.debug(
+                    f"ConVox serializer: serialized {self._out_audio_serialized} outbound "
+                    f"audio frames (dropped={self._out_audio_dropped}) — seq={self._sequence_number}, "
+                    f"chunk={self._chunk}, last_payload_b64_chars={len(payload)}, "
+                    f"stream_sid={self._stream_sid}"
+                )
+            return serialized
         elif isinstance(frame, (OutputTransportMessageFrame, OutputTransportMessageUrgentFrame)):
             # Allows application code to emit endOfInteraction with custom
             # reason/context (e.g. transfer with a target_number).
@@ -197,7 +245,32 @@ class ConVoxFrameSerializer(FrameSerializer):
                 payload, self._convox_sample_rate, self._sample_rate
             )
             if deserialized_data is None or len(deserialized_data) == 0:
+                self._in_audio_dropped += 1
+                if self._in_audio_dropped <= 3 or self._in_audio_dropped % 100 == 0:
+                    logger.warning(
+                        f"ConVox serializer: dropped inbound audio frame "
+                        f"#{self._in_audio_dropped} (resampler returned empty) — "
+                        f"in_rate={self._convox_sample_rate}, out_rate={self._sample_rate}, "
+                        f"raw_b64_chars={len(payload_base64)}, raw_bytes={len(payload)}"
+                    )
                 return None
+
+            self._in_audio_received += 1
+            if not self._first_in_audio_logged:
+                self._first_in_audio_logged = True
+                logger.info(
+                    f"ConVox serializer: first inbound audio frame — "
+                    f"stream_sid={self._stream_sid}, "
+                    f"convox_rate={self._convox_sample_rate}Hz, pipeline_rate={self._sample_rate}Hz, "
+                    f"raw_b64_chars={len(payload_base64)}, raw_bytes={len(payload)}, "
+                    f"resampled_bytes={len(deserialized_data)}"
+                )
+            elif self._in_audio_received % 500 == 0:
+                logger.debug(
+                    f"ConVox serializer: received {self._in_audio_received} inbound audio frames "
+                    f"(dropped={self._in_audio_dropped}) | outbound serialized={self._out_audio_serialized} "
+                    f"(dropped={self._out_audio_dropped})"
+                )
 
             return InputAudioRawFrame(
                 audio=deserialized_data,
