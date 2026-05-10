@@ -277,6 +277,7 @@ class DeepgramFluxSTTService(DeepgramFluxSTTBase, WebsocketService):
 
             self._connection_established_event.clear()
             self._user_is_speaking = False
+            logger.debug(f"{self}: Connecting to Flux: {self._websocket_url}")
             self._websocket = await websocket_connect(
                 self._websocket_url,
                 additional_headers={"Authorization": f"Token {self._api_key}"},
