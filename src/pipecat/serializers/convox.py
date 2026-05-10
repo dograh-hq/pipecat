@@ -97,8 +97,20 @@ class ConVoxFrameSerializer(FrameSerializer):
         self._out_audio_dropped = 0
         self._in_audio_received = 0
         self._in_audio_dropped = 0
-        self._first_out_audio_logged = False
-        self._first_in_audio_logged = False
+        # Per-frame detailed logging window: log every frame for the first
+        # N frames in each direction so timestamps/sequences can be
+        # correlated against ConVox-side logs.
+        self._detailed_log_first_n = 50
+        # 5-second heartbeat: when active in either direction, emit a
+        # rolling-totals line so silent gaps in the WS are visible.
+        self._heartbeat_interval_s = 5.0
+        self._last_out_heartbeat_ts = 0.0
+        self._last_in_heartbeat_ts = 0.0
+        # Idempotent flag — log session totals exactly once when the
+        # pipeline terminates (any End/Cancel path), independent of
+        # auto_hang_up. Without this, hangup-by-caller-first paths skip
+        # the totals entirely.
+        self._final_totals_logged = False
 
     async def setup(self, frame: StartFrame):
         """Sets up the serializer with pipeline configuration.
@@ -117,29 +129,41 @@ class ConVoxFrameSerializer(FrameSerializer):
         Returns:
             JSON-encoded string for ConVox events, or None if the frame isn't handled.
         """
-        if (
-            self._params.auto_hang_up
-            and not self._hangup_attempted
-            and isinstance(frame, (EndFrame, CancelFrame))
-        ):
-            self._hangup_attempted = True
-            self._sequence_number += 1
-            # NOTE: endOfInteraction uses camelCase "streamSid" (vendor-confirmed,
-            # intentional). All other ConVox events use snake_case "stream_sid".
-            answer = {
-                "event": "endOfInteraction",
-                "streamSid": self._stream_sid,
-                "reason": "hangup",
-                "context": {},
-            }
-            logger.info(
-                f"Sending ConVox endOfInteraction for stream {self._stream_sid} — "
-                f"session totals: outbound_audio_serialized={self._out_audio_serialized} "
-                f"(dropped={self._out_audio_dropped}), inbound_audio_received={self._in_audio_received} "
-                f"(dropped={self._in_audio_dropped}), final_seq={self._sequence_number}, "
-                f"final_chunk={self._chunk}"
-            )
-            return json.dumps(answer)
+        if isinstance(frame, (EndFrame, CancelFrame)):
+            # Always emit session totals exactly once on any termination
+            # path (graceful EndFrame, CancelFrame from user-hangup, etc.),
+            # independent of auto_hang_up. This is the share-with-vendor
+            # summary line.
+            if not self._final_totals_logged:
+                self._final_totals_logged = True
+                logger.info(
+                    f"ConVox serializer: session totals on {type(frame).__name__} — "
+                    f"stream_sid={self._stream_sid}, "
+                    f"outbound_audio_serialized={self._out_audio_serialized} "
+                    f"(dropped={self._out_audio_dropped}), "
+                    f"inbound_audio_received={self._in_audio_received} "
+                    f"(dropped={self._in_audio_dropped}), "
+                    f"final_seq={self._sequence_number}, final_chunk={self._chunk}, "
+                    f"hangup_attempted={self._hangup_attempted}"
+                )
+
+            if self._params.auto_hang_up and not self._hangup_attempted:
+                self._hangup_attempted = True
+                self._sequence_number += 1
+                # NOTE: endOfInteraction uses camelCase "streamSid" (vendor-confirmed,
+                # intentional). All other ConVox events use snake_case "stream_sid".
+                answer = {
+                    "event": "endOfInteraction",
+                    "streamSid": self._stream_sid,
+                    "reason": "hangup",
+                    "context": {},
+                }
+                logger.info(
+                    f"Sending ConVox endOfInteraction for stream {self._stream_sid}, "
+                    f"final_seq={self._sequence_number}"
+                )
+                return json.dumps(answer)
+            return None
         elif isinstance(frame, InterruptionFrame):
             # ConVox uses the simple "clear" format (spec page 8): only event
             # and stream_sid, no other fields.
@@ -191,16 +215,18 @@ class ConVoxFrameSerializer(FrameSerializer):
             }
             serialized = json.dumps(answer)
 
-            if not self._first_out_audio_logged:
-                self._first_out_audio_logged = True
+            # Per-frame detailed log for the first N outbound frames so
+            # timestamps and sequence numbers can be matched against
+            # vendor-side logs. After N, fall back to periodic + heartbeat.
+            if self._out_audio_serialized <= self._detailed_log_first_n:
                 logger.info(
-                    f"ConVox serializer: first outbound audio frame — "
-                    f"stream_sid={self._stream_sid}, call_sid={self._call_sid}, "
+                    f"ConVox serializer: outbound frame #{self._out_audio_serialized} — "
+                    f"stream_sid={self._stream_sid}, "
                     f"in_rate={frame.sample_rate}Hz, out_rate={self._convox_sample_rate}Hz, "
                     f"raw_bytes={len(data)}, resampled_bytes={len(serialized_data)}, "
                     f"payload_b64_chars={len(payload)}, json_bytes={len(serialized)}, "
                     f"seq={self._sequence_number}, chunk={self._chunk}, "
-                    f"sample_envelope='{serialized[:160]}...'"
+                    f"timestamp_ms={int(time.time() * 1000)}"
                 )
             elif self._out_audio_serialized % 100 == 0:
                 logger.debug(
@@ -208,6 +234,20 @@ class ConVoxFrameSerializer(FrameSerializer):
                     f"audio frames (dropped={self._out_audio_dropped}) — seq={self._sequence_number}, "
                     f"chunk={self._chunk}, last_payload_b64_chars={len(payload)}, "
                     f"stream_sid={self._stream_sid}"
+                )
+
+            # 5-second outbound heartbeat — emits at most every interval.
+            now = time.monotonic()
+            if now - self._last_out_heartbeat_ts >= self._heartbeat_interval_s:
+                self._last_out_heartbeat_ts = now
+                logger.info(
+                    f"ConVox serializer: outbound heartbeat — "
+                    f"stream_sid={self._stream_sid}, "
+                    f"out_serialized={self._out_audio_serialized} "
+                    f"(dropped={self._out_audio_dropped}), "
+                    f"in_received={self._in_audio_received} "
+                    f"(dropped={self._in_audio_dropped}), "
+                    f"seq={self._sequence_number}, chunk={self._chunk}"
                 )
             return serialized
         elif isinstance(frame, (OutputTransportMessageFrame, OutputTransportMessageUrgentFrame)):
@@ -256,19 +296,33 @@ class ConVoxFrameSerializer(FrameSerializer):
                 return None
 
             self._in_audio_received += 1
-            if not self._first_in_audio_logged:
-                self._first_in_audio_logged = True
+            if self._in_audio_received <= self._detailed_log_first_n:
                 logger.info(
-                    f"ConVox serializer: first inbound audio frame — "
+                    f"ConVox serializer: inbound frame #{self._in_audio_received} — "
                     f"stream_sid={self._stream_sid}, "
                     f"convox_rate={self._convox_sample_rate}Hz, pipeline_rate={self._sample_rate}Hz, "
                     f"raw_b64_chars={len(payload_base64)}, raw_bytes={len(payload)}, "
-                    f"resampled_bytes={len(deserialized_data)}"
+                    f"resampled_bytes={len(deserialized_data)}, "
+                    f"timestamp_ms={int(time.time() * 1000)}"
                 )
             elif self._in_audio_received % 500 == 0:
                 logger.debug(
                     f"ConVox serializer: received {self._in_audio_received} inbound audio frames "
                     f"(dropped={self._in_audio_dropped}) | outbound serialized={self._out_audio_serialized} "
+                    f"(dropped={self._out_audio_dropped})"
+                )
+
+            # 5-second inbound heartbeat. Pairing this with the outbound
+            # heartbeat makes silent gaps in either direction obvious.
+            now = time.monotonic()
+            if now - self._last_in_heartbeat_ts >= self._heartbeat_interval_s:
+                self._last_in_heartbeat_ts = now
+                logger.info(
+                    f"ConVox serializer: inbound heartbeat — "
+                    f"stream_sid={self._stream_sid}, "
+                    f"in_received={self._in_audio_received} "
+                    f"(dropped={self._in_audio_dropped}), "
+                    f"out_serialized={self._out_audio_serialized} "
                     f"(dropped={self._out_audio_dropped})"
                 )
 
