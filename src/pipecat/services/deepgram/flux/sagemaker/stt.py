@@ -117,6 +117,7 @@ class DeepgramFluxSageMakerSTTService(DeepgramFluxSTTBase):
             eot_threshold=None,
             eot_timeout_ms=None,
             keyterm=[],
+            language_hints=[],
             min_confidence=None,
         )
 

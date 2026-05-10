@@ -72,6 +72,11 @@ class DeepgramFluxSTTSettings(STTSettings):
         eot_timeout_ms: Time in ms after speech to finish a turn regardless of EOT
             confidence (default 5000).
         keyterm: Keyterms to boost recognition accuracy for specialized terminology.
+        language_hints: BCP-47 codes biasing language detection on
+            ``flux-general-multi``. Acts as a prior, not a hard constraint —
+            speech outside the hint set is still recognized. Empty list (default)
+            means full auto-detect. Only valid for ``flux-general-multi``;
+            sending it to ``flux-general-en`` returns a 400 from Deepgram.
         min_confidence: Minimum confidence required to create a TranscriptionFrame.
     """
 
@@ -79,6 +84,7 @@ class DeepgramFluxSTTSettings(STTSettings):
     eot_threshold: float | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
     eot_timeout_ms: int | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
     keyterm: list | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    language_hints: list | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
     min_confidence: float | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
 
 
@@ -93,7 +99,13 @@ class DeepgramFluxSTTBase(STTService):
 
     Settings = DeepgramFluxSTTSettings
     _settings: Settings
-    _CONFIGURE_FIELDS = {"keyterm", "eot_threshold", "eager_eot_threshold", "eot_timeout_ms"}
+    _CONFIGURE_FIELDS = {
+        "keyterm",
+        "eot_threshold",
+        "eager_eot_threshold",
+        "eot_timeout_ms",
+        "language_hints",
+    }
 
     def __init__(
         self,
@@ -196,6 +208,13 @@ class DeepgramFluxSTTBase(STTService):
         for keyterm in self._settings.keyterm:
             params.append(urlencode({"keyterm": keyterm}))
 
+        # Add language_hint parameters (can have multiple). Note the
+        # asymmetry: the URL uses singular `language_hint` repeated per
+        # code, while the Configure control message uses the plural
+        # `language_hints` array. Both forms are Deepgram's wire contract.
+        for code in self._settings.language_hints:
+            params.append(urlencode({"language_hint": code}))
+
         # Add tag parameters (can have multiple)
         for tag_value in self._tag:
             params.append(urlencode({"tag": tag_value}))
@@ -255,6 +274,10 @@ class DeepgramFluxSTTBase(STTService):
 
         if "keyterm" in fields:
             message["keyterms"] = self._settings.keyterm
+
+        if "language_hints" in fields:
+            # Plural in the Configure body; singular-repeated in the URL.
+            message["language_hints"] = list(self._settings.language_hints)
 
         thresholds: dict[str, Any] = {}
         if "eot_threshold" in fields:
