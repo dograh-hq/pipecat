@@ -171,3 +171,130 @@ def test_configure_fields_membership():
     """language_hints must be in the configurable set so settings updates flow
     through _send_configure rather than triggering _warn_unhandled_updated_settings."""
     assert "language_hints" in DeepgramFluxSTTBase._CONFIGURE_FIELDS
+
+
+def test_configure_fields_did_not_lose_existing_entries():
+    """Regression guard: adding `language_hints` must not displace the
+    pre-existing configurable fields. Pin the full set so any future deletion
+    fails loudly here rather than silently dropping a configurable field."""
+    expected = {
+        "keyterm",
+        "eot_threshold",
+        "eager_eot_threshold",
+        "eot_timeout_ms",
+        "language_hints",
+    }
+    assert DeepgramFluxSTTBase._CONFIGURE_FIELDS == expected
+
+
+def test_build_query_string_preserves_hint_order():
+    """Order matters as a contract: callers may pass primary-then-fallback codes
+    (e.g. 'hi','en') and Deepgram processes them in order. Pin emission order."""
+    settings = _make_settings(language_hints=["hi", "en", "es"])
+    base = _make_stub(settings)
+
+    qs = base._build_query_string()
+
+    # Find positions of each hint in the query string and assert ascending.
+    positions = [qs.find(f"language_hint={code}") for code in ("hi", "en", "es")]
+    assert all(p >= 0 for p in positions), qs
+    assert positions == sorted(positions), f"hint order not preserved: {qs}"
+
+
+def test_build_query_string_url_encodes_special_chars():
+    """A hint containing reserved URL chars must be percent-escaped, not
+    interpolated raw — otherwise a stray '&' or space would corrupt the
+    query string structure. Deepgram will reject the resulting code, but the
+    URL itself must remain well-formed."""
+    settings = _make_settings(language_hints=["en uncommon"])
+    base = _make_stub(settings)
+
+    qs = base._build_query_string()
+
+    # urlencode emits '+' for space (form-encoded), and the literal space must
+    # not appear inside the language_hint value.
+    assert "language_hint=en+uncommon" in qs or "language_hint=en%20uncommon" in qs
+    assert "language_hint=en uncommon" not in qs
+
+
+def test_build_query_string_single_hint():
+    """Single-element list still uses the repeated-singular form (no special
+    casing as a scalar)."""
+    settings = _make_settings(language_hints=["hi"])
+    base = _make_stub(settings)
+
+    qs = base._build_query_string()
+    parts = qs.split("&")
+
+    assert "language_hint=hi" in parts
+    assert sum(1 for p in parts if p.startswith("language_hint=")) == 1
+
+
+def test_build_query_string_keyterm_and_language_hints_coexist():
+    """Both list-emitters write to the same query string; neither must clobber
+    the other or interleave incorrectly."""
+    settings = _make_settings(keyterm=["nophari", "samvadatmaka"], language_hints=["en", "hi"])
+    base = _make_stub(settings)
+
+    qs = base._build_query_string()
+    parts = qs.split("&")
+
+    assert "keyterm=nophari" in parts
+    assert "keyterm=samvadatmaka" in parts
+    assert "language_hint=en" in parts
+    assert "language_hint=hi" in parts
+
+
+def test_build_query_string_is_idempotent():
+    """Building the query string must be a pure function of settings — calling
+    it twice without mutating settings produces identical output. Catches
+    accidental mutation of self._settings or self._tag during emission."""
+    settings = _make_settings(language_hints=["en", "hi"], keyterm=["nophari"])
+    base = _make_stub(settings)
+
+    first = base._build_query_string()
+    second = base._build_query_string()
+
+    assert first == second
+
+
+@pytest.mark.asyncio
+async def test_send_configure_with_multiple_fields_groups_correctly():
+    """A realistic mid-stream update touches several fields at once. The
+    Configure body must group thresholds under the `thresholds` key while
+    keeping `keyterms` and `language_hints` at the top level."""
+    settings = _make_settings(
+        keyterm=["nophari"],
+        language_hints=["en", "es"],
+        eot_threshold=0.8,
+        eager_eot_threshold=0.5,
+    )
+    instance = _make_stub(settings)
+    instance._transport_send_json = AsyncMock()
+
+    await instance._send_configure({"keyterm", "language_hints", "eot_threshold", "eager_eot_threshold"})
+
+    sent = instance._transport_send_json.await_args.args[0]
+    assert sent["type"] == "Configure"
+    assert sent["keyterms"] == ["nophari"]
+    assert sent["language_hints"] == ["en", "es"]
+    assert sent["thresholds"] == {"eot_threshold": 0.8, "eager_eot_threshold": 0.5}
+
+
+@pytest.mark.asyncio
+async def test_send_configure_copies_language_hints_list():
+    """The Configure body must contain a *copy* of the hints list, not a live
+    reference into self._settings — so a caller that mutates the original
+    after the message is sent doesn't retroactively change the wire payload."""
+    original = ["en", "hi"]
+    settings = _make_settings(language_hints=original)
+    instance = _make_stub(settings)
+    instance._transport_send_json = AsyncMock()
+
+    await instance._send_configure({"language_hints"})
+    sent_list = instance._transport_send_json.await_args.args[0]["language_hints"]
+
+    # Mutating the original list must not alter what was sent on the wire.
+    original.append("es")
+    assert sent_list == ["en", "hi"]
+    assert sent_list is not original
