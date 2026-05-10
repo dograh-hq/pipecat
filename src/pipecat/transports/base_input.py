@@ -76,6 +76,20 @@ class BaseInputTransport(FrameProcessor):
         # Track bot speaking state for interruption logic
         self._bot_speaking = False
 
+        # Post-bot-stop mute window: drop inbound mic frames for a brief
+        # period after BotStoppedSpeakingFrame so that residual bot audio
+        # echoing back into the user's microphone (very common on phone
+        # calls without echo cancellation) doesn't trigger a false-positive
+        # VAD turn-start. Without this, the false trigger fires
+        # broadcast_interruption, the assistant turn is cancelled with no
+        # transcript (strategy=None), and the user perceives the system
+        # as stuck. See log_review_findings.md, Cases 4 and 5.
+        # Hardcoded 0.6s as a sensible default; can be lifted into
+        # TransportParams later if a transport needs to override.
+        self._post_bot_stop_mute_seconds = 0.6
+        self._post_bot_stop_mute_until_ts = 0.0
+        self._post_bot_stop_mute_dropped = 0
+
         # Track user speaking state for interruption logic
         self._user_speaking = False
         # Last time a UserSpeakingFrame was pushed.
@@ -323,6 +337,25 @@ class BaseInputTransport(FrameProcessor):
             frame: The input audio frame to process.
         """
         if self._params.audio_in_enabled and not self._paused:
+            # Post-bot-stop mute window: drop frames if we're still inside
+            # the echo-suppression window after the bot stopped speaking.
+            # Periodic log so the behavior is observable without flooding.
+            if (
+                self._post_bot_stop_mute_until_ts
+                and time.monotonic() < self._post_bot_stop_mute_until_ts
+            ):
+                self._post_bot_stop_mute_dropped += 1
+                if (
+                    self._post_bot_stop_mute_dropped == 1
+                    or self._post_bot_stop_mute_dropped % 50 == 0
+                ):
+                    remaining = self._post_bot_stop_mute_until_ts - time.monotonic()
+                    logger.debug(
+                        f"BaseInputTransport: dropping inbound audio frame "
+                        f"#{self._post_bot_stop_mute_dropped} in post-bot-stop "
+                        f"mute window (remaining={remaining * 1000:.0f}ms)"
+                    )
+                return
             await self._audio_in_queue.put(frame)
 
     #
@@ -348,9 +381,21 @@ class BaseInputTransport(FrameProcessor):
             await self.cancel(frame)
             await self.push_frame(frame, direction)
         elif isinstance(frame, BotStartedSpeakingFrame):
+            # Bot has started speaking: any post-bot-stop mute window from
+            # the previous turn is now irrelevant — clear it so we don't
+            # accidentally swallow the user's interrupt of this new turn.
+            self._post_bot_stop_mute_until_ts = 0.0
+            self._post_bot_stop_mute_dropped = 0
             await self._deprecated_handle_bot_started_speaking(frame)
             await self.push_frame(frame, direction)
         elif isinstance(frame, BotStoppedSpeakingFrame):
+            # Arm post-bot-stop mute window. See push_audio_frame() for
+            # the drop logic and __init__ for rationale.
+            if self._post_bot_stop_mute_seconds > 0:
+                self._post_bot_stop_mute_until_ts = (
+                    time.monotonic() + self._post_bot_stop_mute_seconds
+                )
+                self._post_bot_stop_mute_dropped = 0
             await self._deprecated_handle_bot_stopped_speaking(frame)
             await self.push_frame(frame, direction)
         elif isinstance(frame, EmulateUserStartedSpeakingFrame):
