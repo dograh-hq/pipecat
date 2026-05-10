@@ -122,6 +122,12 @@ class FastAPIWebsocketClient:
         self._callbacks = callbacks
         self._leave_counter = 0
         self._transfer_in_progress = False
+        # Diagnostic counters — used to confirm bytes actually leave the
+        # WebSocket (vs. only being serialized upstream). See logs in send().
+        self._send_count = 0
+        self._send_bytes_total = 0
+        self._send_error_count = 0
+        self._first_send_logged = False
 
     async def setup(self, _: StartFrame):
         """Set up the WebSocket client.
@@ -151,9 +157,44 @@ class FastAPIWebsocketClient:
                     await self._websocket.send_bytes(data)
                 else:
                     await self._websocket.send_text(data)
+                # Successful send: bytes left the WebSocket. This is the
+                # downstream-most server-side confirmation; downstream of this
+                # is purely network + remote endpoint.
+                payload_len = len(data) if data is not None else 0
+                self._send_count += 1
+                self._send_bytes_total += payload_len
+                if not self._first_send_logged:
+                    self._first_send_logged = True
+                    logger.info(
+                        f"FastAPIWebsocketClient: first WS send confirmed — "
+                        f"type={'bytes' if isinstance(data, bytes) else 'text'}, "
+                        f"len={payload_len}, application_state={self._websocket.application_state}"
+                    )
+                elif self._send_count % 200 == 0:
+                    logger.debug(
+                        f"FastAPIWebsocketClient: WS sends so far={self._send_count}, "
+                        f"bytes_total={self._send_bytes_total}, errors={self._send_error_count}, "
+                        f"application_state={self._websocket.application_state}"
+                    )
+            else:
+                # _can_send() is False — log first occurrence so we can tell
+                # serialized-but-not-sent from never-serialized.
+                if not getattr(self, "_send_skipped_logged", False):
+                    self._send_skipped_logged = True
+                    logger.warning(
+                        f"FastAPIWebsocketClient: send skipped (cannot send) — "
+                        f"closing={self._closing}, "
+                        f"application_state={self._websocket.application_state}, "
+                        f"client_state={self._websocket.client_state}"
+                    )
         except Exception as e:
+            self._send_error_count += 1
             logger.warning(
-                f"{self} exception sending data: {e.__class__.__name__} ({e}), application_state: {self._websocket.application_state}"
+                f"{self} exception sending data: {e.__class__.__name__} ({e}), "
+                f"application_state: {self._websocket.application_state}, "
+                f"sends_before_error={self._send_count}, "
+                f"bytes_before_error={self._send_bytes_total}, "
+                f"total_send_errors={self._send_error_count}"
             )
 
     async def disconnect(self):
