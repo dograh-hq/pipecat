@@ -524,6 +524,11 @@ class GeminiLiveLLMService(LLMService):
         self._user_is_muted = False
         self._reconnect_pending = False
         self._pending_function_calls = []
+        # Tool call IDs the server has emitted but for which we have not yet
+        # delivered a tool_response on the current session. Reconnecting while
+        # this set is non-empty would send the response to a session that
+        # never issued the call, leaving Gemini 3.x stuck in sync-call wait.
+        self._pending_tool_responses: set[str] = set()
         self._user_audio_buffer = bytearray()
         self._user_transcription_buffer = ""
         self._last_transcription_sent = ""
@@ -603,7 +608,11 @@ class GeminiLiveLLMService(LLMService):
             # First time setting system_instruction
             if not self._session:
                 await self._connect()
-            elif self._bot_is_responding:
+            elif self._bot_is_responding or self._pending_tool_responses:
+                # Defer reconnect: a reconnect mid-utterance truncates the
+                # bot turn, and a reconnect mid-tool-call strands the
+                # tool_response on a session that never issued the
+                # corresponding tool_call (hangs Gemini 3.x's sync calls).
                 self._reconnect_pending = True
             else:
                 await self._reconnect()
@@ -872,7 +881,11 @@ class GeminiLiveLLMService(LLMService):
         if not self._bot_is_responding and self._end_frame_pending_bot_turn_finished:
             await self._release_deferred_end_frame()
 
-        if not self._bot_is_responding and self._reconnect_pending:
+        if (
+            not self._bot_is_responding
+            and not self._pending_tool_responses
+            and self._reconnect_pending
+        ):
             self._reconnect_pending = False
             await self._reconnect()
 
@@ -1221,6 +1234,10 @@ class GeminiLiveLLMService(LLMService):
                 self._session = None
             self._session_ready_event.clear()
             self._ready_for_realtime_input = False
+            # Drop any tool_call_ids the previous session emitted — they're
+            # not deliverable on a new session and would otherwise block all
+            # future reconnects.
+            self._pending_tool_responses.clear()
             self._disconnecting = False
         except Exception as e:
             await self.push_error(error_msg=f"Error disconnecting: {e}", exception=e)
@@ -1456,6 +1473,15 @@ class GeminiLiveLLMService(LLMService):
                 await self._session.send_realtime_input(text=" ")
         except Exception as e:
             await self._handle_send_error(e)
+        finally:
+            # Drop the id whether or not the send raised — a stale entry
+            # would block all future reconnects. Reconnect is intentionally
+            # NOT fired here: under Gemini 3.x's sync contract the model
+            # responds on this session immediately after the tool_response,
+            # and tearing the session down now would truncate that response.
+            # _set_bot_is_responding(False) fires the deferred reconnect at
+            # the safe point (after the model's post-tool turn completes).
+            self._pending_tool_responses.discard(tool_call_id)
 
     @traced_gemini_live(operation="llm_setup")
     async def _handle_session_ready(self, session: AsyncSession):
@@ -1563,6 +1589,11 @@ class GeminiLiveLLMService(LLMService):
             )
             for f in function_calls
         ]
+
+        # Record that we owe the server a tool_response on this session
+        # for each call; _update_settings defers reconnects while non-empty.
+        for fc in function_calls_llm:
+            self._pending_tool_responses.add(fc.tool_call_id)
 
         if self._bot_is_responding:
             self._pending_function_calls = function_calls_llm
