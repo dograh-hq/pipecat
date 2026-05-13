@@ -89,6 +89,9 @@ class AsteriskFrameSerializer(FrameSerializer):
         self._output_resampler = create_stream_resampler()
         self._hangup_attempted = False
         self._transfer_attempted = False
+        self._inbound_frame_count = 0
+        self._outbound_frame_count = 0
+        self._log_every_n_frames = 250  # ~5s at 50 fps (20ms ulaw)
 
     async def setup(self, frame: StartFrame):
         """Sets up the serializer with pipeline configuration.
@@ -161,7 +164,25 @@ class AsteriskFrameSerializer(FrameSerializer):
                 data, frame.sample_rate, self._asterisk_sample_rate, self._output_resampler
             )
             if serialized_data is None or len(serialized_data) == 0:
+                if self._outbound_frame_count == 0:
+                    logger.warning(
+                        f"AsteriskFrameSerializer: outbound ulaw conversion produced no bytes "
+                        f"(channel={self._channel_id}, pipeline_rate={frame.sample_rate}, "
+                        f"asterisk_rate={self._asterisk_sample_rate}, in_bytes={len(data)})"
+                    )
                 return None
+
+            self._outbound_frame_count += 1
+            if self._outbound_frame_count == 1:
+                logger.info(
+                    f"AsteriskFrameSerializer: first outbound audio frame serialized "
+                    f"({len(serialized_data)} bytes ulaw, channel={self._channel_id})"
+                )
+            elif self._outbound_frame_count % self._log_every_n_frames == 0:
+                logger.info(
+                    f"AsteriskFrameSerializer: outbound audio frames sent={self._outbound_frame_count} "
+                    f"(channel={self._channel_id})"
+                )
 
             # Asterisk expects raw binary ulaw bytes (no JSON wrapper, no base64)
             return serialized_data
@@ -189,7 +210,25 @@ class AsteriskFrameSerializer(FrameSerializer):
                 self._input_resampler,
             )
             if deserialized_data is None or len(deserialized_data) == 0:
+                if self._inbound_frame_count == 0:
+                    logger.warning(
+                        f"AsteriskFrameSerializer: inbound ulaw->pcm produced no bytes "
+                        f"(channel={self._channel_id}, in_bytes={len(data)}, "
+                        f"asterisk_rate={self._asterisk_sample_rate}, pipeline_rate={self._sample_rate})"
+                    )
                 return None
+
+            self._inbound_frame_count += 1
+            if self._inbound_frame_count == 1:
+                logger.info(
+                    f"AsteriskFrameSerializer: first inbound audio frame received "
+                    f"({len(data)} bytes ulaw, channel={self._channel_id})"
+                )
+            elif self._inbound_frame_count % self._log_every_n_frames == 0:
+                logger.info(
+                    f"AsteriskFrameSerializer: inbound audio frames received={self._inbound_frame_count} "
+                    f"(channel={self._channel_id})"
+                )
 
             audio_frame = InputAudioRawFrame(
                 audio=deserialized_data,
@@ -205,5 +244,16 @@ class AsteriskFrameSerializer(FrameSerializer):
                 logger.debug(f"Asterisk WebSocket event: {event} - {message}")
                 return None
             except json.JSONDecodeError:
-                logger.warning(f"Failed to parse JSON message from Asterisk: {data}")
+                # chan_websocket sends plain-text key:value control messages
+                # (MEDIA_START, MEDIA_END, MEDIA_XOFF, MEDIA_XON, MEDIA_BUFFERING_COMPLETED).
+                # These are not JSON by design — log at INFO so flow-control events are visible.
+                text = str(data).strip()
+                first_token = text.split(maxsplit=1)[0] if text else ""
+                if first_token.startswith("MEDIA_"):
+                    logger.info(
+                        f"AsteriskFrameSerializer: chan_websocket control message "
+                        f"(channel={self._channel_id}, msg={text!r})"
+                    )
+                else:
+                    logger.warning(f"Failed to parse JSON message from Asterisk: {data}")
                 return None
