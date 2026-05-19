@@ -544,25 +544,40 @@ class FastAPIWebsocketOutputTransport(BaseOutputTransport):
 
         try:
             payload = await self._params.serializer.serialize(frame)
-            if payload:
-                # Optional protocol-level audio packetization:
-                # If a downstream WebSocket media endpoint requires fixed-size PCM frames,
-                # configure params.fixed_audio_packet_size (e.g. 640 for 20ms @ 16kHz PCM16 mono).
-                packet_bytes = self._params.fixed_audio_packet_size
+            if not payload:
+                return
 
-                if packet_bytes and isinstance(payload, (bytes, bytearray)):
-                    self._audio_send_buffer.extend(bytes(payload))
+            # A serializer may return a list/tuple when one frame must be sent
+            # as several discrete messages (e.g. ConVox emits endOfInteraction
+            # followed by a stop event on hangup). Send each in order.
+            if isinstance(payload, (list, tuple)):
+                for item in payload:
+                    if item:
+                        await self._send_payload(item)
+                return
 
-                    # Send only full frames; keep remainder for the next call.
-                    while len(self._audio_send_buffer) >= packet_bytes:
-                        chunk = bytes(self._audio_send_buffer[:packet_bytes])
-                        del self._audio_send_buffer[:packet_bytes]
-                        await self._client.send(chunk)
-                    return
-
-                await self._client.send(payload)
+            await self._send_payload(payload)
         except Exception as e:
             logger.error(f"{self} exception sending data: {e.__class__.__name__} ({e})")
+
+    async def _send_payload(self, payload):
+        """Send a single serialized payload, applying optional packetization."""
+        # Optional protocol-level audio packetization:
+        # If a downstream WebSocket media endpoint requires fixed-size PCM frames,
+        # configure params.fixed_audio_packet_size (e.g. 640 for 20ms @ 16kHz PCM16 mono).
+        packet_bytes = self._params.fixed_audio_packet_size
+
+        if packet_bytes and isinstance(payload, (bytes, bytearray)):
+            self._audio_send_buffer.extend(bytes(payload))
+
+            # Send only full frames; keep remainder for the next call.
+            while len(self._audio_send_buffer) >= packet_bytes:
+                chunk = bytes(self._audio_send_buffer[:packet_bytes])
+                del self._audio_send_buffer[:packet_bytes]
+                await self._client.send(chunk)
+            return
+
+        await self._client.send(payload)
 
     async def _write_audio_sleep(self):
         """Simulate audio playback timing with appropriate delays."""

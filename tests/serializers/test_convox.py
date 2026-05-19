@@ -244,19 +244,39 @@ async def test_serialize_interruption_frame_emits_clear():
 
 
 @pytest.mark.asyncio
-async def test_serialize_end_frame_emits_end_of_interaction():
+async def test_serialize_end_frame_emits_end_of_interaction_then_stop():
     serializer = _make_serializer(auto_hang_up=True)
     await _setup(serializer)
 
     out = await serializer.serialize(EndFrame())
-    assert isinstance(out, str)
+    # Hangup path returns both events as an ordered list of JSON strings.
+    assert isinstance(out, list)
+    assert len(out) == 2
 
-    parsed = json.loads(out)
+    eoi = json.loads(out[0])
     # camelCase "streamSid" is intentional and vendor-confirmed for this event.
-    assert parsed["event"] == "endOfInteraction"
-    assert parsed["streamSid"] == STREAM_SID
-    assert parsed["reason"] == "hangup"
-    assert parsed["context"] == {}
+    assert eoi["event"] == "endOfInteraction"
+    assert eoi["streamSid"] == STREAM_SID
+    assert eoi["reason"] == "hangup"
+    assert eoi["context"] == {}
+
+    stop = json.loads(out[1])
+    assert stop["event"] == "stop"
+    # snake_case here — only endOfInteraction uses camelCase.
+    assert stop["stream_sid"] == STREAM_SID
+    assert stop["stop"] == {
+        "call_sid": CALL_SID,
+        "account_sid": ACCOUNT_SID,
+        "reason": "stopped",
+    }
+    # sequence_number continues the monotonic outbound counter. On a fresh
+    # serializer: endOfInteraction takes seq 1 (not echoed in its payload),
+    # stop takes seq 2.
+    assert stop["sequence_number"] == 2
+    # UTC ISO-8601 with microseconds, no offset suffix.
+    from datetime import datetime
+
+    datetime.strptime(stop["timestamp"], "%Y-%m-%dT%H:%M:%S.%f")
 
 
 @pytest.mark.asyncio
