@@ -13,6 +13,7 @@ from starlette.websockets import WebSocketState
 from pipecat.transports.websocket.fastapi import (
     FastAPIWebsocketCallbacks,
     FastAPIWebsocketClient,
+    FastAPIWebsocketOutputTransport,
     _WebSocketMessageIterator,
 )
 
@@ -200,6 +201,54 @@ class TestSendDisconnectRace(unittest.IsolatedAsyncioTestCase):
         await client.send("text data")
 
         self.assertFalse(client.is_closing)
+
+
+class TestWriteFrameListPayload(unittest.IsolatedAsyncioTestCase):
+    """A serializer may return a list when one frame must be sent as several
+    discrete WS messages (ConVox emits endOfInteraction then stop on hangup).
+    """
+
+    def _make_output(self, serializer):
+        # Bypass BaseOutputTransport.__init__ — _write_frame only touches
+        # _client, _params and _audio_send_buffer.
+        out = object.__new__(FastAPIWebsocketOutputTransport)
+        out._client = AsyncMock()
+        out._client.is_closing = False
+        out._client.is_connected = True
+        out._params = AsyncMock()
+        out._params.serializer = serializer
+        out._params.fixed_audio_packet_size = None
+        out._audio_send_buffer = bytearray()
+        return out
+
+    async def test_list_payload_sends_each_item_in_order(self):
+        serializer = AsyncMock()
+        serializer.serialize.return_value = ['{"event": "endOfInteraction"}', '{"event": "stop"}']
+
+        out = self._make_output(serializer)
+        await out._write_frame(object())
+
+        sent = [call.args[0] for call in out._client.send.await_args_list]
+        self.assertEqual(sent, ['{"event": "endOfInteraction"}', '{"event": "stop"}'])
+
+    async def test_list_payload_skips_empty_items(self):
+        serializer = AsyncMock()
+        serializer.serialize.return_value = ['{"event": "stop"}', "", None]
+
+        out = self._make_output(serializer)
+        await out._write_frame(object())
+
+        sent = [call.args[0] for call in out._client.send.await_args_list]
+        self.assertEqual(sent, ['{"event": "stop"}'])
+
+    async def test_single_payload_still_sent(self):
+        serializer = AsyncMock()
+        serializer.serialize.return_value = '{"event": "media"}'
+
+        out = self._make_output(serializer)
+        await out._write_frame(object())
+
+        out._client.send.assert_awaited_once_with('{"event": "media"}')
 
 
 if __name__ == "__main__":

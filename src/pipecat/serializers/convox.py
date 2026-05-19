@@ -9,6 +9,7 @@
 import base64
 import json
 import time
+from datetime import datetime, timezone
 from typing import Optional
 
 from loguru import logger
@@ -120,14 +121,17 @@ class ConVoxFrameSerializer(FrameSerializer):
         """
         self._sample_rate = self._params.sample_rate or frame.audio_in_sample_rate
 
-    async def serialize(self, frame: Frame) -> str | bytes | None:
+    async def serialize(self, frame: Frame) -> str | bytes | list[str | bytes] | None:
         """Serializes a Pipecat frame to ConVox WebSocket format.
 
         Args:
             frame: The Pipecat frame to serialize.
 
         Returns:
-            JSON-encoded string for ConVox events, or None if the frame isn't handled.
+            JSON-encoded string for ConVox events, a list of JSON strings when a
+            single frame produces multiple events (the hangup path emits
+            ``endOfInteraction`` followed by ``stop``), or None if the frame
+            isn't handled.
         """
         if isinstance(frame, (EndFrame, CancelFrame)):
             # Always emit session totals exactly once on any termination
@@ -158,11 +162,29 @@ class ConVoxFrameSerializer(FrameSerializer):
                     "reason": "hangup",
                     "context": {},
                 }
+                # ConVox additionally expects an explicit "stop" event after
+                # endOfInteraction so the carrier tears the stream down rather
+                # than waiting for the WS to drop. Uses snake_case "stream_sid"
+                # like every event except endOfInteraction.
+                self._sequence_number += 1
+                stop_event = {
+                    "event": "stop",
+                    "sequence_number": self._sequence_number,
+                    "stream_sid": self._stream_sid,
+                    "stop": {
+                        "call_sid": self._call_sid,
+                        "account_sid": self._account_sid,
+                        "reason": "stopped",
+                    },
+                    "timestamp": datetime.now(timezone.utc).strftime(
+                        "%Y-%m-%dT%H:%M:%S.%f"
+                    ),
+                }
                 logger.info(
-                    f"Sending ConVox endOfInteraction for stream {self._stream_sid}, "
-                    f"final_seq={self._sequence_number}"
+                    f"Sending ConVox endOfInteraction + stop for stream "
+                    f"{self._stream_sid}, final_seq={self._sequence_number}"
                 )
-                return json.dumps(answer)
+                return [json.dumps(answer), json.dumps(stop_event)]
             return None
         elif isinstance(frame, InterruptionFrame):
             # ConVox uses the simple "clear" format (spec page 8): only event
