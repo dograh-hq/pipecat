@@ -1434,7 +1434,17 @@ class LLMAssistantAggregator(LLMContextAggregator):
         triggers LLM inference when appropriate.
         """
         is_async = not in_progress_frame.cancel_on_interruption
-        del self._function_calls_in_progress[frame.tool_call_id]
+        # `pop(..., None)` instead of `del [...]` to absorb the race where the
+        # entry was already removed between the membership check at the caller
+        # (`_handle_function_call_result`) and this point. The caller checks
+        # membership before the `await self._handle_function_call_finished(...)`,
+        # but the `await` yields the event loop and any concurrent task that
+        # touches the same `tool_call_id` (double-final FunctionCallResultFrame,
+        # interruption-driven cleanup, cancel handler in parallel) can `del`
+        # the entry first, making the `del` here raise KeyError. Symptom in
+        # production: ErrorFrame "Error processing frame: 'call_<id>'" with
+        # fatal=False (5/day Inshurik prod 2026-05-07 → 2026-05-22).
+        self._function_calls_in_progress.pop(frame.tool_call_id, None)
 
         result = json.dumps(frame.result, ensure_ascii=False) if frame.result else "COMPLETED"
 
@@ -1456,7 +1466,9 @@ class LLMAssistantAggregator(LLMContextAggregator):
         if function_call and function_call.cancel_on_interruption:
             # Update context with the function call cancellation
             self._update_function_call_result(frame.function_name, frame.tool_call_id, "CANCELLED")
-            del self._function_calls_in_progress[frame.tool_call_id]
+            # `pop(..., None)` — symmetric with `_handle_function_call_finished`,
+            # absorbs the race where a concurrent handler beat us to the del.
+            self._function_calls_in_progress.pop(frame.tool_call_id, None)
 
     async def _handle_user_image_frame(self, frame: UserImageRawFrame):
         image_appended = False
