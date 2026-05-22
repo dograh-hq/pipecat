@@ -152,9 +152,7 @@ class TestFilterThinkingContent:
 
         assert LLMThoughtStartFrame in frame_types
         assert LLMThoughtEndFrame in frame_types
-        thought_texts = [
-            f.text for f in pushed_frames if isinstance(f, LLMThoughtTextFrame)
-        ]
+        thought_texts = [f.text for f in pushed_frames if isinstance(f, LLMThoughtTextFrame)]
         assert "".join(thought_texts) == "my reasoning"
 
 
@@ -167,9 +165,7 @@ class TestFlushThinkState:
         # The flush invokes ``super()._push_llm_text(...)``, which resolves
         # via the MRO and bypasses instance attributes — patch on the parent
         # class so the mock is reachable.
-        with patch.object(
-            OpenAILLMService, "_push_llm_text", new_callable=AsyncMock
-        ) as mock_push:
+        with patch.object(OpenAILLMService, "_push_llm_text", new_callable=AsyncMock) as mock_push:
             # Whole response is the prefix "<th" and the stream ends — this
             # wasn't a think tag, so it must still surface to the user.
             result = await service._filter_thinking_content("<th")

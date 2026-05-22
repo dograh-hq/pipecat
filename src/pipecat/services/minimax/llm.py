@@ -175,9 +175,7 @@ class MiniMaxLLMService(OpenAILLMService):
             # Hold back the trailing chars that could be a partial closing tag.
             safe_end = len(self._think_buffer) - len(_THINK_CLOSE) + 1
             if safe_end > 0:
-                await self.push_frame(
-                    LLMThoughtTextFrame(text=self._think_buffer[:safe_end])
-                )
+                await self.push_frame(LLMThoughtTextFrame(text=self._think_buffer[:safe_end]))
                 self._think_buffer = self._think_buffer[safe_end:]
         return None
 
@@ -198,9 +196,7 @@ class MiniMaxLLMService(OpenAILLMService):
         self._think_buffer = ""
         self._think_state = _ThinkTagState.CONTENT
 
-    async def get_chat_completions(
-        self, context: LLMContext
-    ) -> AsyncIterator[ChatCompletionChunk]:
+    async def get_chat_completions(self, context: LLMContext) -> AsyncIterator[ChatCompletionChunk]:
         """Wrap the chat completion stream to strip leading ``<think>`` blocks.
 
         Args:
