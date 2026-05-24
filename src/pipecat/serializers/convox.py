@@ -241,7 +241,7 @@ class ConVoxFrameSerializer(FrameSerializer):
             # timestamps and sequence numbers can be matched against
             # vendor-side logs. After N, fall back to periodic + heartbeat.
             if self._out_audio_serialized <= self._detailed_log_first_n:
-                logger.info(
+                logger.debug(
                     f"ConVox serializer: outbound frame #{self._out_audio_serialized} — "
                     f"stream_sid={self._stream_sid}, "
                     f"in_rate={frame.sample_rate}Hz, out_rate={self._convox_sample_rate}Hz, "
@@ -319,7 +319,7 @@ class ConVoxFrameSerializer(FrameSerializer):
 
             self._in_audio_received += 1
             if self._in_audio_received <= self._detailed_log_first_n:
-                logger.info(
+                logger.debug(
                     f"ConVox serializer: inbound frame #{self._in_audio_received} — "
                     f"stream_sid={self._stream_sid}, "
                     f"convox_rate={self._convox_sample_rate}Hz, pipeline_rate={self._sample_rate}Hz, "

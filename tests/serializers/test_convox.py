@@ -8,6 +8,7 @@
 
 import base64
 import json
+from unittest.mock import patch
 
 import pytest
 
@@ -21,7 +22,6 @@ from pipecat.frames.frames import (
     StartFrame,
 )
 from pipecat.serializers.convox import ConVoxFrameSerializer
-
 
 STREAM_SID = "stream-abc-123"
 CALL_SID = "call-uuid-456"
@@ -311,3 +311,51 @@ async def test_serialize_output_transport_message_round_trips_camelcase():
     parsed = json.loads(out)
     assert parsed == payload
     assert parsed["streamSid"] == STREAM_SID  # camelCase preserved
+
+
+def _logged_messages(mock_logger, level: str) -> list[str]:
+    calls = getattr(mock_logger, level).call_args_list
+    return [str(c.args[0]) for c in calls if c.args]
+
+
+@pytest.mark.asyncio
+async def test_per_frame_outbound_log_is_debug_not_info():
+    # The first N per-frame detail lines must be DEBUG, not INFO: at ~50 fps
+    # in+out they were thousands of INFO lines per call, drowning real signal.
+    # INFO is reserved for the periodic 5s heartbeat / summary.
+    serializer = _make_serializer()
+    await _setup(serializer)
+
+    pcm = bytes(6400)
+    audio = AudioRawFrame(audio=pcm, sample_rate=PIPELINE_SAMPLE_RATE, num_channels=1)
+
+    with patch("pipecat.serializers.convox.logger") as mock_logger:
+        await serializer.serialize(audio)
+
+    assert any("outbound frame #1" in m for m in _logged_messages(mock_logger, "debug"))
+    assert not any("outbound frame #" in m for m in _logged_messages(mock_logger, "info"))
+
+
+@pytest.mark.asyncio
+async def test_per_frame_inbound_log_is_debug_not_info():
+    serializer = _make_serializer()
+    await _setup(serializer)
+
+    msg = json.dumps(
+        {
+            "event": "media",
+            "sequence_number": 5,
+            "stream_sid": STREAM_SID,
+            "media": {
+                "chunk": 5,
+                "timestamp": "1700000000000",
+                "payload": _pcm_payload(),
+            },
+        }
+    )
+
+    with patch("pipecat.serializers.convox.logger") as mock_logger:
+        await serializer.deserialize(msg)
+
+    assert any("inbound frame #1" in m for m in _logged_messages(mock_logger, "debug"))
+    assert not any("inbound frame #" in m for m in _logged_messages(mock_logger, "info"))
