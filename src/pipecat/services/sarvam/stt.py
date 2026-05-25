@@ -79,6 +79,10 @@ def language_to_sarvam_language(language: Language) -> str:
         Language.OR_IN: "od-IN",
         Language.EN_IN: "en-IN",
         Language.AS_IN: "as-IN",
+        Language.UR_IN: "ur-IN",
+        Language.KOK_IN: "kok-IN",
+        Language.MAI_IN: "mai-IN",
+        Language.SD_IN: "sd-IN",
     }
 
     return resolve_language(language, LANGUAGE_MAP, use_base_code=False)
@@ -410,6 +414,8 @@ class SarvamSTTService(STTService):
         """Resolve the current language setting to a Sarvam language code string."""
         language = assert_given(self._settings.language)
         if language:
+            if isinstance(language, str):
+                return language
             return language_to_sarvam_language(language)
         return self._config.default_language
 
