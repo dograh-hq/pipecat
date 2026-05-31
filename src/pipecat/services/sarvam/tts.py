@@ -40,6 +40,7 @@ See https://docs.sarvam.ai/api-reference-docs/text-to-speech/stream for full API
 import asyncio
 import base64
 import json
+import unicodedata
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -253,6 +254,29 @@ def language_to_sarvam_language(language: Language) -> str:
     }
 
     return resolve_language(language, LANGUAGE_MAP, use_base_code=False)
+
+
+def _has_synthesizable_character(text: str) -> bool:
+    """Check whether text has at least one letter or digit in any script.
+
+    Sarvam's TTS API rejects any chunk that contains no letter and no digit with
+    HTTP 400 "Text must contain at least one character from the allowed
+    languages" (verified against bulbul:v2 and bulbul:v3 over the streaming API).
+    Pipecat's sentence aggregation can emit punctuation-only chunks — a lone
+    ellipsis "...", em dash "-", markdown "*", or bracket — and sending one
+    surfaces as a fatal error frame. Digit-only chunks (e.g. "8...") must NOT be
+    skipped: Sarvam normalizes and speaks them. Treating a chunk with no letter
+    or digit as non-synthesizable lets the caller skip exactly what Sarvam
+    refuses.
+
+    Args:
+        text: The candidate TTS chunk.
+
+    Returns:
+        True if ``text`` has at least one Unicode letter (category "L*", covering
+        Devanagari/Gurmukhi/Latin and other scripts) or number (category "N*").
+    """
+    return any(unicodedata.category(ch)[0] in ("L", "N") for ch in text)
 
 
 @dataclass
@@ -582,6 +606,13 @@ class SarvamHttpTTSService(TTSService):
             Frame: Audio frames containing the synthesized speech.
         """
         logger.debug(f"{self}: Generating TTS [{text}]")
+
+        if not _has_synthesizable_character(text):
+            # Sarvam 400s on chunks with no letter or digit (punctuation/symbols
+            # only, e.g. a lone "..." or em dash). Nothing to speak, and sending
+            # it would surface as a fatal TTS error, so skip this chunk.
+            logger.debug(f"{self}: Skipping unsynthesizable chunk [{text!r}]")
+            return
 
         try:
             # Build payload with common parameters
@@ -1207,6 +1238,14 @@ class SarvamTTSService(InterruptibleTTSService):
             Frame objects including TTSStartedFrame, TTSAudioRawFrame(s, context_id=context_id), or TTSStoppedFrame.
         """
         logger.debug(f"Generating TTS: [{text}]")
+
+        if not _has_synthesizable_character(text):
+            # Sarvam 400s on chunks with no letter or digit (punctuation/symbols
+            # only, e.g. a lone "..." or em dash). The websocket would return a
+            # TTS error that aborts the whole call, so skip this chunk instead.
+            logger.debug(f"Skipping unsynthesizable chunk [{text!r}]")
+            yield None
+            return
 
         try:
             if not self._websocket or self._websocket.state is State.CLOSED:
