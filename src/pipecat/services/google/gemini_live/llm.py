@@ -2045,12 +2045,48 @@ class GeminiLiveLLMService(LLMService[GeminiLLMAdapter]):
         completion_tokens = usage.response_token_count or 0
         total_tokens = usage.total_token_count or (prompt_tokens + completion_tokens)
 
+        # Extract full raw details dict from google's class model
+        raw_usage = None
+        if hasattr(usage, "to_dict"):
+            try:
+                raw_usage = usage.to_dict()
+            except Exception:
+                pass
+        if not raw_usage:
+            try:
+                raw_usage = {}
+                for attr in [
+                    "prompt_token_count", "response_token_count", "total_token_count",
+                    "cached_content_token_count", "thoughts_token_count",
+                    "prompt_tokens_details", "response_tokens_details",
+                    "tool_use_prompt_tokens_details", "cache_tokens_details"
+                ]:
+                    val = getattr(usage, attr, None)
+                    if val is not None:
+                        if isinstance(val, list):
+                            dict_list = []
+                            for item in val:
+                                if hasattr(item, "to_dict"):
+                                    dict_list.append(item.to_dict())
+                                elif hasattr(item, "__dict__"):
+                                    dict_list.append({k: v for k, v in vars(item).items() if not k.startswith("_")})
+                                else:
+                                    dict_list.append(item)
+                            raw_usage[attr] = dict_list
+                        elif hasattr(val, "to_dict"):
+                            raw_usage[attr] = val.to_dict()
+                        else:
+                            raw_usage[attr] = val
+            except Exception:
+                pass
+
         tokens = LLMTokenUsage(
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             total_tokens=total_tokens,
             cache_read_input_tokens=usage.cached_content_token_count,
             reasoning_tokens=usage.thoughts_token_count,
+            raw_usage_metadata=raw_usage,
         )
 
         await self.start_llm_usage_metrics(tokens)
