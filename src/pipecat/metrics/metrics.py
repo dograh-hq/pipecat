@@ -11,6 +11,8 @@ collected throughout the pipeline, including timing, token usage, and
 processing statistics.
 """
 
+from typing import Any, Dict, Optional
+
 from pydantic import BaseModel
 
 from pipecat.utils.deprecation import deprecated
@@ -62,9 +64,10 @@ class LLMTokenUsage(BaseModel):
     prompt_tokens: int
     completion_tokens: int
     total_tokens: int
-    cache_read_input_tokens: int | None = None
-    cache_creation_input_tokens: int | None = None
-    reasoning_tokens: int | None = None
+    cache_read_input_tokens: Optional[int] = None
+    cache_creation_input_tokens: Optional[int] = None
+    reasoning_tokens: Optional[int] = None
+    raw_usage_metadata: Optional[Dict[str, Any]] = None
 
 
 class LLMUsageMetricsData(MetricsData):

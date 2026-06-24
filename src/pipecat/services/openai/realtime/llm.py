@@ -1019,11 +1019,43 @@ class OpenAIRealtimeLLMService(LLMService[OpenAIRealtimeLLMAdapter]):
             and evt.response.usage.input_token_details
             else None
         )
+
+        raw_usage = None
+        if hasattr(evt.response.usage, "to_dict"):
+            try:
+                raw_usage = evt.response.usage.to_dict()
+            except Exception:
+                pass
+        elif hasattr(evt.response.usage, "model_dump"):
+            try:
+                raw_usage = evt.response.usage.model_dump()
+            except Exception:
+                pass
+        
+        if not raw_usage:
+            try:
+                raw_usage = {}
+                for attr in [
+                    "input_tokens", "output_tokens", "total_tokens",
+                    "input_token_details", "output_token_details"
+                ]:
+                    val = getattr(evt.response.usage, attr, None)
+                    if val is not None:
+                        if hasattr(val, "to_dict"):
+                            raw_usage[attr] = val.to_dict()
+                        elif hasattr(val, "model_dump"):
+                            raw_usage[attr] = val.model_dump()
+                        else:
+                            raw_usage[attr] = val
+            except Exception:
+                pass
+
         tokens = LLMTokenUsage(
             prompt_tokens=evt.response.usage.input_tokens,
             completion_tokens=evt.response.usage.output_tokens,
             total_tokens=evt.response.usage.total_tokens,
             cache_read_input_tokens=cached_tokens,
+            raw_usage_metadata=raw_usage,
         )
         await self.start_llm_usage_metrics(tokens)
         await self.stop_processing_metrics()
