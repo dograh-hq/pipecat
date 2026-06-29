@@ -343,6 +343,7 @@ class BaseOutputTransport(FrameProcessor):
             await self.push_frame(frame, direction)
             await self._handle_frame(frame)
         elif isinstance(frame, (BotOutputAudioPauseFrame, BotOutputAudioResumeFrame)):
+            logger.debug(f"{self} Received BotOutputAudioPauseFrame, BotOutputAudioResumeFrame")
             await self.push_frame(frame, direction)
             await self._handle_frame(frame)
         elif isinstance(frame, OutputTransportMessageUrgentFrame):
