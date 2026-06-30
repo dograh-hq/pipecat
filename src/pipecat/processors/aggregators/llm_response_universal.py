@@ -1072,21 +1072,6 @@ class LLMUserAggregator(LLMContextAggregator):
 
         if should_mute_frame:
             logger.trace(f"{frame.name} suppressed - user currently muted")
-            # Turn-start signals suppressed here never reach the user turn
-            # strategy, so a provisional-VAD pause can't arm. Surface at DEBUG
-            # to disambiguate "strategy saw nothing" from "no VAD at all".
-            if isinstance(
-                frame,
-                (
-                    VADUserStartedSpeakingFrame,
-                    InterimTranscriptionFrame,
-                    TranscriptionFrame,
-                ),
-            ):
-                logger.debug(
-                    f"[provisional-vad] {self} muted → suppressed {frame.name} "
-                    "before it reached the turn strategy"
-                )
 
         should_mute_next_time = False
         for s in self._params.user_mute_strategies:
