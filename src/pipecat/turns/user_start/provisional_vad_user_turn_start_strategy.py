@@ -60,11 +60,22 @@ class ProvisionalVADUserTurnStartStrategy(BaseUserTurnStartStrategy):
         """Clean up strategy state."""
         await super().cleanup()
         await self._cancel_resume_task()
+        # The timeout task we just cancelled was the only remaining path that
+        # would resume output audio. If a pause is still armed, resume here so
+        # we don't leave the output transport paused after teardown.
+        if self._provisional_pause_active:
+            await self._resume_output_audio()
+        self._provisional_pause_active = False
 
     async def reset(self):
         """Reset the strategy to its initial state."""
         await super().reset()
         await self._cancel_resume_task()
+        # The timeout task we just cancelled was the only remaining path that
+        # would resume output audio. If a pause is still armed, resume here so
+        # we don't leave the output transport paused after the reset.
+        if self._provisional_pause_active:
+            await self._resume_output_audio()
         self._provisional_pause_active = False
         self._locked_out_until_bot_stops = False
         self._bot_speaking = False
@@ -112,6 +123,11 @@ class ProvisionalVADUserTurnStartStrategy(BaseUserTurnStartStrategy):
         if self._provisional_pause_active:
             self._provisional_pause_active = False
             await self._cancel_resume_task()
+            # Resume explicitly instead of relying on the InterruptionFrame that
+            # trigger_user_turn_started() emits: with enable_interruptions=False
+            # no interruption is broadcast, which would leave the transport
+            # paused. The later resume (if any) is idempotent on the transport.
+            await self._resume_output_audio()
             await self.trigger_user_turn_started()
             return ProcessFrameResult.STOP
 

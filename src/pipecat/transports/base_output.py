@@ -343,7 +343,7 @@ class BaseOutputTransport(FrameProcessor):
             await self.push_frame(frame, direction)
             await self._handle_frame(frame)
         elif isinstance(frame, (BotOutputAudioPauseFrame, BotOutputAudioResumeFrame)):
-            logger.debug(f"{self} Received BotOutputAudioPauseFrame, BotOutputAudioResumeFrame")
+            logger.debug(f"{self} Received {frame.__class__.__name__}")
             await self.push_frame(frame, direction)
             await self._handle_frame(frame)
         elif isinstance(frame, OutputTransportMessageUrgentFrame):
@@ -515,6 +515,12 @@ class BaseOutputTransport(FrameProcessor):
             # Let the sink tasks process the queue until they reach this EndFrame.
             await self._clock_queue.put((float("inf"), next(self._clock_queue_counter), frame))
             await self._audio_queue.put(frame)
+
+            # If output audio is paused, the audio task is blocked waiting to
+            # resume and will never read the EndFrame we just enqueued. Resume
+            # so the queue can drain to the EndFrame; otherwise the
+            # `await self._audio_task` below would block shutdown forever.
+            await self.handle_audio_resume(BotOutputAudioResumeFrame())
 
             # At this point we have enqueued an EndFrame and we need to wait for
             # that EndFrame to be processed by the audio and clock tasks. We

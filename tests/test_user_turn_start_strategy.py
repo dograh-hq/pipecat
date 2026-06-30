@@ -245,7 +245,12 @@ class TestProvisionalVADUserTurnStartStrategy(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, ProcessFrameResult.STOP)
         self.assertTrue(should_start)
-        self.assertEqual([type(frame) for frame in pushed_frames], [BotOutputAudioPauseFrame])
+        # Confirming the turn resumes output audio explicitly so the transport
+        # is unblocked even when interruptions are disabled.
+        self.assertEqual(
+            [type(frame) for frame in pushed_frames],
+            [BotOutputAudioPauseFrame, BotOutputAudioResumeFrame],
+        )
 
         await strategy.cleanup()
 
@@ -288,6 +293,79 @@ class TestProvisionalVADUserTurnStartStrategy(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result, ProcessFrameResult.STOP)
         self.assertTrue(should_start)
+
+        await strategy.cleanup()
+
+    async def test_reset_during_provisional_pause_resumes_output_audio(self):
+        # A long pause window keeps the provisional pause armed so the only way
+        # the transport gets resumed is the reset() guard itself.
+        strategy = ProvisionalVADUserTurnStartStrategy(pause_secs=10.0)
+        await strategy.setup(self.task_manager)
+
+        pushed_frames = []
+
+        @strategy.event_handler("on_push_frame")
+        async def on_push_frame(strategy, frame, direction):
+            pushed_frames.append(frame)
+
+        await strategy.process_frame(BotStartedSpeakingFrame())
+        await strategy.process_frame(VADUserStartedSpeakingFrame())
+        self.assertIsInstance(pushed_frames[-1], BotOutputAudioPauseFrame)
+
+        await strategy.reset()
+
+        self.assertIsInstance(pushed_frames[-1], BotOutputAudioResumeFrame)
+
+        await strategy.cleanup()
+
+    async def test_cleanup_during_provisional_pause_resumes_output_audio(self):
+        strategy = ProvisionalVADUserTurnStartStrategy(pause_secs=10.0)
+        await strategy.setup(self.task_manager)
+
+        pushed_frames = []
+
+        @strategy.event_handler("on_push_frame")
+        async def on_push_frame(strategy, frame, direction):
+            pushed_frames.append(frame)
+
+        await strategy.process_frame(BotStartedSpeakingFrame())
+        await strategy.process_frame(VADUserStartedSpeakingFrame())
+        self.assertIsInstance(pushed_frames[-1], BotOutputAudioPauseFrame)
+
+        await strategy.cleanup()
+
+        self.assertIsInstance(pushed_frames[-1], BotOutputAudioResumeFrame)
+
+    async def test_transcript_resumes_output_audio_when_interruptions_disabled(self):
+        # With interruptions disabled, trigger_user_turn_started() emits no
+        # InterruptionFrame, so the strategy must resume the transport itself.
+        strategy = ProvisionalVADUserTurnStartStrategy(pause_secs=10.0, enable_interruptions=False)
+        await strategy.setup(self.task_manager)
+
+        pushed_frames = []
+        should_start = False
+
+        @strategy.event_handler("on_push_frame")
+        async def on_push_frame(strategy, frame, direction):
+            pushed_frames.append(frame)
+
+        @strategy.event_handler("on_user_turn_started")
+        async def on_user_turn_started(strategy, params):
+            nonlocal should_start
+            should_start = True
+
+        await strategy.process_frame(BotStartedSpeakingFrame())
+        await strategy.process_frame(VADUserStartedSpeakingFrame())
+        result = await strategy.process_frame(
+            InterimTranscriptionFrame(text="Hello", user_id="cat", timestamp="")
+        )
+
+        self.assertEqual(result, ProcessFrameResult.STOP)
+        self.assertTrue(should_start)
+        self.assertEqual(
+            [type(frame) for frame in pushed_frames],
+            [BotOutputAudioPauseFrame, BotOutputAudioResumeFrame],
+        )
 
         await strategy.cleanup()
 
