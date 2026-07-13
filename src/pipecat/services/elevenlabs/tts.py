@@ -30,8 +30,6 @@ from websockets.asyncio.client import connect as websocket_connect
 from websockets.protocol import State
 
 from pipecat.frames.frames import (
-    CancelFrame,
-    EndFrame,
     ErrorFrame,
     Frame,
     InterruptionFrame,
@@ -60,6 +58,11 @@ from pipecat.utils.tracing.service_decorators import traced_tts
 ELEVENLABS_MULTILINGUAL_MODELS = {
     "eleven_flash_v2_5",
     "eleven_turbo_v2_5",
+}
+
+# Models that reject the previous_text/next_text context parameters
+ELEVENLABS_CONTEXT_UNSUPPORTED_MODELS = {
+    "eleven_v3",
 }
 
 
@@ -698,24 +701,6 @@ class ElevenLabsTTSService(WebsocketTTSService):
         self._output_format = output_format_from_sample_rate(self.sample_rate)
         await self._connect()
 
-    async def stop(self, frame: EndFrame):
-        """Stop the ElevenLabs TTS service.
-
-        Args:
-            frame: The end frame.
-        """
-        await super().stop(frame)
-        await self._disconnect()
-
-    async def cancel(self, frame: CancelFrame):
-        """Cancel the ElevenLabs TTS service.
-
-        Args:
-            frame: The cancel frame.
-        """
-        await super().cancel(frame)
-        await self._disconnect()
-
     async def flush_audio(self, context_id: str | None = None):
         """Flush any pending audio and finalize the current context.
 
@@ -799,11 +784,23 @@ class ElevenLabsTTSService(WebsocketTTSService):
     async def _disconnect_websocket(self):
         try:
             await self.stop_all_metrics()
-
-            if self._websocket:
+            websocket = self._websocket
+            if websocket:
                 logger.debug("Disconnecting from ElevenLabs")
-                await self._websocket.send(json.dumps({"close_socket": True}))
-                await self._websocket.close()
+                # The multi-stream protocol tears down in two steps: we ask
+                # ElevenLabs to close, then it closes. Wait for its close before
+                # forcing ours, so we don't race the closing handshake (which
+                # otherwise ends a notable fraction of sessions in a 1006 close).
+                # The timeout is only a fallback ceiling; the clean close
+                # normally arrives well within it.
+                await websocket.send(json.dumps({"close_socket": True}))
+                try:
+                    await asyncio.wait_for(websocket.wait_closed(), timeout=2.0)
+                except TimeoutError:
+                    logger.debug(
+                        "ElevenLabs did not close the WebSocket within 2.0s; closing from our side"
+                    )
+                await websocket.close()
                 logger.debug("Disconnected from ElevenLabs")
         except Exception as e:
             await self.push_error(error_msg=f"Unknown error occurred: {e}", exception=e)
@@ -1373,8 +1370,8 @@ class ElevenLabsHttpTTSService(TTSService):
             "model_id": model_id,
         }
 
-        # Include previous text as context if available
-        if self._previous_text:
+        # Include previous text as context when the model supports it
+        if self._previous_text and model_id not in ELEVENLABS_CONTEXT_UNSUPPORTED_MODELS:
             payload["previous_text"] = self._previous_text
 
         if self._voice_settings:

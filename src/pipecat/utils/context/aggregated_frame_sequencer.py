@@ -215,24 +215,25 @@ class AggregatedFrameSequencer:
             active.includes_inter_frame_spaces if active else False
         )
 
-        frame_text = (
-            active.tracker.get_word_for_frame() if (active and active.tracker) else word
-        ) or word
+        frame_text = active.tracker.get_word_for_frame() if (active and active.tracker) else word
         raw_text = active.tracker.get_llm_consumed() if (active and active.tracker) else None
+        suppress = active.tracker.suppress_in_context() if (active and active.tracker) else False
         emit_context_id = active.context_id if active else context_id
 
-        # logger.debug(f"{self._name} Word '{word}' → frame_text='{frame_text}', raw='{raw_text}'")
-        frames: list[Frame] = [
-            self._build_word_frame(
-                frame_text,
-                pts,
-                emit_context_id,
-                raw_text=raw_text,
-                includes_inter_frame_spaces=slot_ifs,
+        frames: list[Frame] = []
+        if frame_text:
+            frames.append(
+                self._build_word_frame(
+                    frame_text,
+                    pts,
+                    emit_context_id,
+                    raw_text=raw_text,
+                    suppress_in_context=suppress,
+                    includes_inter_frame_spaces=slot_ifs,
+                )
             )
-        ]
 
-        if active and active.tracker:
+        if active and active.tracker and not suppress:
             frames.append(self._build_progress_frame(active, pts))
 
         if is_complete and active:
@@ -386,17 +387,21 @@ class AggregatedFrameSequencer:
         pts: int,
         context_id: str | None,
         raw_text: str | None = None,
+        suppress_in_context: bool = False,
         includes_inter_frame_spaces: bool = False,
     ) -> Frame:
         """Build a TTSTextFrame with all standard word-timestamp attributes set."""
         frame = TTSTextFrame(text, aggregated_by=AggregationType.WORD)
         frame.pts = pts
         frame.context_id = context_id
-        frame.append_to_context = (
-            self._context_append_to_context.get(context_id, True)
-            if context_id is not None
-            else True
-        )
+        if suppress_in_context:
+            frame.append_to_context = False
+        else:
+            frame.append_to_context = (
+                self._context_append_to_context.get(context_id, True)
+                if context_id is not None
+                else True
+            )
         frame.raw_text = raw_text
         frame.includes_inter_frame_spaces = includes_inter_frame_spaces
         return frame

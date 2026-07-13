@@ -23,8 +23,6 @@ from websockets.asyncio.client import connect as websocket_connect
 from websockets.protocol import State
 
 from pipecat.frames.frames import (
-    CancelFrame,
-    EndFrame,
     ErrorFrame,
     Frame,
     StartFrame,
@@ -302,6 +300,8 @@ class RimeTTSService(WebsocketTTSService):
         self._receive_task = None
         self._cumulative_time = 0  # Accumulates time across messages
         self._extra_msg_fields = {}  # Extra fields for next message
+        self._audio_remainder = b""  # Held-back byte of a sample split across chunks
+        self._audio_remainder_context_id = None
 
     def can_generate_metrics(self) -> bool:
         """Check if this service can generate processing metrics.
@@ -438,24 +438,6 @@ class RimeTTSService(WebsocketTTSService):
         self._sampling_rate = self.sample_rate
         await self._connect()
 
-    async def stop(self, frame: EndFrame):
-        """Stop the service and close connection.
-
-        Args:
-            frame: The end frame.
-        """
-        await super().stop(frame)
-        await self._disconnect()
-
-    async def cancel(self, frame: CancelFrame):
-        """Cancel current operation and clean up.
-
-        Args:
-            frame: The cancel frame.
-        """
-        await super().cancel(frame)
-        await self._disconnect()
-
     async def _connect(self):
         """Establish websocket connection and start receive task."""
         await super()._connect()
@@ -485,6 +467,8 @@ class RimeTTSService(WebsocketTTSService):
             params = "&".join(f"{k}={v}" for k, v in ws_params.items() if v is not None)
             url = f"{self._url}?{params}"
             headers = {"Authorization": f"Bearer {self._api_key}"}
+            self._audio_remainder = b""
+            self._audio_remainder_context_id = None
             self._websocket = await websocket_connect(url, additional_headers=headers)
 
             await self._call_event_handler("on_connected")
@@ -571,6 +555,21 @@ class RimeTTSService(WebsocketTTSService):
         logger.trace(f"{self}: flushing audio")
         await self._get_websocket().send(json.dumps({"operation": "flush"}))
 
+    def _sample_aligned_audio(self, context_id: str, audio: bytes) -> bytes:
+        """Return whole 16-bit samples, holding back any dangling byte.
+
+        Rime chops its PCM stream at arbitrary byte boundaries, so a chunk may
+        end mid-sample. The dangling byte is held back and prepended to the
+        context's next chunk so emitted frames always contain whole samples.
+        """
+        if self._audio_remainder_context_id != context_id:
+            self._audio_remainder = b""
+            self._audio_remainder_context_id = context_id
+        audio = self._audio_remainder + audio
+        aligned = len(audio) - (len(audio) % 2)
+        self._audio_remainder = audio[aligned:]
+        return audio[:aligned]
+
     async def _receive_messages(self):
         """Process incoming websocket messages."""
         async for message in self._get_websocket():
@@ -582,8 +581,11 @@ class RimeTTSService(WebsocketTTSService):
             context_id = msg["contextId"]
             if msg["type"] == "chunk":
                 # Process audio chunk
+                audio = self._sample_aligned_audio(context_id, base64.b64decode(msg["data"]))
+                if not audio:
+                    continue
                 frame = TTSAudioRawFrame(
-                    audio=base64.b64decode(msg["data"]),
+                    audio=audio,
                     sample_rate=self.sample_rate,
                     num_channels=1,
                     context_id=context_id,
@@ -1084,16 +1086,6 @@ class RimeNonJsonTTSService(InterruptibleTTSService):
         await super().start(frame)
         self._sampling_rate = self.sample_rate
         await self._connect()
-
-    async def stop(self, frame: EndFrame):
-        """Stop the service and close connection."""
-        await super().stop(frame)
-        await self._disconnect()
-
-    async def cancel(self, frame: CancelFrame):
-        """Cancel current operation and clean up."""
-        await super().cancel(frame)
-        await self._disconnect()
 
     async def _connect(self):
         """Establish WebSocket connection and start receive task."""

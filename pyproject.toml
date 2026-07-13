@@ -42,6 +42,7 @@ dependencies = [
     "websockets>=13.1",
     "pyyaml>=6,<7",
     "pyyaml-include>=1.4,<2",
+    "num2words>=0.5.14",
     # Required by LocalSmartTurnAnalyzerV3
     # Inlined here instead of using a self-referential extra for Poetry compatibility.
     "onnxruntime~=1.24.3",
@@ -62,7 +63,7 @@ pipecat = "pipecat.cli.main:run"
 pc = "pipecat.cli.main:run"
 
 [project.optional-dependencies]
-aic = [ "aic-sdk~=2.3.0" ]
+aic = [ "aic-sdk~=2.5.0" ]
 anthropic = [ "anthropic>=0.49.0,<1" ]
 assemblyai = []
 asyncai = []
@@ -80,8 +81,9 @@ evals = [ "pipecat-ai[cli]", "pipecat-ai[kokoro]", "pipecat-ai[moonshine]" ]
 fal = []
 fireworks = []
 fish = [ "ormsgpack>=1.7.0,<2" ]
+funasr = [ "funasr>=1.1.0" ]
 gladia = []
-google = [ "google-cloud-speech>=2.33.0,<3", "google-cloud-texttospeech>=2.31.0,<3", "google-genai>=1.68.0,<2" ]
+google = [ "google-cloud-speech>=2.33.0,<3", "google-cloud-texttospeech>=2.31.0,<3", "google-genai>=1.68.0,<3" ]
 gradium = []
 grok = []
 groq = [ "groq>=0.23.0,<2" ]
@@ -109,7 +111,7 @@ neuphonic = []
 novita = []
 nvidia = [ "nvidia-riva-client>=2.25.1,<3", "protobuf>=6.31.1,<7" ]
 openai = []
-rnnoise = [ "pyrnnoise~=0.4.1" ]
+rnnoise = [ "pyrnnoise~=0.4.3", "av<17.1.0" ]
 openrouter = []
 perplexity = []
 pgmq = ["pgmq>=1.0.6,<1.1", "asyncpg>=0.30.0"]
@@ -118,7 +120,7 @@ qwen = []
 redis = ["redis[hiredis]>=5.0.0"]
 resembleai = []
 rime = []
-runner = [ "python-dotenv>=1.0.0,<2.0.0", "uvicorn>=0.32.0,<1.0.0", "fastapi>=0.115.6,<1", "pipecat-ai-prebuilt>=1.0.2"]
+runner = [ "python-dotenv>=1.0.0,<2.0.0", "uvicorn>=0.32.0,<1.0.0", "fastapi>=0.115.6,<1", "pipecat-ai-prebuilt>=1.0.3"]
 sagemaker = ["aws_sdk_sagemaker_runtime_http2; python_version>='3.12'"]
 sambanova = []
 sarvam = [ "sarvamai==0.1.28" ]

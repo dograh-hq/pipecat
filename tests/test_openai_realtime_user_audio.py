@@ -16,11 +16,13 @@ server-VAD-enabled path, where no pre-roll is maintained.
 
 import base64
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
 from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.frames.frames import InputAudioRawFrame, SpeechControlParamsFrame
+from pipecat.services.openai._constants import OPENAI_SAMPLE_RATE
 from pipecat.services.openai.realtime import events
 from pipecat.services.openai.realtime.events import (
     AudioConfiguration,
@@ -83,7 +85,7 @@ def _make_service(*, manual_turn_detection: bool, preroll_secs: float | None = N
 
 
 def _audio_frame(
-    *, sample_rate: int = 16000, data: bytes = b"\x01\x02" * 160
+    *, sample_rate: int = OPENAI_SAMPLE_RATE, data: bytes = b"\x01\x02" * 160
 ) -> InputAudioRawFrame:
     return InputAudioRawFrame(audio=data, sample_rate=sample_rate, num_channels=1)
 
@@ -91,6 +93,22 @@ def _audio_frame(
 # ---------------------------------------------------------------------------
 # Manual turn detection: maintain and replay the pre-roll
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pcm_audio_resampled_to_openai_sample_rate():
+    """PCM input at another rate is resampled before it is sent to OpenAI."""
+    service, recorder = _make_service(manual_turn_detection=False)
+    source_audio = b"\xaa\xbb" * 160
+    resampled_audio = b"\xcc\xdd" * 240
+    service._input_resampler.resample = AsyncMock(return_value=resampled_audio)
+
+    await service._send_user_audio(_audio_frame(sample_rate=16000, data=source_audio))
+
+    service._input_resampler.resample.assert_awaited_once_with(
+        source_audio, 16000, OPENAI_SAMPLE_RATE
+    )
+    assert recorder.append_payloads() == [base64.b64encode(resampled_audio).decode()]
 
 
 @pytest.mark.asyncio

@@ -38,7 +38,7 @@ scenario ``event:``             RTVI server message(s)
 Matching semantics: expected events must appear in the specified order, but
 unmatched events may appear between them (so a scenario doesn't have to
 enumerate every event the bot emits). The ``within_ms`` budget for each
-expectation is measured from the most recent ``send-text`` / ``raw-audio`` send
+expectation is measured from the most recent ``send-text`` / ``raw-audio`` / ``dtmf`` send
 (default 60s when omitted).
 
 An ``llm_response`` with a content check (``text_contains`` / ``eval:``)
@@ -184,8 +184,8 @@ class EvalTurnProgress:
 class EvalSession:
     """Runs one :class:`EvalScenario` against a bot over a single WebSocket session.
 
-    Connects as an RTVI client, drives each turn (sending ``send-text`` or
-    ``raw-audio``), collects the RTVI events the bot emits, and asserts on them.
+    Connects as an RTVI client, drives each turn (sending ``send-text``,
+    ``raw-audio``, or ``dtmf``), collects the RTVI events the bot emits, and asserts on them.
     Build one with :meth:`from_scenario` (which constructs the judge, speech, and
     transcriber the scenario needs), then await :meth:`run`.
     """
@@ -731,20 +731,30 @@ class EvalSession:
     def _discard_interrupted_output(self) -> None:
         """Drop the bot's interrupted, un-matched output (on user interruption).
 
-        Clears the response buffers and drains the unmatched event queue, so a
-        greeting (or any prior bot output) the user just interrupted can't be
-        matched against this turn. Diagnostics (``events_seen``,
-        ``latest_event_times``) are left intact for send_after lookups.
+        Clears the response buffers and drains the bot's pending output from the
+        event queue, so a greeting (or any prior bot output) the user just
+        interrupted can't be matched against this turn. ``user_transcription`` is
+        preserved: a DTMF keypress emits its transcription immediately before the
+        turn-start interruption, and that transcription is the turn's *input*, not
+        the stale bot output this discard is meant to clear — dropping it would
+        race the matcher. Diagnostics (``events_seen``, ``latest_event_times``)
+        are left intact for send_after lookups.
         """
         self._text_buffer = []
         self._tts_audio = bytearray()
+        preserved: list[dict] = []
         dropped = 0
         while not self._queue.empty():
             try:
-                self._queue.get_nowait()
-                dropped += 1
+                event = self._queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
+            if event.get("type") == "user_transcription":
+                preserved.append(event)
+            else:
+                dropped += 1
+        for event in preserved:
+            self._queue.put_nowait(event)
         if dropped:
             self._debug(f"discard: dropped {dropped} queued event(s) on interruption")
 
@@ -898,18 +908,20 @@ class EvalSession:
             try:
                 await self._wait_send_after(turn.send_after)
             except TimeoutError as e:
+                # Only the event-anchored wait can time out; the pure-delay form
+                # just sleeps. So event is never None here, but fall back for typing.
+                event_name = turn.send_after.event or "send_after"
                 failures.append(
                     EvalAssertionFailure(
                         turn_index=turn_idx,
                         expectation_index=-1,
-                        event_name=turn.send_after.event,
+                        event_name=event_name,
                         reason=f"send_after never fired: {e}",
                     )
                 )
+                self._debug(f"FAIL: {event_name}: {failures[-1].reason}")
                 self._progress(
-                    EvalTurnProgress(
-                        turn_idx, -1, turn.send_after.event, "timeout", failures[-1].reason
-                    )
+                    EvalTurnProgress(turn_idx, -1, event_name, "timeout", failures[-1].reason)
                 )
                 return failures
 
@@ -928,8 +940,15 @@ class EvalSession:
             # judged in context (e.g. a terse "That's four" answering this question).
             if self._judge is not None:
                 self._judge.add_user_message(turn.user)
+        elif turn.dtmf is not None:
+            self._debug(f"send: dtmf {turn.dtmf!r}")
+            await self._send_user_dtmf(turn.dtmf)
+            # Record the keypresses for judge context, so the bot's reply is judged
+            # knowing what was pressed.
+            if self._judge is not None:
+                self._judge.add_user_message(f"(DTMF keypad input: {turn.dtmf})")
 
-        self._progress(EvalTurnProgress(turn_idx, -1, turn.user or "", "turn"))
+        self._progress(EvalTurnProgress(turn_idx, -1, turn.user or turn.dtmf or "", "turn"))
 
         # All of a turn's expectations share one deadline anchored at the send, so a
         # stalled turn fails within a single ``within_ms`` budget instead of spending
@@ -953,6 +972,7 @@ class EvalSession:
                         reason=reason,
                     )
                 )
+                self._debug(f"FAIL: {expectation.event}: {reason}")
                 self._progress(
                     EvalTurnProgress(turn_idx, exp_idx, expectation.event, "timeout", reason)
                 )
@@ -960,6 +980,7 @@ class EvalSession:
 
             if failure:
                 failures.append(failure)
+                self._debug(f"FAIL: {expectation.event}: {failure.reason}")
                 self._progress(
                     EvalTurnProgress(turn_idx, exp_idx, expectation.event, "failed", failure.reason)
                 )
@@ -987,6 +1008,23 @@ class EvalSession:
             ).model_dump(),
         )
         await self._send(message)
+
+    async def _send_user_dtmf(self, keys: str) -> None:
+        """Send a DTMF keypress turn: one RTVI ``dtmf`` message per key.
+
+        The bot's ``RTVIProcessor`` turns each into an ``InputDTMFFrame`` pushed
+        downstream, the same path a telephony transport's keypress takes. The
+        bot's ``DTMFAggregator`` (if any) accumulates them and flushes — on the
+        ``#`` terminator or its idle timeout — into a transcription the bot reacts
+        to. Keys go out back-to-back; use ``send_after`` across turns to pace them.
+        """
+        for key in keys:
+            message = RTVI.Message(
+                type="dtmf",
+                id=self._message_id(),
+                data={"button": key},
+            )
+            await self._send(message)
 
     async def _send_image(self, image_path: str) -> None:
         """Register an image (base64, with its MIME type) for the current turn.
@@ -1045,8 +1083,17 @@ class EvalSession:
         If the event was seen earlier in the run, anchor on that time (potentially
         fire immediately). Otherwise, poll the latest_event_times map until the
         event arrives, then anchor on that.
+
+        With no event (``send_after.event is None``), it's a pure time delay:
+        sleep ``delay_ms`` from now (i.e. from the previous turn's send).
         """
         target_delay_s = send_after.delay_ms / 1000.0
+
+        if send_after.event is None:
+            self._debug(f"send_after: waiting {send_after.delay_ms}ms")
+            await asyncio.sleep(target_delay_s)
+            return
+
         deadline = time.monotonic() + SEND_AFTER_MAX_WAIT_S
         self._debug(f"send_after: waiting for {send_after.event!r} + {send_after.delay_ms}ms")
 
@@ -1104,6 +1151,7 @@ class EvalSession:
                 # make; it completes only when all are found, in any order (a
                 # response arriving doesn't short-circuit it).
                 return await self._match_function_calls(expectation, deadline, turn_idx, exp_idx)
+            self._debug(f"match: waiting for {expectation.event!r}")
             event = await self._next_matching_event(expectation.event, deadline)
             payload_failure = self._check_payload(event, expectation, turn_idx, exp_idx)
             if payload_failure:
@@ -1127,7 +1175,7 @@ class EvalSession:
             )
             if val is not None
         )
-        self._debug(f"match: aggregating {expectation.event!r} ({check})")
+        self._debug(f"match: waiting for {expectation.event!r} ({check})")
         aggregate = ""
         last_reason = ""
         seen_any = False
@@ -1136,8 +1184,7 @@ class EvalSession:
                 event = await self._next_matching_event(expectation.event, deadline)
             except TimeoutError:
                 if not seen_any:
-                    self._debug(f"match: timeout, no {expectation.event!r} event arrived")
-                    raise  # no response at all → "no matching event arrived"
+                    raise  # no response at all → caller logs "no matching event arrived"
                 self._debug(f"eval: timeout, not satisfied: {last_reason}")
                 return fail(f"not satisfied within {budget_ms}ms: {last_reason}")
 
@@ -1198,8 +1245,16 @@ class EvalSession:
         def fail(reason: str) -> EvalAssertionFailure:
             return EvalAssertionFailure(turn_idx, exp_idx, expectation.event, reason)
 
+        def spec_sig(spec) -> str:
+            name = spec.name or "any function"
+            if not spec.args:
+                return name
+            args = ", ".join(f"{k}={v!r}" for k, v in spec.args.items())
+            return f"{name}({args})"
+
         matched: list[str] = []
         for spec in expectation.calls or []:
+            self._debug(f"match: waiting for {expectation.event!r} ({spec_sig(spec)})")
             try:
                 event = await self._next_function_call(spec.name, deadline)
             except TimeoutError:

@@ -39,6 +39,7 @@ from pipecat.frames.frames import (
     InterruptionFrame,
     StartFrame,
     SystemFrame,
+    TTSAudioRawFrame,
     UninterruptibleFrame,
 )
 from pipecat.metrics.metrics import LLMTokenUsage, MetricsData
@@ -444,6 +445,24 @@ class FrameProcessor(BaseObject):
             if frame:
                 await self.push_frame(frame)
 
+    async def process_ttfa_metrics(self, frame: TTSAudioRawFrame):
+        """Scan a TTS audio frame for the first audible sample and push TTFA.
+
+        Should be called for every audio frame until a measurement is produced;
+        the metrics collector tracks leading silence across chunks internally.
+
+        Args:
+            frame: The TTS audio frame to inspect.
+        """
+        if self.can_generate_metrics() and self.metrics_enabled:
+            metrics_frame = await self._metrics.process_ttfa_metrics(
+                audio=frame.audio,
+                sample_rate=frame.sample_rate,
+                num_channels=frame.num_channels,
+            )
+            if metrics_frame:
+                await self.push_frame(metrics_frame)
+
     async def start_processing_metrics(self, *, start_time: float | None = None):
         """Start processing metrics collection.
 
@@ -524,7 +543,12 @@ class FrameProcessor(BaseObject):
             await self._metrics.setup(self.task_manager)
 
     async def cleanup(self):
-        """Clean up processor resources."""
+        """Release this processor's resources at teardown.
+
+        This base implementation cancels only the processor's internal
+        input/process tasks; tasks created via :meth:`create_task` are released
+        by an override.
+        """
         await super().cleanup()
         await self.__cancel_input_task()
         await self.__cancel_process_task()

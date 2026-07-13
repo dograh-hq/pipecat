@@ -52,8 +52,6 @@ from websockets.asyncio.client import connect as websocket_connect
 from websockets.protocol import State
 
 from pipecat.frames.frames import (
-    CancelFrame,
-    EndFrame,
     ErrorFrame,
     Frame,
     StartFrame,
@@ -1019,24 +1017,6 @@ class SarvamTTSService(InterruptibleTTSService):
         self._speech_sample_rate = str(self.sample_rate)
         await self._connect()
 
-    async def stop(self, frame: EndFrame):
-        """Stop the Sarvam TTS service.
-
-        Args:
-            frame: The end frame.
-        """
-        await super().stop(frame)
-        await self._disconnect()
-
-    async def cancel(self, frame: CancelFrame):
-        """Cancel the Sarvam TTS service.
-
-        Args:
-            frame: The cancel frame.
-        """
-        await super().cancel(frame)
-        await self._disconnect()
-
     async def flush_audio(self, context_id: str | None = None):
         """Flush any pending audio synthesis by sending flush command."""
         try:
@@ -1091,12 +1071,12 @@ class SarvamTTSService(InterruptibleTTSService):
 
             ws_additional_headers = {
                 "api-subscription-key": self._api_key,
-                **sdk_headers(),
             }
 
             self._websocket = await websocket_connect(
                 self._websocket_url,
                 additional_headers=ws_additional_headers,
+                user_agent_header=sdk_headers()["User-Agent"],
             )
             logger.debug("Connected to Sarvam TTS Websocket")
             await self._send_config()
@@ -1170,6 +1150,7 @@ class SarvamTTSService(InterruptibleTTSService):
                 if msg.get("type") == "audio":
                     request_id = msg.get("data", {}).get("request_id", "N/A")
                     logger.trace(f"TTS request_id={request_id}, context_id={context_id}")
+
                     # Check for interruption before processing audio
                     await self.stop_ttfb_metrics()
                     audio = base64.b64decode(msg["data"]["audio"])

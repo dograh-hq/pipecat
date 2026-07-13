@@ -7,10 +7,13 @@
 """Tests for the AssemblyAI streaming STT service connection parameters."""
 
 import asyncio
+import io
 from urllib.parse import parse_qs, urlparse
 
 import pytest
+from loguru import logger
 
+from pipecat.frames.frames import UserStartedSpeakingFrame
 from pipecat.services.assemblyai.stt import AssemblyAISTTService, is_u3_pro_model
 
 
@@ -19,8 +22,14 @@ def _query(service: AssemblyAISTTService) -> dict[str, list[str]]:
     return parse_qs(urlparse(service._build_ws_url()).query)
 
 
-def test_continuous_partials_defaults_to_true_for_u3_rt_pro():
-    # u3-rt-pro is the default model; continuous_partials should be on by default.
+def test_default_model_is_universal_3_5_pro():
+    # universal-3-5-pro is the default model sent to AssemblyAI.
+    service = AssemblyAISTTService(api_key="test-key")
+    assert _query(service)["speech_model"] == ["universal-3-5-pro"]
+
+
+def test_continuous_partials_defaults_to_true_for_u3_pro():
+    # universal-3-5-pro is the default U3 Pro model; continuous_partials should be on by default.
     service = AssemblyAISTTService(api_key="test-key")
     assert _query(service)["continuous_partials"] == ["true"]
 
@@ -352,6 +361,100 @@ def test_voice_focus_threshold_out_of_range_raises(value):
         )
 
 
+# --- mode (latency/accuracy preset) ---
+
+
+def test_mode_omitted_by_default():
+    service = AssemblyAISTTService(api_key="test-key")
+    assert "mode" not in _query(service)
+
+
+def test_mode_sent_for_u3_rt_pro():
+    service = AssemblyAISTTService(
+        api_key="test-key",
+        settings=AssemblyAISTTService.Settings(mode="max_accuracy"),
+    )
+    assert _query(service)["mode"] == ["max_accuracy"]
+
+
+def test_mode_sent_for_universal_3_5_pro():
+    service = AssemblyAISTTService(
+        api_key="test-key",
+        settings=AssemblyAISTTService.Settings(model="universal-3-5-pro", mode="min_latency"),
+    )
+    assert _query(service)["mode"] == ["min_latency"]
+
+
+def test_mode_omitted_for_universal_streaming():
+    # mode is a U3 Pro-only parameter.
+    service = AssemblyAISTTService(
+        api_key="test-key",
+        settings=AssemblyAISTTService.Settings(
+            model="universal-streaming-english",
+            mode="max_accuracy",
+        ),
+    )
+    assert "mode" not in _query(service)
+
+
+@pytest.mark.parametrize("value", ["min_latency", "balanced", "max_accuracy"])
+def test_mode_values_accepted(value):
+    service = AssemblyAISTTService(
+        api_key="test-key",
+        settings=AssemblyAISTTService.Settings(mode=value),
+    )
+    assert _query(service)["mode"] == [value]
+
+
+# --- language_code ---
+
+
+def test_language_code_omitted_by_default():
+    # Unset means "not sent" — no steering, current behavior preserved.
+    service = AssemblyAISTTService(api_key="test-key")
+    assert "language_code" not in _query(service)
+
+
+def test_language_code_sent_when_set():
+    service = AssemblyAISTTService(
+        api_key="test-key",
+        settings=AssemblyAISTTService.Settings(language_code="es"),
+    )
+    assert _query(service)["language_code"] == ["es"]
+
+
+def test_language_code_sent_for_universal_streaming():
+    # language_code is not U3 Pro-only; it is forwarded for any model.
+    service = AssemblyAISTTService(
+        api_key="test-key",
+        settings=AssemblyAISTTService.Settings(
+            model="universal-streaming-english",
+            language_code="en",
+        ),
+    )
+    assert _query(service)["language_code"] == ["en"]
+
+
+def test_language_code_with_language_detection_warns():
+    # language_code and language_detection are mutually exclusive; setting both
+    # warns but still forwards both (the server is the source of truth).
+    sink = io.StringIO()
+    handler_id = logger.add(sink, level="WARNING", format="{message}")
+    try:
+        service = AssemblyAISTTService(
+            api_key="test-key",
+            settings=AssemblyAISTTService.Settings(
+                language_code="es",
+                language_detection=True,
+            ),
+        )
+    finally:
+        logger.remove(handler_id)
+    assert _query(service)["language_code"] == ["es"]
+    assert _query(service)["language_detection"] == ["true"]
+    assert "mutually exclusive" in sink.getvalue()
+
+
 # --- update_agent_context() ---
 
 
@@ -510,6 +613,34 @@ def test__process_assistant_turn_noop_when_carryover_disabled():
     asyncio.run(service._process_assistant_turn("Hello."))
 
     assert sent == []
+
+
+def test_speech_started_starts_metrics_after_interruption():
+    # broadcast_interruption() stops all metrics, so processing metrics must
+    # start after it or they would be stopped immediately.
+    service = AssemblyAISTTService(api_key="test-key", vad_force_turn_endpoint=False)
+    events = []
+
+    async def fake_broadcast_frame(frame_cls, **kwargs):
+        events.append(("broadcast", frame_cls))
+
+    async def fake_broadcast_interruption():
+        events.append(("interruption", None))
+
+    async def fake_start_processing_metrics():
+        events.append(("start_metrics", None))
+
+    service.broadcast_frame = fake_broadcast_frame
+    service.broadcast_interruption = fake_broadcast_interruption
+    service.start_processing_metrics = fake_start_processing_metrics
+
+    asyncio.run(service._handle_speech_started(None))
+
+    assert events == [
+        ("broadcast", UserStartedSpeakingFrame),
+        ("interruption", None),
+        ("start_metrics", None),
+    ]
 
 
 if __name__ == "__main__":
