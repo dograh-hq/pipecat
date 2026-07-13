@@ -21,6 +21,7 @@ from pipecat.frames.frames import (
     Frame,
     InterimTranscriptionFrame,
     StartFrame,
+    STTMetadataFrame,
     TranscriptionFrame,
     UserStartedSpeakingFrame,
     UserStoppedSpeakingFrame,
@@ -37,6 +38,7 @@ from pipecat.services.stt_latency import DOGRAH_TTFS_P99
 from pipecat.services.stt_service import STTService
 from pipecat.services.websocket_service import WebsocketService
 from pipecat.transcriptions.language import Language
+from pipecat.turns.user_turn_strategies import ExternalUserTurnStrategies
 from pipecat.utils.time import time_now_iso8601
 from pipecat.utils.tracing.service_decorators import traced_stt
 
@@ -138,6 +140,13 @@ class DograhSTTService(STTService, WebsocketService):
             True if VAD events are enabled.
         """
         return self._vad_events
+
+    def service_metadata_frame(self) -> STTMetadataFrame:
+        """Recommend external turn strategies when Dograh emits VAD events."""
+        frame = super().service_metadata_frame()
+        if self._vad_events:
+            frame.user_turn_strategies = ExternalUserTurnStrategies()
+        return frame
 
     async def set_language(self, language: Language):
         """Set the language for speech recognition.
@@ -442,6 +451,12 @@ class DograhSTTService(STTService, WebsocketService):
             frame: The cancel frame.
         """
         await super().cancel(frame)
+        await self._disconnect()
+        self._session_start_time = None
+
+    async def cleanup(self):
+        """Release Dograh STT resources on every pipeline teardown path."""
+        await super().cleanup()
         await self._disconnect()
         self._session_start_time = None
 
