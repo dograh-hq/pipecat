@@ -22,6 +22,7 @@ from pipecat.frames.frames import (
     EndFrame,
     StartFrame,
     UserStartedSpeakingFrame,
+    UserStoppedSpeakingFrame,
 )
 from pipecat.observers.base_observer import BaseObserver, FramePushed
 
@@ -57,6 +58,12 @@ class TurnTrackingObserver(BaseObserver):
         self._turn_count = 0
         self._is_turn_active = False
         self._is_bot_speaking = False
+        # The logical turn which owns the currently playing bot audio. During
+        # an interruption the conversation advances to the next turn before
+        # BaseOutputTransport emits BotStoppedSpeakingFrame for the interrupted
+        # audio, so this must be tracked independently from ``_turn_count``.
+        self._bot_speaking_turn: int | None = None
+        self._user_speaking_turn: int | None = None
         self._has_bot_spoken = False
         self._turn_start_time = 0
         self._turn_end_timeout_secs = turn_end_timeout_secs
@@ -66,8 +73,14 @@ class TurnTrackingObserver(BaseObserver):
         self._processed_frames = set()
         self._frame_history = deque(maxlen=max_frames)
 
-        self._register_event_handler("on_turn_started")
-        self._register_event_handler("on_turn_ended")
+        # These handlers run inside this observer's worker task, so awaiting
+        # them preserves the exact frame order without blocking the pipeline.
+        self._register_event_handler("on_turn_started", sync=True)
+        self._register_event_handler("on_turn_ended", sync=True)
+        self._register_event_handler("on_user_speech_started_for_turn", sync=True)
+        self._register_event_handler("on_user_speech_stopped_for_turn", sync=True)
+        self._register_event_handler("on_bot_started_speaking", sync=True)
+        self._register_event_handler("on_bot_stopped_speaking", sync=True)
 
     async def on_push_frame(self, data: FramePushed):
         """Process frame events for turn tracking.
@@ -75,12 +88,20 @@ class TurnTrackingObserver(BaseObserver):
         Args:
             data: Frame push event data containing the frame and metadata.
         """
-        # Skip already processed frames
-        if data.frame.id in self._processed_frames:
+        # A broadcast creates distinct upstream/downstream frame instances that
+        # represent one logical event. Use their shared minimum ID so whichever
+        # sibling arrives first owns processing and the other is ignored.
+        frame_key = min(
+            data.frame.id,
+            data.frame.broadcast_sibling_id or data.frame.id,
+        )
+
+        # Skip already processed frames and broadcast siblings.
+        if frame_key in self._processed_frames:
             return
 
-        self._processed_frames.add(data.frame.id)
-        self._frame_history.append(data.frame.id)
+        self._processed_frames.add(frame_key)
+        self._frame_history.append(frame_key)
 
         # If we've exceeded our history size, remove the oldest frame ID
         # from the set of processed frames.
@@ -94,11 +115,17 @@ class TurnTrackingObserver(BaseObserver):
                 await self._start_turn(data)
         elif isinstance(data.frame, UserStartedSpeakingFrame):
             await self._handle_user_started_speaking(data)
+        elif isinstance(data.frame, UserStoppedSpeakingFrame):
+            await self._handle_user_stopped_speaking(data)
         elif isinstance(data.frame, BotStartedSpeakingFrame):
             await self._handle_bot_started_speaking(data)
-        # A BotStoppedSpeakingFrame can arrive after a UserStartedSpeakingFrame following an interruption
-        # We only want to end the turn if the bot was previously speaking
-        elif isinstance(data.frame, BotStoppedSpeakingFrame) and self._is_bot_speaking:
+        # A BotStoppedSpeakingFrame can arrive after UserStartedSpeakingFrame
+        # has already advanced the logical conversation turn. The independent
+        # owner retained in ``_bot_speaking_turn`` lets consumers still
+        # correlate that late physical stop with the interrupted turn.
+        elif isinstance(data.frame, BotStoppedSpeakingFrame) and (
+            self._is_bot_speaking or self._bot_speaking_turn is not None
+        ):
             await self._handle_bot_stopped_speaking(data)
         elif isinstance(data.frame, (EndFrame, CancelFrame)):
             await self._handle_pipeline_end(data)
@@ -148,20 +175,40 @@ class TurnTrackingObserver(BaseObserver):
             # User is speaking within the same turn (before bot has responded)
             logger.trace(f"User is already speaking in Turn {self._turn_count}")
 
+        self._user_speaking_turn = self._turn_count
+        await self._call_event_handler(
+            "on_user_speech_started_for_turn", self._user_speaking_turn, data
+        )
+
+    async def _handle_user_stopped_speaking(self, data: FramePushed):
+        """Associate the user speech stop with its owning logical turn."""
+        turn_number = self._user_speaking_turn or self._turn_count
+        await self._call_event_handler("on_user_speech_stopped_for_turn", turn_number, data)
+        self._user_speaking_turn = None
+
     async def _handle_bot_started_speaking(self, data: FramePushed):
         """Handle bot speaking events."""
         self._is_bot_speaking = True
+        self._bot_speaking_turn = self._turn_count
         self._has_bot_spoken = True
         # Cancel any pending turn end timer when bot starts speaking again
         self._cancel_turn_end_timer()
+        await self._call_event_handler("on_bot_started_speaking", self._bot_speaking_turn, data)
 
     async def _handle_bot_stopped_speaking(self, data: FramePushed):
         """Handle bot stopped speaking events."""
+        turn_number = self._bot_speaking_turn or self._turn_count
         self._is_bot_speaking = False
-        # Schedule turn end with timeout
-        # This is needed to handle cases where the bot's speech ends and then resumes
-        # This can happen with HTTP TTS services or function calls
-        self._schedule_turn_end(data)
+        self._bot_speaking_turn = None
+        await self._call_event_handler("on_bot_stopped_speaking", turn_number, data)
+
+        # Only schedule the current logical turn to end. An interrupted bot's
+        # physical stop can arrive after the next turn has already started and
+        # must not schedule that new turn for completion.
+        if self._is_turn_active and turn_number == self._turn_count:
+            # This delay handles cases where bot speech resumes within the same
+            # turn, for example HTTP TTS services or function calls.
+            self._schedule_turn_end(data)
 
     async def _handle_pipeline_end(self, data: FramePushed):
         """Handle pipeline end or cancellation by flushing any active turn."""

@@ -634,6 +634,10 @@ class PipelineWorker(BaseWorker):
         """
         await self._observer.remove_observer(observer)
 
+    async def wait_for_observers(self) -> None:
+        """Wait until observers have processed all frames queued so far."""
+        await self._observer.wait_until_idle()
+
     def set_reached_upstream_filter(self, types: tuple[type[Frame], ...]):
         """Set which frame types trigger the on_frame_reached_upstream event.
 

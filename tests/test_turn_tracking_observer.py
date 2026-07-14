@@ -13,13 +13,56 @@ from pipecat.frames.frames import (
     UserStartedSpeakingFrame,
     UserStoppedSpeakingFrame,
 )
+from pipecat.observers.base_observer import FramePushed
 from pipecat.observers.turn_tracking_observer import TurnTrackingObserver
 from pipecat.processors.filters.identity_filter import IdentityFilter
+from pipecat.processors.frame_processor import FrameDirection
 from pipecat.tests.utils import SleepFrame, run_test
 
 
 class TestTurnTrackingObserver(unittest.IsolatedAsyncioTestCase):
     """Tests for TurnTrackingObserver."""
+
+    async def test_broadcast_siblings_emit_one_correlated_user_boundary(self):
+        """Upstream/downstream siblings represent one logical speaking event."""
+        turn_observer = TurnTrackingObserver()
+        processor = IdentityFilter()
+        user_speech_events = []
+
+        @turn_observer.event_handler("on_user_speech_started_for_turn")
+        async def on_user_speech_started_for_turn(observer, turn_number, data):
+            user_speech_events.append(("started", turn_number))
+
+        @turn_observer.event_handler("on_user_speech_stopped_for_turn")
+        async def on_user_speech_stopped_for_turn(observer, turn_number, data):
+            user_speech_events.append(("stopped", turn_number))
+
+        started_downstream = UserStartedSpeakingFrame()
+        started_upstream = UserStartedSpeakingFrame()
+        started_downstream.broadcast_sibling_id = started_upstream.id
+        started_upstream.broadcast_sibling_id = started_downstream.id
+        stopped_downstream = UserStoppedSpeakingFrame()
+        stopped_upstream = UserStoppedSpeakingFrame()
+        stopped_downstream.broadcast_sibling_id = stopped_upstream.id
+        stopped_upstream.broadcast_sibling_id = stopped_downstream.id
+
+        for frame, direction, timestamp in [
+            (started_downstream, FrameDirection.DOWNSTREAM, 1),
+            (started_upstream, FrameDirection.UPSTREAM, 2),
+            (stopped_downstream, FrameDirection.DOWNSTREAM, 3),
+            (stopped_upstream, FrameDirection.UPSTREAM, 4),
+        ]:
+            await turn_observer.on_push_frame(
+                FramePushed(
+                    source=processor,
+                    destination=processor,
+                    frame=frame,
+                    direction=direction,
+                    timestamp=timestamp,
+                )
+            )
+
+        self.assertEqual(user_speech_events, [("started", 1), ("stopped", 1)])
 
     async def test_normal_conversation_flow(self):
         """Test a normal conversation with two complete turns."""
@@ -94,6 +137,7 @@ class TestTurnTrackingObserver(unittest.IsolatedAsyncioTestCase):
 
         # Record start/end events with turn numbers
         turn_events = []
+        user_speech_events = []
 
         @turn_observer.event_handler("on_turn_started")
         async def on_turn_started(observer, turn_number):
@@ -102,6 +146,14 @@ class TestTurnTrackingObserver(unittest.IsolatedAsyncioTestCase):
         @turn_observer.event_handler("on_turn_ended")
         async def on_turn_ended(observer, turn_number, duration, was_interrupted):
             turn_events.append(f"Turn {turn_number} ended (interrupted: {was_interrupted})")
+
+        @turn_observer.event_handler("on_user_speech_started_for_turn")
+        async def on_user_speech_started_for_turn(observer, turn_number, data):
+            user_speech_events.append(("started", turn_number))
+
+        @turn_observer.event_handler("on_user_speech_stopped_for_turn")
+        async def on_user_speech_stopped_for_turn(observer, turn_number, data):
+            user_speech_events.append(("stopped", turn_number))
 
         frames_to_send = [
             # Turn 1 - User speaks twice before bot responds
@@ -148,6 +200,17 @@ class TestTurnTrackingObserver(unittest.IsolatedAsyncioTestCase):
             "Turn 2 ended (interrupted: False)",
         ]
         self.assertEqual(turn_events, expected_events)
+        self.assertEqual(
+            user_speech_events,
+            [
+                ("started", 1),
+                ("stopped", 1),
+                ("started", 1),
+                ("stopped", 1),
+                ("started", 2),
+                ("stopped", 2),
+            ],
+        )
         self.assertEqual(turn_observer._turn_count, 2)
 
     async def test_user_interrupts_bot(self):
@@ -204,6 +267,44 @@ class TestTurnTrackingObserver(unittest.IsolatedAsyncioTestCase):
             "Turn 2 ended (interrupted: True)",  # Second turn ends due to EndFrame
         ]
         self.assertEqual(turn_events, expected_events)
+        self.assertEqual(turn_observer._turn_count, 2)
+
+    async def test_late_bot_stop_retains_interrupted_turn_owner(self):
+        """A physical bot stop after interruption remains associated with the old turn."""
+        turn_observer = TurnTrackingObserver(turn_end_timeout_secs=0.2)
+        processor = IdentityFilter()
+        bot_events = []
+
+        @turn_observer.event_handler("on_bot_started_speaking")
+        async def on_bot_started_speaking(observer, turn_number, data):
+            bot_events.append(("started", turn_number))
+
+        @turn_observer.event_handler("on_bot_stopped_speaking")
+        async def on_bot_stopped_speaking(observer, turn_number, data):
+            bot_events.append(("stopped", turn_number))
+
+        frames_to_send = [
+            UserStartedSpeakingFrame(),
+            UserStoppedSpeakingFrame(),
+            BotStartedSpeakingFrame(),
+            UserStartedSpeakingFrame(),
+            BotStoppedSpeakingFrame(),
+        ]
+
+        await run_test(
+            processor,
+            frames_to_send=frames_to_send,
+            expected_down_frames=[
+                UserStartedSpeakingFrame,
+                UserStoppedSpeakingFrame,
+                BotStartedSpeakingFrame,
+                UserStartedSpeakingFrame,
+                BotStoppedSpeakingFrame,
+            ],
+            observers=[turn_observer],
+        )
+
+        self.assertEqual(bot_events, [("started", 1), ("stopped", 1)])
         self.assertEqual(turn_observer._turn_count, 2)
 
     async def test_bot_starts_stops_multiple_times(self):

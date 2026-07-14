@@ -120,6 +120,12 @@ class WorkerObserver(BaseObserver):
         for proxy in self._proxies.values():
             await self.cancel_task(proxy.task)
 
+    async def wait_until_idle(self) -> None:
+        """Wait until every observer has processed its currently queued frames."""
+        if not self._proxies:
+            return
+        await asyncio.gather(*(proxy.queue.join() for proxy in self._proxies.values()))
+
     async def cleanup(self):
         """Cleanup all proxy observers."""
         await super().cleanup()
