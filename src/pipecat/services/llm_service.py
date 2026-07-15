@@ -52,6 +52,7 @@ from pipecat.frames.frames import (
     LLMServiceMetadataFrame,
     LLMTextFrame,
     LLMUpdateSettingsFrame,
+    NodeTransitionStartedFrame,
     StartFrame,
 )
 from pipecat.processors.aggregators.llm_context import (
@@ -178,6 +179,10 @@ class FunctionCallRegistryItem:
             from an advertised tool set (listed in an ``LLMContext`` or
             ``LLMSetToolsFrame``). False for every explicitly registered handler —
             direct or non-direct — and for the catch-all and built-in handlers.
+        is_node_transition: Whether this function performs a workflow-control
+            transition, such as changing nodes, ending the call, or transferring
+            it. This is registry metadata and does not alter how the function is
+            executed.
     """
 
     function_name: str | None
@@ -185,6 +190,7 @@ class FunctionCallRegistryItem:
     cancel_on_interruption: bool
     timeout_secs: float | None = None
     auto_registered: bool = False
+    is_node_transition: bool = False
 
 
 @dataclass
@@ -258,6 +264,7 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService, Generic[TAdapter]
     # OpenAILLMAdapter is used as the default adapter since it aligns with most LLM implementations.
     # However, subclasses should override this with a more specific adapter when necessary.
     adapter_class: type[BaseLLMAdapter] = OpenAILLMAdapter
+    _NODE_TRANSITION_CONTEXT_AGGREGATION_TIMEOUT_SECONDS = 1.0
 
     # Returned to the LLM as the tool result when an unavailable function is
     # called. Deliberately neutral about future availability so the LLM can
@@ -752,6 +759,7 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService, Generic[TAdapter]
         *,
         cancel_on_interruption: bool | None = None,
         timeout_secs: float | None = None,
+        is_node_transition: bool = False,
     ):
         """Register a function handler for LLM function calls.
 
@@ -780,6 +788,9 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService, Generic[TAdapter]
                 global ``function_call_timeout_secs``. Defaults to ``None`` (fall
                 back to the ``@tool_options`` decorator value, then to the global
                 timeout).
+            is_node_transition: Whether this function performs a workflow-control
+                transition, such as changing nodes, ending the call, or transferring
+                it. Defaults to ``False``.
         """
         if function_name == CANCEL_ASYNC_TOOL_NAME:
             raise ValueError(
@@ -804,6 +815,7 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService, Generic[TAdapter]
             timeout_secs=self._resolve_tool_option(
                 function_name, timeout_secs, handler, "_pipecat_timeout_secs", default=None
             ),
+            is_node_transition=is_node_transition,
         )
 
     @deprecated(
@@ -1213,6 +1225,21 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService, Generic[TAdapter]
             item = self._functions.get(None)
         return item is not None and not item.cancel_on_interruption
 
+    def _function_is_node_transition(self, function_name: str) -> bool:
+        """Whether the named function is a registered workflow-control transition."""
+        item = self._functions.get(function_name)
+        if item is None:
+            item = self._functions.get(None)
+        return item is not None and item.is_node_transition
+
+    def _requires_node_transition_context_aggregation(self) -> bool:
+        """Whether transition execution must wait for context aggregation.
+
+        Realtime services that reconnect during node transitions can override
+        this to require acknowledgement from the user context aggregator.
+        """
+        return False
+
     async def run_function_calls(self, function_calls: Sequence[FunctionCallFromLLM]):
         """Execute a sequence of function calls from the LLM.
 
@@ -1230,6 +1257,29 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService, Generic[TAdapter]
         user_visible_calls = [
             fc for fc in function_calls if fc.function_name != CANCEL_ASYNC_TOOL_NAME
         ]
+        node_transition_calls = [
+            fc for fc in user_visible_calls if self._function_is_node_transition(fc.function_name)
+        ]
+        if node_transition_calls:
+            context_aggregation_event = (
+                asyncio.Event() if self._requires_node_transition_context_aggregation() else None
+            )
+            await self.broadcast_frame(
+                NodeTransitionStartedFrame,
+                function_calls=node_transition_calls,
+                context_aggregation_event=context_aggregation_event,
+            )
+            if context_aggregation_event:
+                try:
+                    await asyncio.wait_for(
+                        context_aggregation_event.wait(),
+                        timeout=self._NODE_TRANSITION_CONTEXT_AGGREGATION_TIMEOUT_SECONDS,
+                    )
+                except TimeoutError:
+                    logger.warning(
+                        f"{self}: timed out waiting for user context aggregation "
+                        "before node transition"
+                    )
         if user_visible_calls:
             await self._call_event_handler("on_function_calls_started", user_visible_calls)
             await self.broadcast_frame(FunctionCallsStartedFrame, function_calls=user_visible_calls)

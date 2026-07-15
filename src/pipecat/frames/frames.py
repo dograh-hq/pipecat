@@ -2070,6 +2070,25 @@ class FunctionCallInProgressFrame(ControlFrame, UninterruptibleFrame):
 
 
 @dataclass
+class NodeTransitionStartedFrame(ControlFrame, UninterruptibleFrame):
+    """Frame signaling that a workflow-control transition is imminent.
+
+    This ordered, uninterruptible frame is emitted before a tool changes nodes,
+    ends the call, transfers it, or performs equivalent control activity.
+    Processors can use it to finish handoff work, such as committing pending
+    user transcript aggregation to the shared LLM context.
+
+    Parameters:
+        function_calls: Transition function calls that are about to execute.
+        context_aggregation_event: Optional acknowledgement set after pending
+            user transcript aggregation has been committed.
+    """
+
+    function_calls: Sequence[FunctionCallFromLLM]
+    context_aggregation_event: asyncio.Event | None = field(default=None, compare=False)
+
+
+@dataclass
 class VisionFullResponseStartFrame(LLMFullResponseStartFrame):
     """Frame indicating the beginning of a vision model response.
 

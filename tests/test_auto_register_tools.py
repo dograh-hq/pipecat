@@ -410,6 +410,17 @@ class TestRegisterFunctionOptionPrecedence(unittest.TestCase):
         item = service._functions["do_thing"]
         self.assertTrue(item.cancel_on_interruption)
         self.assertIsNone(item.timeout_secs)
+        self.assertFalse(item.is_node_transition)
+
+    def test_register_function_marks_node_transition(self):
+        service = self._service()
+        service.register_function(
+            "move_to_next_node",
+            end_call_handler,
+            is_node_transition=True,
+        )
+
+        self.assertTrue(service._functions["move_to_next_node"].is_node_transition)
 
     def test_register_function_explicit_arg_overrides_decorator(self):
         service = self._service()

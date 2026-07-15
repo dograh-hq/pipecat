@@ -19,6 +19,7 @@ from pipecat.frames.frames import (
     FunctionCallsStartedFrame,
     LLMContextFrame,
     LLMSetToolsFrame,
+    NodeTransitionStartedFrame,
 )
 from pipecat.processors.aggregators.llm_context import NOT_GIVEN, LLMContext
 from pipecat.processors.frame_processor import FrameDirection
@@ -175,6 +176,53 @@ class TestLLMService(unittest.IsolatedAsyncioTestCase):
             recorded_frames[2].result,
             _expected_missing_tool_message("doomed_tool"),
         )
+
+    async def test_node_transition_frame_is_acknowledged_before_function_starts(self):
+        service = MockLLMService()
+        service._requires_node_transition_context_aggregation = Mock(return_value=True)
+        service._call_event_handler = AsyncMock()
+        await self._run_function_calls_inline(service)
+
+        handler_started_after_ack = False
+
+        async def transition_handler(params):
+            nonlocal handler_started_after_ack
+            handler_started_after_ack = transition_frame.context_aggregation_event.is_set()
+            await params.result_callback({"status": "done"})
+
+        service.register_function(
+            "move_to_next_node",
+            transition_handler,
+            is_node_transition=True,
+        )
+
+        recorded_frames = []
+        transition_frame = None
+
+        async def mock_broadcast_frame(frame_cls, **kwargs):
+            nonlocal transition_frame
+            frame = frame_cls(**kwargs)
+            recorded_frames.append(frame)
+            if isinstance(frame, NodeTransitionStartedFrame):
+                transition_frame = frame
+                frame.context_aggregation_event.set()
+
+        service.broadcast_frame = mock_broadcast_frame
+
+        await service.run_function_calls(
+            [
+                FunctionCallFromLLM(
+                    function_name="move_to_next_node",
+                    tool_call_id="call_1",
+                    arguments={},
+                    context=LLMContext(),
+                )
+            ]
+        )
+
+        self.assertTrue(handler_started_after_ack)
+        self.assertEqual(type(recorded_frames[0]), NodeTransitionStartedFrame)
+        self.assertEqual(type(recorded_frames[1]), FunctionCallsStartedFrame)
 
     async def test_missing_function_call_dev_error_logged_as_error(self):
         """Tool advertised to the LLM but missing a handler → logger.error."""

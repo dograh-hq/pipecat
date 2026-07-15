@@ -233,8 +233,8 @@ class BaseOpenAILLMService(LLMService[OpenAILLMAdapter]):
         if self._settings.system_instruction:
             logger.debug(f"{self}: Using system instruction: {self._settings.system_instruction}")
 
-        # Store pending function calls that need to be executed after TTS
-        self._pending_function_calls = []
+        # Store node-transition calls that need to be executed after TTS.
+        self._pending_node_transition_function_calls: list[FunctionCallFromLLM] = []
 
     def create_client(
         self,
@@ -423,8 +423,8 @@ class BaseOpenAILLMService(LLMService[OpenAILLMAdapter]):
         arguments = ""
         tool_call_id = ""
 
-        # Reset pending function calls when processing a new context
-        self._pending_function_calls = []
+        # Reset pending node-transition calls when processing a new context.
+        self._pending_node_transition_function_calls = []
 
         # Flag to store whether some text was generated in the current generation
         text_generated_signal = False
@@ -563,16 +563,46 @@ class BaseOpenAILLMService(LLMService[OpenAILLMAdapter]):
                 direction=FrameDirection.DOWNSTREAM,
             )
 
-            # If text was generated, defer function calls until after TTS plays
-            # Otherwise, execute them immediately
-            if text_generated_signal:
-                self._pending_function_calls = function_calls
-                logger.debug(
-                    f"{self}: Deferring {len(function_calls)} function calls until after TTS"
-                )
-            else:
-                logger.debug(f"{self}: Executing {len(function_calls)} function calls")
-                await self.run_function_calls(function_calls)
+            await self._run_or_defer_function_calls(
+                function_calls,
+                text_generated=text_generated_signal,
+            )
+
+    async def _run_or_defer_function_calls(
+        self,
+        function_calls: list[FunctionCallFromLLM],
+        *,
+        text_generated: bool,
+    ) -> None:
+        """Defer node-transition batches until their preceding TTS completes."""
+        contains_node_transition = any(
+            self._function_is_node_transition(fc.function_name) for fc in function_calls
+        )
+        if text_generated and contains_node_transition:
+            # Keep a provider tool-call batch together. Splitting a mixed batch
+            # would discard Pipecat's shared function-call group and could run
+            # the LLM before every result from the original batch has arrived.
+            self._pending_node_transition_function_calls = function_calls
+            logger.debug(
+                f"{self}: Deferring {len(function_calls)} node-transition "
+                "function calls until after TTS"
+            )
+            return
+
+        logger.debug(f"{self}: Executing {len(function_calls)} function calls")
+        await self.run_function_calls(function_calls)
+
+    async def _run_pending_node_transition_function_calls(self) -> None:
+        if not self._pending_node_transition_function_calls:
+            return
+
+        function_calls = self._pending_node_transition_function_calls
+        self._pending_node_transition_function_calls = []
+        logger.debug(
+            f"{self}: Executing {len(function_calls)} deferred node-transition "
+            "function calls after TTS"
+        )
+        await self.run_function_calls(function_calls)
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         """Process frames for LLM completion requests.
@@ -585,14 +615,9 @@ class BaseOpenAILLMService(LLMService[OpenAILLMAdapter]):
         """
         await super().process_frame(frame, direction)
 
-        # Handle BotStoppedSpeakingFrame to execute pending function calls
+        # Handle BotStoppedSpeakingFrame to execute pending node-transition calls.
         if isinstance(frame, BotStoppedSpeakingFrame):
-            if self._pending_function_calls:
-                logger.debug(
-                    f"{self}: Executing {len(self._pending_function_calls)} deferred function calls after TTS"
-                )
-                await self.run_function_calls(self._pending_function_calls)
-                self._pending_function_calls = []
+            await self._run_pending_node_transition_function_calls()
             await self.push_frame(frame, direction)
         elif isinstance(frame, LLMContextFrame):
             try:

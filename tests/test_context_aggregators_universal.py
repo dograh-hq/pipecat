@@ -4,6 +4,7 @@
 # SPDX-License-Identifier: BSD 2-Clause License
 #
 
+import asyncio
 import json
 import unittest
 
@@ -35,6 +36,7 @@ from pipecat.frames.frames import (
     LLMThoughtEndFrame,
     LLMThoughtStartFrame,
     LLMThoughtTextFrame,
+    NodeTransitionStartedFrame,
     SpeechControlParamsFrame,
     StartFrame,
     STTMetadataFrame,
@@ -561,6 +563,47 @@ class TestLLMUserAggregator(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(stop_messages), 1)
         self.assertIsNone(stop_messages[0][0])
         self.assertEqual(stop_messages[0][1].content, "Hello!")
+
+    async def test_node_transition_started_commits_pending_transcription(self):
+        context = LLMContext()
+        user_aggregator = LLMUserAggregator(context, _realtime_service_mode=True)
+        context_aggregation_event = asyncio.Event()
+        transition_frame = NodeTransitionStartedFrame(
+            function_calls=[
+                FunctionCallFromLLM(
+                    function_name="move_to_next_node",
+                    tool_call_id="call_1",
+                    arguments={},
+                    context=context,
+                )
+            ],
+            context_aggregation_event=context_aggregation_event,
+        )
+
+        down_frames, _ = await run_test(
+            Pipeline([user_aggregator]),
+            frames_to_send=[
+                TranscriptionFrame(
+                    text="The answer that selected this node",
+                    user_id="",
+                    timestamp="now",
+                ),
+                transition_frame,
+            ],
+        )
+
+        self.assertTrue(context_aggregation_event.is_set())
+        self.assertEqual(
+            context.messages[-1],
+            {
+                "role": "user",
+                "content": "The answer that selected this node",
+            },
+        )
+        self.assertLess(
+            next(i for i, frame in enumerate(down_frames) if frame is transition_frame),
+            next(i for i, frame in enumerate(down_frames) if isinstance(frame, LLMContextFrame)),
+        )
 
     async def test_pending_transcription_emitted_on_end_frame(self):
         """Pending user transcription should be emitted when EndFrame arrives."""

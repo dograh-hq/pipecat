@@ -128,6 +128,16 @@ class TestLLMSwitcherRegisterFunctionOptionPrecedence(unittest.TestCase):
             self.assertTrue(item.cancel_on_interruption)  # explicit wins
             self.assertEqual(item.timeout_secs, 60)  # decorator still applies
 
+    def test_register_function_propagates_node_transition(self):
+        switcher, members = self._switcher()
+        switcher.register_function(
+            "end_call",
+            end_call_handler,
+            is_node_transition=True,
+        )
+        for llm in members:
+            self.assertTrue(llm._functions["end_call"].is_node_transition)
+
     def test_register_direct_function_decorator_values_used_when_no_explicit_args(self):
         # Regression: the switcher used to default cancel_on_interruption to True
         # and forward it as an explicit value, overriding the handler's @tool_options.

@@ -56,6 +56,7 @@ from pipecat.frames.frames import (
     LLMThoughtEndFrame,
     LLMThoughtStartFrame,
     LLMThoughtTextFrame,
+    NodeTransitionStartedFrame,
     ServiceMetadataFrame,
     StartFrame,
     STTMetadataFrame,
@@ -822,6 +823,9 @@ class LLMUserAggregator(LLMContextAggregator):
             await self.push_frame(frame, direction)
         elif isinstance(frame, LLMSetToolChoiceFrame):
             self.set_tool_choice(frame.tool_choice)
+        elif isinstance(frame, NodeTransitionStartedFrame):
+            await self.push_frame(frame, direction)
+            await self._handle_node_transition_started(frame)
         elif isinstance(frame, FunctionCallsStartedFrame):
             await self.push_frame(frame, direction)
             await self._handle_function_calls_started(frame)
@@ -1149,6 +1153,13 @@ class LLMUserAggregator(LLMContextAggregator):
             await self.reset()
 
         await self._user_turn_controller.force_user_turn_stop()
+
+    async def _handle_node_transition_started(self, frame: NodeTransitionStartedFrame):
+        """Commit pending user text before acknowledging a node handoff."""
+        if not frame.context_aggregation_event:
+            return
+        await self.push_aggregation()
+        frame.context_aggregation_event.set()
 
     async def _handle_transcription(self, frame: TranscriptionFrame):
         text = frame.text
