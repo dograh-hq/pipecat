@@ -93,14 +93,27 @@ class TurnDetection(BaseModel):
 #
 
 
+class InputAudioTranscription(BaseModel):
+    """Configuration for user-audio transcription.
+
+    xAI only emits input-audio transcription events when ``grok-transcribe``
+    is explicitly enabled on the realtime session.
+    """
+
+    model: Literal["grok-transcribe"] | str = "grok-transcribe"
+    language_hint: str | None = None
+
+
 class AudioInput(BaseModel):
     """Audio input configuration.
 
     Parameters:
         format: The format configuration for input audio.
+        transcription: Optional user-audio transcription configuration.
     """
 
     format: PCMAudioFormat | PCMUAudioFormat | PCMAAudioFormat | None = None
+    transcription: InputAudioTranscription | None = None
 
 
 class AudioOutput(BaseModel):
@@ -193,8 +206,8 @@ GrokTool = WebSearchTool | XSearchTool | FileSearchTool | FunctionTool | dict[st
 # Voice options
 #
 
-# Grok voice options: Ara (default), Rex, Sal, Eve, Leo
-GrokVoice = Literal["Ara", "Rex", "Sal", "Eve", "Leo"]
+# Grok built-in voice IDs are lowercase.
+GrokVoice = Literal["ara", "rex", "sal", "eve", "leo"]
 
 
 #
@@ -207,8 +220,8 @@ class SessionProperties(BaseModel):
 
     Parameters:
         instructions: System instructions for the assistant.
-        voice: The voice the model uses to respond. Options: Ara, Rex, Sal, Eve, Leo.
-            Defaults to "Ara".
+        voice: The voice the model uses to respond. Options: ara, rex, sal, eve, leo.
+            Defaults to "ara".
         turn_detection: Configuration for turn detection. Defaults to server-side VAD.
             Set to None for manual turn detection.
         audio: Configuration for input and output audio.
@@ -219,7 +232,7 @@ class SessionProperties(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     instructions: str | None = None
-    voice: GrokVoice | str | None = "Ara"
+    voice: GrokVoice | str | None = "ara"
     turn_detection: TurnDetection | None = Field(
         default_factory=lambda: TurnDetection(type="server_vad")
     )

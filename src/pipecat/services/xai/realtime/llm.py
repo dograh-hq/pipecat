@@ -226,7 +226,7 @@ class GrokRealtimeLLMService(LLMService[GrokRealtimeLLMAdapter]):
             base_url: WebSocket base URL for the realtime API.
                 Defaults to "wss://api.x.ai/v1/realtime".
             session_properties: Configuration properties for the realtime session.
-                If None, uses default SessionProperties with voice "Ara".
+                If None, uses default SessionProperties with voice "ara".
 
                 .. deprecated:: 0.0.105
                     Use ``settings=GrokRealtimeLLMService.Settings(session_properties=...)``
@@ -235,9 +235,9 @@ class GrokRealtimeLLMService(LLMService[GrokRealtimeLLMAdapter]):
 
                 To set a different voice, configure it in session_properties:
 
-                    session_properties = events.SessionProperties(voice="Rex")
+                    session_properties = events.SessionProperties(voice="rex")
 
-                Available voices: Ara, Rex, Sal, Eve, Leo.
+                Available voices: ara, rex, sal, eve, leo.
             settings: Runtime-updatable settings for this service.
             start_audio_paused: Whether to start with audio input paused. Defaults to False.
             **kwargs: Additional arguments passed to parent LLMService.
@@ -449,13 +449,13 @@ class GrokRealtimeLLMService(LLMService[GrokRealtimeLLMAdapter]):
         if not props.audio:
             props.audio = events.AudioConfiguration()
         if not props.audio.input:
-            props.audio.input = events.AudioInput(
-                format=events.PCMAudioFormat(rate=input_sample_rate)
-            )
+            props.audio.input = events.AudioInput()
+        if not props.audio.input.format:
+            props.audio.input.format = events.PCMAudioFormat(rate=input_sample_rate)
         if not props.audio.output:
-            props.audio.output = events.AudioOutput(
-                format=events.PCMAudioFormat(rate=output_sample_rate)
-            )
+            props.audio.output = events.AudioOutput()
+        if not props.audio.output.format:
+            props.audio.output.format = events.PCMAudioFormat(rate=output_sample_rate)
 
     async def start(self, frame: StartFrame):
         """Start the service and establish WebSocket connection.
