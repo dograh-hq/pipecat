@@ -7,7 +7,7 @@ from loguru import logger
 from pipecat.serializers.twilio import TwilioFrameSerializer
 
 if TYPE_CHECKING:
-    from pipecat.serializers.call_strategies import HangupStrategy
+    from pipecat.serializers.call_strategies import HangupStrategy, TransferStrategy
 
 
 class CloudonixFrameSerializer(TwilioFrameSerializer):
@@ -27,6 +27,7 @@ class CloudonixFrameSerializer(TwilioFrameSerializer):
         region: str | None = None,
         edge: str | None = None,
         hangup_strategy: "HangupStrategy | None" = None,
+        transfer_strategy: "TransferStrategy | None" = None,
         params: TwilioFrameSerializer.InputParams | None = None,
     ):
         """Initialize the CloudonixFrameSerializer.
@@ -41,6 +42,9 @@ class CloudonixFrameSerializer(TwilioFrameSerializer):
             hangup_strategy: Strategy for handling call hangups. The strategy receives
                 context with Twilio-compatible keys (call_sid, account_sid, auth_token)
                 mapped from Cloudonix values (call_id, domain_id, bearer_token).
+            transfer_strategy: Strategy for handling call transfers, invoked on an
+                EndFrame carrying the transfer reason. Receives the same
+                Twilio-compatible context keys as ``hangup_strategy``.
             params: Configuration parameters.
         """
         self._call_id = call_id
@@ -55,6 +59,7 @@ class CloudonixFrameSerializer(TwilioFrameSerializer):
             region=region,
             edge=edge,
             hangup_strategy=hangup_strategy,
+            transfer_strategy=transfer_strategy,
             params=params,
         )
 
