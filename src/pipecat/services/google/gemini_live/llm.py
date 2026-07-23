@@ -1432,11 +1432,22 @@ class GeminiLiveLLMService(LLMService[GeminiLLMAdapter]):
 
     async def _reconnect(self):
         """Reconnect to Gemini Live API."""
-        await self._disconnect()
+        await self._disconnect(preserve_pending_end_frame=True)
+        if self._end_frame_pending_bot_turn_finished:
+            # A graceful shutdown was already requested. Release it instead of
+            # opening a new session that would race pipeline termination.
+            logger.info("Releasing deferred EndFrame instead of reconnecting Gemini service")
+            await self._release_deferred_end_frame()
+            return
         await self._connect(session_resumption_handle=self._session_resumption_handle)
 
-    async def _disconnect(self):
-        """Disconnect from Gemini Live API and clean up resources."""
+    async def _disconnect(self, *, preserve_pending_end_frame: bool = False):
+        """Disconnect from Gemini Live API and clean up resources.
+
+        Args:
+            preserve_pending_end_frame: Keep a deferred :class:`EndFrame` and
+                its release timeout alive across a transient reconnect.
+        """
         logger.info("Disconnecting from Gemini service")
         try:
             self._disconnecting = True
@@ -1447,8 +1458,9 @@ class GeminiLiveLLMService(LLMService[GeminiLLMAdapter]):
             if self._transcription_timeout_task:
                 await self.cancel_task(self._transcription_timeout_task)
                 self._transcription_timeout_task = None
-            self._cancel_end_frame_deferral_timeout()
-            self._end_frame_pending_bot_turn_finished = None
+            if not preserve_pending_end_frame:
+                self._cancel_end_frame_deferral_timeout()
+                self._end_frame_pending_bot_turn_finished = None
             if self._session:
                 await self._session.close()
                 self._session = None
