@@ -81,6 +81,7 @@ class UserTurnController(BaseObject):
         *,
         user_turn_strategies: UserTurnStrategies,
         user_turn_stop_timeout: float = 5.0,
+        finalized_transcript_vad_recovery_timeout: float = 0.0,
     ):
         """Initialize the user turn controller.
 
@@ -88,17 +89,28 @@ class UserTurnController(BaseObject):
             user_turn_strategies: Configured strategies for starting and stopping user turns.
             user_turn_stop_timeout: Timeout in seconds to automatically stop a user turn
                 if no activity is detected.
+            finalized_transcript_vad_recovery_timeout: Grace period in seconds before
+                completing a turn when an STT provider has emitted a final
+                transcription segment but the local VAD has not emitted its
+                corresponding stop event. Fresh interim or final transcription
+                cancels and re-arms the grace period. Set to 0 to disable this
+                recovery.
         """
         super().__init__()
 
         self._user_turn_strategies = user_turn_strategies
         self._user_turn_stop_timeout = user_turn_stop_timeout
+        self._finalized_transcript_vad_recovery_timeout = (
+            finalized_transcript_vad_recovery_timeout
+        )
 
         self._user_speaking = False
 
         self._user_turn = False
         self._user_turn_stop_timeout_event = asyncio.Event()
         self._user_turn_stop_timeout_task: asyncio.Task | None = None
+        self._finalized_transcript_vad_recovery_task: asyncio.Task | None = None
+        self._finalized_transcript_vad_recovery_generation = 0
 
         self._register_event_handler("on_push_frame", sync=True)
         self._register_event_handler("on_broadcast_frame", sync=True)
@@ -135,6 +147,8 @@ class UserTurnController(BaseObject):
         if self._user_turn_stop_timeout_task:
             await self.cancel_task(self._user_turn_stop_timeout_task)
             self._user_turn_stop_timeout_task = None
+
+        await self._cancel_finalized_transcript_vad_recovery()
 
         await self._cleanup_strategies()
 
@@ -247,24 +261,28 @@ class UserTurnController(BaseObject):
 
     async def _handle_user_started_speaking(self, frame: UserStartedSpeakingFrame):
         self._user_speaking = True
+        await self._cancel_finalized_transcript_vad_recovery()
 
         # The user started talking, let's reset the user turn timeout.
         self._user_turn_stop_timeout_event.set()
 
     async def _handle_user_stopped_speaking(self, frame: UserStoppedSpeakingFrame):
         self._user_speaking = False
+        await self._cancel_finalized_transcript_vad_recovery()
 
         # The user stopped talking, let's reset the user turn timeout.
         self._user_turn_stop_timeout_event.set()
 
     async def _handle_vad_user_started_speaking(self, frame: VADUserStartedSpeakingFrame):
         self._user_speaking = True
+        await self._cancel_finalized_transcript_vad_recovery()
 
         # The user started talking, let's reset the user turn timeout.
         self._user_turn_stop_timeout_event.set()
 
     async def _handle_vad_user_stopped_speaking(self, frame: VADUserStoppedSpeakingFrame):
         self._user_speaking = False
+        await self._cancel_finalized_transcript_vad_recovery()
 
         # The user stopped talking, let's reset the user turn timeout.
         self._user_turn_stop_timeout_event.set()
@@ -272,6 +290,71 @@ class UserTurnController(BaseObject):
     async def _handle_transcription(self, frame: TranscriptionFrame | InterimTranscriptionFrame):
         # We have received a transcription, let's reset the user turn timeout.
         self._user_turn_stop_timeout_event.set()
+
+        # An interim means the caller is still producing speech. Never let a
+        # prior recovery close that continued turn.
+        if not isinstance(frame, TranscriptionFrame):
+            await self._cancel_finalized_transcript_vad_recovery()
+            return
+
+        await self._schedule_finalized_transcript_vad_recovery()
+
+    async def _cancel_finalized_transcript_vad_recovery(self):
+        """Cancel a pending fallback for a missing local VAD stop event."""
+        self._finalized_transcript_vad_recovery_generation += 1
+        if self._finalized_transcript_vad_recovery_task:
+            await self.cancel_task(self._finalized_transcript_vad_recovery_task)
+            self._finalized_transcript_vad_recovery_task = None
+
+    async def _schedule_finalized_transcript_vad_recovery(self):
+        """Recover only when a final STT transcription is stranded.
+
+        Local VAD remains the normal source of turn completion. This narrowly
+        handles a transport/browser failure where the STT provider has completed
+        a transcription segment but the matching VAD stop frame never reaches
+        the pipeline. Any later transcript cancels the pending recovery, so a
+        caller continuing the same thought is not interrupted.
+        """
+        if (
+            self._finalized_transcript_vad_recovery_timeout <= 0
+            or not self._user_turn
+            or not self._user_speaking
+        ):
+            return
+
+        await self._cancel_finalized_transcript_vad_recovery()
+        generation = self._finalized_transcript_vad_recovery_generation
+        self._finalized_transcript_vad_recovery_task = self.create_task(
+            self._finalized_transcript_vad_recovery_handler(generation),
+            f"{self}::_finalized_transcript_vad_recovery_handler",
+        )
+
+    async def _finalized_transcript_vad_recovery_handler(self, generation: int):
+        try:
+            await asyncio.sleep(self._finalized_transcript_vad_recovery_timeout)
+        except asyncio.CancelledError:
+            return
+        finally:
+            if generation == self._finalized_transcript_vad_recovery_generation:
+                self._finalized_transcript_vad_recovery_task = None
+
+        if (
+            generation != self._finalized_transcript_vad_recovery_generation
+            or not self._user_turn
+            or not self._user_speaking
+        ):
+            return
+
+        logger.warning(
+            f"{self}: final STT transcription did not receive a VAD stop within "
+            f"{self._finalized_transcript_vad_recovery_timeout}s; completing the user turn"
+        )
+        self._user_speaking = False
+        self._user_turn_stop_timeout_event.set()
+        await self._trigger_user_turn_inference_triggered(None)
+        await self._trigger_user_turn_stop(
+            None, UserTurnStoppedParams(enable_user_speaking_frames=True)
+        )
 
     async def _on_push_frame(
         self,

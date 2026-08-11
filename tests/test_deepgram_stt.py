@@ -257,7 +257,7 @@ async def test_connection_handler_backs_off_after_non_quick_failure(monkeypatch)
     assert sleep_calls == [4, 4]  # exponential_backoff_time's min_wait, not skipped
 
 
-def _results_message(transcript: str, is_final: bool):
+def _results_message(transcript: str, is_final: bool, *, speech_final: bool | None = None):
     from deepgram.listen.v1.types import ListenV1Results
 
     return ListenV1Results.model_validate(
@@ -267,7 +267,7 @@ def _results_message(transcript: str, is_final: bool):
             "duration": 1.2,
             "start": 0.0,
             "is_final": is_final,
-            "speech_final": is_final,
+            "speech_final": is_final if speech_final is None else speech_final,
             "channel": {
                 "alternatives": [{"transcript": transcript, "confidence": 0.99, "words": []}]
             },
@@ -307,8 +307,31 @@ async def test_final_transcript_emits_usage_before_transcription_frame(monkeypat
 
     frame_types = [type(f) for f in pushed_frames]
     assert frame_types == [InterimTranscriptionFrame, MetricsFrame, TranscriptionFrame]
+    assert pushed_frames[-1].finalized is True
 
     data = pushed_frames[1].data[0]
     assert isinstance(data, STTUsageMetricsData)
     assert data.value.audio_seconds == 1.25
     assert service._stt_usage_pending_seconds == 0.0
+
+
+@pytest.mark.asyncio
+async def test_segment_final_without_speech_final_is_not_an_utterance_boundary(monkeypatch):
+    """Only Deepgram's end-of-utterance signal finalizes the Pipecat frame."""
+    from pipecat.frames.frames import TranscriptionFrame
+
+    service = DeepgramSTTService(api_key="test-key")
+    pushed_frames = []
+
+    async def fake_push_frame(frame, direction=None):
+        pushed_frames.append(frame)
+
+    monkeypatch.setattr(service, "push_frame", fake_push_frame)
+
+    await service._on_message(
+        _results_message("first segment", is_final=True, speech_final=False)
+    )
+
+    assert len(pushed_frames) == 1
+    assert isinstance(pushed_frames[0], TranscriptionFrame)
+    assert pushed_frames[0].finalized is False

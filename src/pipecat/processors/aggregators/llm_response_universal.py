@@ -136,6 +136,10 @@ class LLMUserAggregatorParams:
         user_mute_strategies: List of user mute strategies.
         user_turn_stop_timeout: Time in seconds to wait before considering the
             user's turn finished.
+        finalized_transcript_vad_recovery_timeout: Grace period in seconds before
+            recovering a final STT transcription whose matching local VAD stop
+            frame was lost. Fresh later transcription cancels the recovery. Set
+            to 0 to disable it.
         user_idle_timeout: Timeout in seconds for detecting user idle state.
             The aggregator will emit an `on_user_turn_idle` event when the user
             has been idle (not speaking) for this duration. Set to 0 to disable
@@ -167,6 +171,7 @@ class LLMUserAggregatorParams:
     user_turn_strategies: UserTurnStrategies | None = None
     user_mute_strategies: list[BaseUserMuteStrategy] = field(default_factory=list)
     user_turn_stop_timeout: float = 5.0
+    finalized_transcript_vad_recovery_timeout: float = 0.0
     user_idle_timeout: float = 0
     vad_analyzer: VADAnalyzer | None = None
     filter_incomplete_user_turns: bool = False
@@ -720,6 +725,9 @@ class LLMUserAggregator(LLMContextAggregator):
         self._user_turn_controller = UserTurnController(
             user_turn_strategies=user_turn_strategies,
             user_turn_stop_timeout=self._params.user_turn_stop_timeout,
+            finalized_transcript_vad_recovery_timeout=(
+                self._params.finalized_transcript_vad_recovery_timeout
+            ),
         )
         self._user_turn_controller.add_event_handler("on_push_frame", self._on_push_frame)
         self._user_turn_controller.add_event_handler("on_broadcast_frame", self._on_broadcast_frame)

@@ -744,6 +744,7 @@ class DeepgramSTTService(STTService):
                 # Check if this response is from a finalize() call.
                 # Only mark as finalized when both we requested it AND Deepgram confirms it.
                 from_finalize = getattr(message, "from_finalize", False) or False
+                speech_final = getattr(message, "speech_final", False) or False
                 if from_finalize:
                     self.confirm_finalize()
                 if len(transcript) > 0:
@@ -757,6 +758,10 @@ class DeepgramSTTService(STTService):
                             time_now_iso8601(),
                             language,
                             result=message,
+                            # Deepgram's ``speech_final`` is its provider-level
+                            # end-of-utterance signal. A response to our explicit
+                            # Finalize request is also a completed utterance.
+                            finalized=bool(speech_final or from_finalize),
                         )
                     )
                     await self._handle_transcription(transcript, is_final, language)

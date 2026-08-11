@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 from pipecat.audio.turn.base_turn_analyzer import EndOfTurnState
 from pipecat.frames.frames import (
     BotStartedSpeakingFrame,
+    InterimTranscriptionFrame,
     STTMetadataFrame,
     TranscriptionFrame,
     UserStartedSpeakingFrame,
@@ -263,6 +264,81 @@ class TestUserTurnController(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(TRANSCRIPTION_TIMEOUT + 0.1)
 
         self.assertEqual(stop_events, [None])
+        await controller.cleanup()
+
+    async def test_final_transcription_recovers_when_vad_stop_is_lost(self):
+        """A final STT segment must not leave a browser call stuck.
+
+        This reproduces the WebRTC failure mode where STT delivers the caller's
+        final answer but the local VAD never emits a stopped-speaking frame.
+        """
+        controller = UserTurnController(
+            user_turn_strategies=UserTurnStrategies(
+                start=[VADUserTurnStartStrategy()],
+                stop=[SpeechTimeoutUserTurnStopStrategy(user_speech_timeout=1.0)],
+            ),
+            finalized_transcript_vad_recovery_timeout=0.02,
+        )
+        await controller.setup(self.task_manager)
+
+        events: list[str] = []
+
+        @controller.event_handler("on_user_turn_inference_triggered")
+        async def on_user_turn_inference_triggered(controller, strategy):
+            events.append("inference_triggered")
+
+        @controller.event_handler("on_user_turn_stopped")
+        async def on_user_turn_stopped(controller, strategy, params):
+            events.append("stopped")
+
+        await controller.process_frame(VADUserStartedSpeakingFrame())
+        await controller.process_frame(
+            TranscriptionFrame(
+                text="Yes, I am 21 or older.",
+                user_id="caller",
+                timestamp="now",
+                finalized=False,
+            )
+        )
+
+        await asyncio.sleep(0.08)
+        self.assertEqual(events, ["inference_triggered", "stopped"])
+        self.assertFalse(controller.has_active_user_turn)
+
+        await controller.cleanup()
+
+    async def test_new_transcription_cancels_finalized_transcript_recovery(self):
+        """A caller who continues speaking must never be cut off by recovery."""
+        controller = UserTurnController(
+            user_turn_strategies=UserTurnStrategies(
+                start=[VADUserTurnStartStrategy()],
+                stop=[SpeechTimeoutUserTurnStopStrategy(user_speech_timeout=1.0)],
+            ),
+            finalized_transcript_vad_recovery_timeout=0.05,
+        )
+        await controller.setup(self.task_manager)
+
+        stopped = False
+
+        @controller.event_handler("on_user_turn_stopped")
+        async def on_user_turn_stopped(controller, strategy, params):
+            nonlocal stopped
+            stopped = True
+
+        await controller.process_frame(VADUserStartedSpeakingFrame())
+        await controller.process_frame(
+            TranscriptionFrame(text="Yes", user_id="caller", timestamp="now", finalized=True)
+        )
+        await asyncio.sleep(0.01)
+        await controller.process_frame(
+            InterimTranscriptionFrame(text="Yes, and", user_id="caller", timestamp="now")
+        )
+
+        await asyncio.sleep(0.08)
+        self.assertFalse(stopped)
+        self.assertTrue(controller.has_active_user_turn)
+
+        await controller.cleanup()
 
     async def test_user_turn_start_reset(self):
         controller = UserTurnController(
