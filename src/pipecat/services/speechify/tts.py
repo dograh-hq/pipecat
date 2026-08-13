@@ -10,7 +10,6 @@ from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 
 import aiohttp
-from loguru import logger
 
 from pipecat.frames.frames import (
     ErrorFrame,
@@ -57,14 +56,19 @@ def output_format_from_sample_rate(sample_rate: int) -> str:
 
     Returns:
         The Speechify output format string.
+
+    Raises:
+        ValueError: If the sample rate has no matching Speechify PCM format.
+            Speechify would otherwise return audio at a different rate than
+            the frames are labeled with, playing back at the wrong speed.
     """
     match sample_rate:
         case 8000 | 16000 | 22050 | 24000 | 44100 | 48000:
             return f"pcm_{sample_rate}"
-    logger.warning(
-        f"SpeechifyTTSService: No PCM output format available for {sample_rate} sample rate"
+    raise ValueError(
+        f"SpeechifyTTSService: unsupported sample rate {sample_rate}; "
+        "supported PCM rates are 8000, 16000, 22050, 24000, 44100, 48000"
     )
-    return "pcm_24000"
 
 
 @dataclass

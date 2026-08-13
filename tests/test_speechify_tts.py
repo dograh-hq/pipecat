@@ -6,8 +6,6 @@
 
 """Tests for SpeechifyTTSService."""
 
-import unittest
-
 import aiohttp
 import pytest
 from aiohttp import web
@@ -35,8 +33,10 @@ def test_output_format_from_sample_rate():
     assert output_format_from_sample_rate(16000) == "pcm_16000"
     assert output_format_from_sample_rate(24000) == "pcm_24000"
     assert output_format_from_sample_rate(48000) == "pcm_48000"
-    # Unsupported rates fall back to 24kHz PCM
-    assert output_format_from_sample_rate(11025) == "pcm_24000"
+    # Unsupported rates are rejected: Speechify would return audio at a
+    # different rate than the frames are labeled with.
+    with pytest.raises(ValueError, match="unsupported sample rate 11025"):
+        output_format_from_sample_rate(11025)
 
 
 def test_language_to_speechify_language():
@@ -225,7 +225,3 @@ async def test_speechify_tts_owned_session(aiohttp_client):
 
     await tts_service.cleanup()
     assert tts_service._session is None
-
-
-if __name__ == "__main__":
-    unittest.main()
