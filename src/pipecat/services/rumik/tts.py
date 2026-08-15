@@ -64,6 +64,14 @@ from pipecat.utils.tracing.service_decorators import traced_tts
 
 RUMIK_SAMPLE_RATE = 24000
 RUMIK_DEFAULT_MODEL = "muga"
+# How long to wait for a {"type": "cancelled"} (or racing "done") ack after
+# sending {"type": "cancel"} on barge-in, before force-releasing the
+# synthesis lock. A control-frame round trip on a warm socket should be near-
+# instant; this only fires when the ack is lost (generation already finished
+# right as cancel was sent, a half-closed socket drops it, or the gateway
+# doesn't respond), so it just needs to be short enough not to stall a live
+# call noticeably.
+RUMIK_CANCEL_ACK_TIMEOUT_S = 2.0
 
 
 def _validate_sample_rate(sample_rate: int | None) -> int:
@@ -248,6 +256,8 @@ class RumikTTSService(InterruptibleTTSService):
         # lock is held so the next request cannot start until the old generation
         # has fully stopped on the server.
         self._cancel_pending = False
+        # Bounds how long we wait for that ack — see RUMIK_CANCEL_ACK_TIMEOUT_S.
+        self._cancel_watchdog_task: asyncio.Task | None = None
 
         if full_response_aggregation:
             self._text_aggregator = _FullResponseTextAggregator()
@@ -294,6 +304,8 @@ class RumikTTSService(InterruptibleTTSService):
         if self._receive_task:
             await self.cancel_task(self._receive_task)
             self._receive_task = None
+
+        await self._stop_cancel_watchdog()
 
         await self._disconnect_websocket()
 
@@ -415,6 +427,10 @@ class RumikTTSService(InterruptibleTTSService):
           ``{"type": "cancelled"}`` frame (or a racing ``done``), so the next
           request cannot start — and attach audio — until the old generation
           has fully stopped. The receive loop releases the lock on that frame.
+        - arm a short watchdog (``RUMIK_CANCEL_ACK_TIMEOUT_S``) that force-
+          releases the lock if that ack never arrives — generation may have
+          already finished right as the cancel was sent, the ack can be lost
+          on a half-closed socket, or the gateway may simply not respond.
 
         If the cancel cannot be sent (socket gone), we clear locally so the
         next request does not deadlock waiting on the lock.
@@ -430,11 +446,47 @@ class RumikTTSService(InterruptibleTTSService):
             except Exception as e:
                 logger.debug(f"{self}: unable to send Rumik cancel: {e}")
             if cancel_sent:
+                # Clear any stale watchdog from a previous cancel before
+                # arming the new one — _stop_cancel_watchdog() also resets
+                # _cancel_pending, so it must run before we set it True here.
+                await self._stop_cancel_watchdog()
                 self._cancel_pending = True
+                self._cancel_watchdog_task = self.create_task(self._cancel_ack_watchdog())
             else:
                 self._clear_active_context()
             self._bot_speaking = False
         await super().on_audio_context_interrupted(context_id)
+
+    async def _cancel_ack_watchdog(self):
+        """Force-release the synthesis lock if Rumik never acks a cancel.
+
+        Bounds the wait armed by on_audio_context_interrupted. If
+        ``_cancel_pending`` is still true once the timeout elapses, no
+        "cancelled"/"done" message resolved it through the normal path, so
+        finish the context locally instead of leaving the lock — and the next
+        run_tts call — stuck forever.
+        """
+        await asyncio.sleep(RUMIK_CANCEL_ACK_TIMEOUT_S)
+        if self._cancel_pending:
+            logger.warning(
+                f"{self}: Rumik cancel not acknowledged within "
+                f"{RUMIK_CANCEL_ACK_TIMEOUT_S}s, releasing synthesis lock"
+            )
+            await self._finish_active_context(error_msg="Rumik cancel not acknowledged")
+
+    async def _stop_cancel_watchdog(self):
+        """Cancel the pending cancel-ack watchdog task, if any, and clear the flag.
+
+        Safe to call from inside the watchdog task itself (e.g. via
+        _finish_active_context, which it calls on timeout) — cancel_task on
+        the currently-running task would otherwise deadlock awaiting its own
+        cancellation.
+        """
+        self._cancel_pending = False
+        task = self._cancel_watchdog_task
+        self._cancel_watchdog_task = None
+        if task and task is not asyncio.current_task():
+            await self.cancel_task(task)
 
     async def flush_audio(self, context_id: str | None = None):
         """No-op: Rumik audio flush is driven by the {"type": "done"} message."""
@@ -511,7 +563,7 @@ class RumikTTSService(InterruptibleTTSService):
                 )
 
     async def _finish_active_context(self, *, error_msg: str | None = None):
-        self._cancel_pending = False
+        await self._stop_cancel_watchdog()
 
         context_id = self._active_context_id
         if not context_id:
