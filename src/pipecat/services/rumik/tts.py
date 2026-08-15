@@ -45,14 +45,14 @@ from loguru import logger
 from websockets.protocol import State
 
 from pipecat.frames.frames import (
-    CancelFrame,
-    EndFrame,
     ErrorFrame,
     Frame,
+    InterruptionFrame,
     StartFrame,
     TTSAudioRawFrame,
     TTSStoppedFrame,
 )
+from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.settings import NOT_GIVEN, TTSSettings, _NotGiven
 from pipecat.services.tts_service import InterruptibleTTSService, TTSService
 from pipecat.utils.text.base_text_aggregator import (
@@ -261,23 +261,11 @@ class RumikTTSService(InterruptibleTTSService):
         await super().start(frame)
         await self._connect()
 
-    async def stop(self, frame: EndFrame):
-        """Stop the Rumik TTS service."""
-        await super().stop(frame)
-        await self._disconnect()
-
-    async def cancel(self, frame: CancelFrame):
-        """Cancel the Rumik TTS service."""
-        await super().cancel(frame)
-        await self._disconnect()
-
-    async def cleanup(self):
-        """Release Rumik resources when the pipeline is torn down abruptly."""
-        try:
-            await self._disconnect()
-            await self._stop_audio_context_task()
-        finally:
-            await super().cleanup()
+    # No stop()/cancel()/cleanup() overrides: WebsocketTTSService's versions
+    # already call self._disconnect() (and TTSService's already stop the
+    # audio-context task), which resolves polymorphically to our
+    # _disconnect() below. Calling it again here would double-run websocket
+    # teardown and fire on_disconnected twice.
 
     async def _update_settings(self, delta: TTSSettings) -> dict[str, Any]:
         """Apply a settings delta, reconnecting if the model changed."""
@@ -398,6 +386,21 @@ class RumikTTSService(InterruptibleTTSService):
         await self._finish_active_context()
         await super()._report_error(error)
 
+    async def _handle_interruption(self, frame: InterruptionFrame, direction: FrameDirection):
+        """Handle interruption via the warm-socket cancel handshake, not a reconnect.
+
+        InterruptibleTTSService reconnects on every interruption where the bot
+        was speaking or a request was in flight — but that would tear down the
+        very websocket session that on_audio_context_interrupted (invoked by
+        TTSService._handle_interruption below) just sent a {"type": "cancel"}
+        on, discarding the {"type": "cancelled"} handshake before it can
+        arrive. Rumik's gateway supports cancelling in place on a warm socket,
+        so skip InterruptibleTTSService's reconnect-on-interruption logic and
+        go straight to TTSService's interruption handling.
+        """
+        self._tts_started = False
+        await TTSService._handle_interruption(self, frame, direction)
+
     async def on_audio_context_interrupted(self, context_id: str):
         """Cancel the in-flight Rumik generation when Pipecat interrupts playback.
 
@@ -483,6 +486,10 @@ class RumikTTSService(InterruptibleTTSService):
                 elif message_type == "timeout":
                     logger.debug(f"{self}: Rumik idle timeout: {data.get('message')}")
                     self._disconnecting = True
+                    # break skips the loop's else clause, so finish any
+                    # in-flight context here too (matching the error branch)
+                    # or the synthesis lock leaks and the next run_tts hangs.
+                    await self._finish_active_context(error_msg="Rumik WS idle timeout")
                     await self._disconnect_websocket()
                     break
                 elif message_type == "error" or data.get("error"):
@@ -670,6 +677,7 @@ class RumikHttpTTSService(TTSService):
                     yield ErrorFrame(
                         error=f"Rumik HTTP TTS error: HTTP {response.status}: {error_text}"
                     )
+                    yield TTSStoppedFrame(context_id=context_id)
                     return
 
                 wav_audio = await response.read()
@@ -690,3 +698,4 @@ class RumikHttpTTSService(TTSService):
         except Exception as e:
             await self.stop_all_metrics()
             yield ErrorFrame(error=f"Rumik HTTP TTS error: {e}")
+            yield TTSStoppedFrame(context_id=context_id)
