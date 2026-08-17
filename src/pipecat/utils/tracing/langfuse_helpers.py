@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import os
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -16,7 +17,13 @@ if TYPE_CHECKING:
 
 
 def mark_trace_public(span: Span) -> None:
-    """Mark the current trace as public for Langfuse sharing."""
+    """Mark the current trace as public for Langfuse sharing.
+
+    Public traces are readable by anyone with the URL, no login required, so
+    this is opt-in via ``LANGFUSE_TRACES_PUBLIC``.
+    """
+    if os.getenv("LANGFUSE_TRACES_PUBLIC", "").strip().lower() not in ("1", "true", "yes"):
+        return
     span.set_attribute("langfuse.trace.public", True)
 
 
