@@ -53,6 +53,7 @@ from pipecat.frames.frames import (
     ErrorFrame,
     Frame,
     HeartbeatFrame,
+    InterimTranscriptionFrame,
     InterruptionFrame,
     InterruptionWorkerFrame,
     MetricsFrame,
@@ -60,11 +61,13 @@ from pipecat.frames.frames import (
     StartFrame,
     StopFrame,
     StopWorkerFrame,
+    TranscriptionFrame,
     TTSSpeakFrame,
     UserSpeakingFrame,
+    UserStartedSpeakingFrame,
 )
 from pipecat.metrics.metrics import ProcessingMetricsData, TTFBMetricsData
-from pipecat.observers.base_observer import BaseObserver, FramePushed
+from pipecat.observers.base_observer import BaseObserver, FramePushed, StartupWarmup
 from pipecat.observers.turn_tracking_observer import TurnTrackingObserver
 from pipecat.observers.user_bot_latency_observer import UserBotLatencyObserver
 from pipecat.pipeline.base_pipeline import BasePipeline
@@ -297,7 +300,13 @@ class PipelineWorker(BaseWorker):
         handle_flush_frame: bool | None = None,
         enable_rtvi: bool = True,
         exclude_frames: tuple[type[Frame], ...] | None = None,
-        idle_timeout_frames: tuple[type[Frame], ...] = (BotSpeakingFrame, UserSpeakingFrame),
+        idle_timeout_frames: tuple[type[Frame], ...] = (
+            BotSpeakingFrame,
+            InterimTranscriptionFrame,
+            TranscriptionFrame,
+            UserSpeakingFrame,
+            UserStartedSpeakingFrame,
+        ),
         idle_timeout_secs: float | None = IDLE_TIMEOUT_SECS,
         name: str | None = None,
         observers: list[BaseObserver] | None = None,
@@ -376,7 +385,9 @@ class PipelineWorker(BaseWorker):
                 that should not cross the bus (lifecycle frames are
                 always excluded).
             idle_timeout_frames: A tuple with the frames that should trigger an idle
-                timeout if not received within `idle_timeout_seconds`.
+                timeout if not received within `idle_timeout_secs`. The default
+                pairs the VAD-only `UserSpeakingFrame` with the turn and
+                transcription frames a provider-driven pipeline reports instead.
             idle_timeout_secs: Timeout (in seconds) to consider pipeline idle or
                 None. If a pipeline is idle the pipeline worker will be cancelled
                 automatically.
@@ -1301,7 +1312,13 @@ class PipelineWorker(BaseWorker):
 
         # Services spend most of the start sequence waiting on the network, which
         # leaves room to load the imports while setup is happening.
-        lazy_imports_task = self.create_task(asyncio.to_thread(warm_deferred_imports))
+        async def warm_lazy_imports() -> tuple[int, int]:
+            """Warm the deferred imports, reporting when the work ran."""
+            started_at_ns = time.monotonic_ns()
+            await asyncio.to_thread(warm_deferred_imports)
+            return started_at_ns, time.monotonic_ns()
+
+        lazy_imports_task = self.create_task(warm_lazy_imports())
 
         # Setup processors
         setup = FrameProcessorSetup(
@@ -1325,8 +1342,13 @@ class PipelineWorker(BaseWorker):
         )
         await self.create_task(self._pipeline.setup(setup))
 
-        # Make sure lazy imports are done at this point.
-        await lazy_imports_task
+        # Make sure lazy imports are done at this point. Whatever of the load
+        # outlasts setting the processors up is startup time no processor
+        # accounts for, so observers are told when it ran.
+        warm_started_at_ns, warm_finished_at_ns = await lazy_imports_task
+        await self._observer.on_startup_warmup(
+            StartupWarmup(started_at_ns=warm_started_at_ns, finished_at_ns=warm_finished_at_ns)
+        )
 
     async def _cleanup(self, cleanup_pipeline: bool):
         """Clean up the pipeline worker and processors."""

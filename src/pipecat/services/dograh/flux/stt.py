@@ -19,7 +19,6 @@ from pipecat.frames.frames import (
     Frame,
     StartFrame,
 )
-from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.deepgram.flux.stt_base import (
     DeepgramFluxSTTBase,
     DeepgramFluxSTTSettings,
@@ -117,6 +116,8 @@ class DograhFluxSTTService(DeepgramFluxSTTBase, WebsocketService):
             min_confidence=None,
             language_hints=None,
             numerals=None,
+            profanity_filter=None,
+            redact=None,
         )
         if settings is not None:
             default_settings.apply_update(settings)
@@ -240,7 +241,7 @@ class DograhFluxSTTService(DeepgramFluxSTTBase, WebsocketService):
                 self._watchdog_task = self.create_task(self._watchdog_task_handler())
 
             logger.debug("WebSocket connected, waiting for server confirmation...")
-            await self._connection_established_event.wait()
+            await self._await_connection_established()
             logger.debug("Connected to Dograh Flux WebSocket")
             await self._call_event_handler("on_connected")
         except Exception as e:

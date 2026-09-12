@@ -222,7 +222,6 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     await runner.run()
 
 
-
 async def bot(runner_args: RunnerArguments):
     """Main bot entry point compatible with Pipecat Cloud."""
     transport = await create_transport(runner_args, transport_params)

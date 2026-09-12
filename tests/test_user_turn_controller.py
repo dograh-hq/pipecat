@@ -22,6 +22,7 @@ from pipecat.frames.frames import (
     VADUserStartedSpeakingFrame,
     VADUserStoppedSpeakingFrame,
 )
+from pipecat.turns.types import UserTurnSpeculation
 from pipecat.turns.user_start import (
     BaseUserTurnStartStrategy,
     ExternalUserTurnStartStrategy,
@@ -165,7 +166,7 @@ class TestUserTurnController(unittest.IsolatedAsyncioTestCase):
         events: list[str] = []
 
         @controller.event_handler("on_user_turn_inference_triggered")
-        async def on_user_turn_inference_triggered(controller, strategy):
+        async def on_user_turn_inference_triggered(controller, strategy, speculation):
             events.append("inference_triggered")
 
         @controller.event_handler("on_user_turn_stopped")
@@ -196,7 +197,7 @@ class TestUserTurnController(unittest.IsolatedAsyncioTestCase):
         events: list[str] = []
 
         @controller.event_handler("on_user_turn_inference_triggered")
-        async def on_user_turn_inference_triggered(controller, strategy):
+        async def on_user_turn_inference_triggered(controller, strategy, speculation):
             events.append("inference_triggered")
 
         @controller.event_handler("on_user_turn_stopped")
@@ -217,6 +218,23 @@ class TestUserTurnController(unittest.IsolatedAsyncioTestCase):
 
         await controller.cleanup()
 
+    async def test_speculative_inference_allowed_while_user_speaking(self):
+        stop = SpeechTimeoutUserTurnStopStrategy(user_speech_timeout=TRANSCRIPTION_TIMEOUT)
+        controller = UserTurnController(
+            user_turn_strategies=UserTurnStrategies(start=[VADUserTurnStartStrategy()], stop=[stop])
+        )
+        await controller.setup(frame_processor_setup(self.task_manager))
+        inferred = AsyncMock()
+        controller.add_event_handler("on_user_turn_inference_triggered", inferred)
+        try:
+            await controller.process_frame(VADUserStartedSpeakingFrame())
+            speculation = UserTurnSpeculation(text="Please look up my account")
+            await stop.trigger_user_turn_inference_triggered(speculation=speculation)
+            inferred.assert_awaited_once_with(controller, stop, speculation)
+            self.assertTrue(controller.has_active_user_turn)
+        finally:
+            await controller.cleanup()
+
     async def test_deferred_wrapper_skips_stopped(self):
         """A deferred() wrapper drops the inner strategy's on_user_turn_stopped event."""
         wrapped = deferred(
@@ -230,7 +248,7 @@ class TestUserTurnController(unittest.IsolatedAsyncioTestCase):
         events: list[str] = []
 
         @controller.event_handler("on_user_turn_inference_triggered")
-        async def on_user_turn_inference_triggered(controller, strategy):
+        async def on_user_turn_inference_triggered(controller, strategy, speculation):
             events.append("inference_triggered")
 
         @controller.event_handler("on_user_turn_stopped")
