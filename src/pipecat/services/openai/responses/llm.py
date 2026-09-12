@@ -17,7 +17,6 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-import httpx
 from loguru import logger
 from openai import NOT_GIVEN as OPENAI_NOT_GIVEN
 from openai import APITimeoutError, AsyncOpenAI, AsyncStream, DefaultAsyncHttpxClient
@@ -64,6 +63,7 @@ from pipecat.services.llm_service import (
     WebsocketReconnectedError,
 )
 from pipecat.services.settings import LLMSettings
+from pipecat.utils.http import TIMEOUT_EXCEPTIONS, connection_limits
 from pipecat.utils.tracing.service_decorators import traced_llm
 from pipecat.utils.types import NOT_GIVEN, NotGiven, assert_given
 
@@ -239,7 +239,10 @@ class _BaseOpenAIResponsesLLMService(LLMService[OpenAIResponsesLLMAdapter]):
             organization: OpenAI organization ID.
             project: OpenAI project ID.
             default_headers: Additional HTTP headers to include in requests.
-            service_tier: Service tier to use (e.g., "auto", "flex", "priority").
+            service_tier: Service tier to use: "auto", "default", "flex",
+                "scale", "fast" or "priority". "fast" is OpenAI's low-latency
+                tier, the name that replaced "priority"; both values are
+                accepted.
             settings: Runtime-updatable settings.
             retry_timeout_secs: How long an inference may go without producing
                 output before it is abandoned and re-issued, when
@@ -321,7 +324,7 @@ class _BaseOpenAIResponsesLLMService(LLMService[OpenAIResponsesLLMAdapter]):
             organization=organization,
             project=project,
             http_client=DefaultAsyncHttpxClient(
-                limits=httpx.Limits(
+                limits=connection_limits(
                     max_keepalive_connections=100, max_connections=1000, keepalive_expiry=None
                 )
             ),
@@ -1154,6 +1157,7 @@ class OpenAIResponsesLLMService(
                         completion_tokens=usage.get("output_tokens", 0),
                         total_tokens=usage.get("total_tokens", 0),
                         cache_read_input_tokens=input_details.get("cached_tokens", 0),
+                        cache_creation_input_tokens=input_details.get("cache_write_tokens", 0),
                         reasoning_tokens=output_details.get("reasoning_tokens", 0),
                     )
                     await self.start_llm_usage_metrics(tokens)
@@ -1241,7 +1245,7 @@ class OpenAIResponsesHttpLLMService(_BaseOpenAIResponsesLLMService):
                 await self.push_frame(LLMFullResponseStartFrame())
                 await self.start_processing_metrics()
                 await self._process_context(frame.context)
-            except httpx.TimeoutException as e:
+            except TIMEOUT_EXCEPTIONS as e:
                 await self._call_event_handler("on_completion_timeout")
                 await self.push_error(error_msg="LLM completion timeout", exception=e)
             except Exception as e:
@@ -1396,6 +1400,11 @@ class OpenAIResponsesHttpLLMService(_BaseOpenAIResponsesLLMService):
                             completion_tokens=usage.output_tokens or 0,
                             total_tokens=usage.total_tokens or 0,
                             cache_read_input_tokens=(input_details.cached_tokens or 0)
+                            if input_details
+                            else 0,
+                            cache_creation_input_tokens=(
+                                getattr(input_details, "cache_write_tokens", None) or 0
+                            )
                             if input_details
                             else 0,
                             reasoning_tokens=(output_details.reasoning_tokens or 0)

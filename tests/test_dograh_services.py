@@ -8,6 +8,7 @@
 
 import json
 from unittest.mock import AsyncMock, patch
+from urllib.parse import parse_qs
 
 import pytest
 from websockets.protocol import State
@@ -47,6 +48,17 @@ class _OpenWebsocket:
 
     def __init__(self):
         self.send = AsyncMock()
+
+
+def test_flux_default_query_omits_unset_options_and_preserves_billing():
+    service = DograhFluxSTTService(api_key="test-key", correlation_id="call-123")
+
+    query = parse_qs(service._build_dograh_query_string())
+
+    assert "profanity_filter" not in query
+    assert "redact" not in query
+    assert query["correlation_id"] == ["call-123"]
+    assert query["mps_billing_version"] == ["2"]
 
 
 def test_stt_metadata_recommends_external_turn_strategies_with_vad_events():

@@ -11,7 +11,9 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from pipecat.frames.frames import BotStoppedSpeakingFrame, EagerEndOfTurnCancelFrame
 from pipecat.processors.aggregators.llm_context import LLMContext
+from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.llm_service import FunctionCallFromLLM
 from pipecat.services.openai.llm import OpenAILLMService
 
@@ -28,6 +30,26 @@ def _make_function_call(name: str, tool_call_id: str) -> FunctionCallFromLLM:
         function_name=name,
         arguments={},
     )
+
+
+@pytest.mark.asyncio
+async def test_speculative_transition_is_cancelled_without_waiting_for_playback():
+    service = _make_service()
+    handler = AsyncMock()
+    service.register_function("transition", handler, is_node_transition=True)
+    service._speculation_gate.begin_speculation(True)
+    service.broadcast_frame = AsyncMock()
+    service.push_frame = AsyncMock()
+
+    await service._run_or_defer_function_calls(
+        [_make_function_call("transition", "speculative-call")],
+        text_generated=True,
+    )
+
+    service.broadcast_frame.assert_awaited_once_with(EagerEndOfTurnCancelFrame)
+    assert service._pending_node_transition_function_calls == []
+    await service.process_frame(BotStoppedSpeakingFrame(), FrameDirection.UPSTREAM)
+    handler.assert_not_awaited()
 
 
 @pytest.mark.asyncio

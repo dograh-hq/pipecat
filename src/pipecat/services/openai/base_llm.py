@@ -13,7 +13,6 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
-import httpx
 from loguru import logger
 from openai import (
     NOT_GIVEN as OPENAI_NOT_GIVEN,
@@ -44,6 +43,7 @@ from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.llm_service import FunctionCallFromLLM, LLMService
 from pipecat.services.settings import LLMSettings
 from pipecat.utils.deprecation import deprecated
+from pipecat.utils.http import TIMEOUT_EXCEPTIONS, connection_limits
 from pipecat.utils.text.alnum_utils import has_alnum
 from pipecat.utils.tracing.service_decorators import traced_llm
 from pipecat.utils.types import NOT_GIVEN, NotGiven, assert_given
@@ -285,7 +285,7 @@ class BaseOpenAILLMService(LLMService[OpenAILLMAdapter]):
             organization=organization,
             project=project,
             http_client=DefaultAsyncHttpxClient(
-                limits=httpx.Limits(
+                limits=connection_limits(
                     max_keepalive_connections=100, max_connections=1000, keepalive_expiry=None
                 )
             ),
@@ -501,6 +501,14 @@ class BaseOpenAILLMService(LLMService[OpenAILLMAdapter]):
                             if chunk.usage.prompt_tokens_details
                             else None
                         )
+                        # Tokens written into the prompt cache, billed above the
+                        # input rate. Providers without prompt caching omit the
+                        # field, which reads as "not reported" rather than zero.
+                        cache_write_tokens = (
+                            getattr(chunk.usage.prompt_tokens_details, "cache_write_tokens", None)
+                            if chunk.usage.prompt_tokens_details
+                            else None
+                        )
                         reasoning_tokens = (
                             chunk.usage.completion_tokens_details.reasoning_tokens
                             if chunk.usage.completion_tokens_details
@@ -511,6 +519,7 @@ class BaseOpenAILLMService(LLMService[OpenAILLMAdapter]):
                             completion_tokens=chunk.usage.completion_tokens,
                             total_tokens=chunk.usage.total_tokens,
                             cache_read_input_tokens=cached_tokens,
+                            cache_creation_input_tokens=cache_write_tokens,
                             reasoning_tokens=reasoning_tokens,
                         )
 
@@ -632,6 +641,11 @@ class BaseOpenAILLMService(LLMService[OpenAILLMAdapter]):
         text_generated: bool,
     ) -> None:
         """Defer node-transition batches until their preceding TTS completes."""
+        if self._speculation_gate.is_speculating:
+            # Speculative tools must be cancelled before they can wait for playback.
+            await self.run_function_calls(function_calls)
+            return
+
         contains_node_transition = any(
             self._function_is_node_transition(fc.function_name) for fc in function_calls
         )
@@ -681,7 +695,7 @@ class BaseOpenAILLMService(LLMService[OpenAILLMAdapter]):
                 await self.push_frame(LLMFullResponseStartFrame())
                 await self.start_processing_metrics()
                 await self._process_context(frame.context)
-            except httpx.TimeoutException as e:
+            except TIMEOUT_EXCEPTIONS as e:
                 await self._call_event_handler("on_completion_timeout")
                 await self.push_error(error_msg="LLM completion timeout", exception=e)
             except Exception as e:

@@ -26,6 +26,7 @@ from pipecat.frames.frames import (
     BotStartedSpeakingFrame,
     BotStoppedSpeakingFrame,
     CancelFrame,
+    EagerTranscriptionFrame,
     EndFrame,
     ErrorFrame,
     Frame,
@@ -769,6 +770,7 @@ class TTSService(AIService):
             isinstance(frame, TextFrame)
             and not isinstance(frame, InterimTranscriptionFrame)
             and not isinstance(frame, TranscriptionFrame)
+            and not isinstance(frame, EagerTranscriptionFrame)
         ):
             await self.start_text_aggregation_metrics()
             await self._process_text_frame(frame)
