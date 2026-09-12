@@ -777,7 +777,12 @@ class AWSNovaSonicLLMService(LLMService[AWSNovaSonicLLMAdapter]):
         # The adapter resolves conflicts between init-provided and
         # context-provided system instructions (preferring init-provided).
         system_instruction = llm_connection_params["system_instruction"]
-        logger.debug(f"Using system instruction: {system_instruction}")
+        preview = (
+            f"{system_instruction[:100]}...{system_instruction[-100:]}"
+            if system_instruction and len(system_instruction) > 200
+            else system_instruction
+        )
+        logger.debug(f"Using system instruction: {preview}")
         if system_instruction:
             await self._send_text_event(text=system_instruction, role=Role.SYSTEM)
 
