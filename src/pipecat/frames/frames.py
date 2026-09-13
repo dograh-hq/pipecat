@@ -1200,20 +1200,6 @@ class InterruptionFrame(SystemFrame):
 
 
 @dataclass
-class BotOutputAudioPauseFrame(SystemFrame):
-    """Frame requesting output audio playback to pause without clearing buffers."""
-
-    pass
-
-
-@dataclass
-class BotOutputAudioResumeFrame(SystemFrame):
-    """Frame requesting paused output audio playback to resume."""
-
-    pass
-
-
-@dataclass
 class UserStartedSpeakingFrame(SystemFrame):
     """Frame indicating that the user turn has started.
 
@@ -1371,8 +1357,9 @@ class ProposedUserStoppedSpeakingFrame(ControlFrame, UninterruptibleFrame):
     interruption — the flush immunity it had as a system frame before the
     ordering change above. A start strategy that resolves the turn start from a
     queued frame rather than a system frame — such as
-    :class:`~pipecat.turns.user_start.ProvisionalVADUserTurnStartStrategy`,
-    which waits for a transcript before committing — broadcasts that turn's
+    :class:`~pipecat.turns.user_start.TranscriptionUserTurnStartStrategy` or
+    :class:`~pipecat.turns.user_start.MinWordsUserTurnStartStrategy`, which wait
+    for transcript text before committing — broadcasts that turn's
     interruption from inside the process queue. Without the mixin that flush
     destroys the stop proposal sitting behind the transcript that triggered it,
     so a turn's own start eats its stop: `UserTurnController` never clears
