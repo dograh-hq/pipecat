@@ -1355,7 +1355,7 @@ class ProposedUserStartedSpeakingFrame(SystemFrame):
 
 
 @dataclass
-class ProposedUserStoppedSpeakingFrame(ControlFrame):
+class ProposedUserStoppedSpeakingFrame(ControlFrame, UninterruptibleFrame):
     """Frame proposing that the user turn has ended.
 
     The end-of-turn counterpart to :class:`ProposedUserStartedSpeakingFrame`,
@@ -1366,6 +1366,18 @@ class ProposedUserStoppedSpeakingFrame(ControlFrame):
     :class:`TranscriptionFrame`. A service with its own turn detection pushes
     that transcript and then proposes the stop, and the turn strategy needs
     that text in hand to close the turn on.
+
+    It is also :class:`UninterruptibleFrame`, so a queued proposal survives an
+    interruption — the flush immunity it had as a system frame before the
+    ordering change above. A start strategy that resolves the turn start from a
+    queued frame rather than a system frame — such as
+    :class:`~pipecat.turns.user_start.ProvisionalVADUserTurnStartStrategy`,
+    which waits for a transcript before committing — broadcasts that turn's
+    interruption from inside the process queue. Without the mixin that flush
+    destroys the stop proposal sitting behind the transcript that triggered it,
+    so a turn's own start eats its stop: `UserTurnController` never clears
+    `_user_speaking`, every later finalization is refused, and the turn stays
+    open until the user speaks again.
     """
 
     pass

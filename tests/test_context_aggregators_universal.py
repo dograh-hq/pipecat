@@ -81,6 +81,7 @@ from pipecat.turns.user_mute import (
 )
 from pipecat.turns.user_start import (
     ExternalUserTurnStartStrategy,
+    ProvisionalVADUserTurnStartStrategy,
     TranscriptionUserTurnStartStrategy,
     VADUserTurnStartStrategy,
 )
@@ -434,6 +435,68 @@ class TestLLMUserAggregator(unittest.IsolatedAsyncioTestCase):
             SleepFrame(sleep=0.3),
         ]
         expected_down_frames = [
+            UserStartedSpeakingFrame,
+            InterruptionFrame,
+            LLMContextFrame,
+            UserStoppedSpeakingFrame,
+        ]
+        await run_test(
+            Pipeline([TurnDetectingSTT(), user_aggregator]),
+            frames_to_send=frames_to_send,
+            expected_down_frames=expected_down_frames,
+        )
+
+    async def test_turn_closes_when_the_transcript_itself_starts_the_turn(self):
+        """A turn started by the final transcript must not flush its own stop proposal.
+
+        A start strategy that waits for a transcript before committing resolves
+        the turn start from a queued frame, so the interruption it broadcasts is
+        a point in the stream rather than a point in time. The
+        ``ProposedUserStoppedSpeakingFrame`` the STT queued right behind that
+        transcript is still in the queue when the flush passes. If it does not
+        survive, ``UserTurnController`` never clears ``_user_speaking`` and the
+        turn stays open forever.
+
+        The aggregation timer is set far longer than the test runs, so the turn
+        can only close from the stop proposal itself.
+        """
+
+        class TurnDetectingSTT(FrameProcessor):
+            """Stands in for an STT whose provider reports turn boundaries.
+
+            Mirrors ``DeepgramFluxSTTService._handle_end_of_turn``: push the
+            final transcript, then propose the stop behind it.
+            """
+
+            async def process_frame(self, frame: Frame, direction: FrameDirection):
+                await super().process_frame(frame, direction)
+                await self.push_frame(frame, direction)
+                if isinstance(frame, ProposedUserStartedSpeakingFrame):
+                    await self.push_frame(
+                        TranscriptionFrame(text="Hello?", user_id="", timestamp="now")
+                    )
+                    await self.broadcast_frame(ProposedUserStoppedSpeakingFrame)
+
+        context = LLMContext()
+        user_aggregator = LLMUserAggregator(
+            context,
+            params=LLMUserAggregatorParams(
+                user_turn_strategies=UserTurnStrategies(
+                    start=[ProvisionalVADUserTurnStartStrategy()],
+                    stop=[ExternalUserTurnStopStrategy(timeout=30.0)],
+                ),
+                user_turn_stop_timeout=30.0,
+            ),
+        )
+
+        frames_to_send = [
+            ProposedUserStartedSpeakingFrame(),
+            SleepFrame(sleep=0.3),
+        ]
+        expected_down_frames = [
+            # ProvisionalVAD does not resolve proposed turn starts, so the
+            # aggregator forwards the proposal on down the pipeline.
+            ProposedUserStartedSpeakingFrame,
             UserStartedSpeakingFrame,
             InterruptionFrame,
             LLMContextFrame,
