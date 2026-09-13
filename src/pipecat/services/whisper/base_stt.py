@@ -277,7 +277,9 @@ class BaseWhisperSTTService(SegmentedSTTService):
 
             await self.stop_processing_metrics()
 
-            text = response.text.strip()
+            # OpenAI-compatible servers (e.g. mlx_audio.server) may return
+            # `"text": null` for silent or very short audio; treat it as empty.
+            text = (response.text or "").strip()
 
             if not text:
                 logger.warning("Received empty transcription from API")
