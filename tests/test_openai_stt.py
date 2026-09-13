@@ -8,6 +8,7 @@ import pytest
 from openai.types.audio import Transcription
 
 from pipecat.frames.frames import (
+    ErrorFrame,
     InputAudioRawFrame,
     MetricsFrame,
     TranscriptionFrame,
@@ -62,6 +63,33 @@ async def test_segment_emits_usage_and_transcription(monkeypatch):
     # Usage precedes the transcript so tracing attaches it to the span the
     # finalized TranscriptionFrame closes.
     assert usage_indexes[0] < received_down.index(transcripts[0])
+
+
+@pytest.mark.asyncio
+async def test_null_transcription_text_is_treated_as_empty(monkeypatch):
+    # Some OpenAI-compatible servers answer `{"text": null}` for silent or very
+    # short audio. The SDK builds the response without validation, so `text` is
+    # None; that must not become an ErrorFrame and drop the turn.
+    service = OpenAISTTService(api_key="test-key", trailing_silence_secs=0)
+
+    async def fake_transcribe(audio: bytes) -> Transcription:
+        return Transcription.model_construct(text=None)
+
+    monkeypatch.setattr(service, "_transcribe", fake_transcribe)
+
+    pcm = b"\x01\x02" * SAMPLE_RATE
+    received_down, received_up = await run_test(
+        service,
+        frames_to_send=[
+            VADUserStartedSpeakingFrame(),
+            InputAudioRawFrame(audio=pcm, sample_rate=SAMPLE_RATE, num_channels=1),
+            VADUserStoppedSpeakingFrame(),
+        ],
+    )
+
+    # Errors travel upstream, so check both directions.
+    assert not [f for f in received_down + received_up if isinstance(f, ErrorFrame)]
+    assert not [f for f in received_down if isinstance(f, TranscriptionFrame)]
 
 
 def test_openai_realtime_should_interrupt_rides_on_recommended_strategies():
