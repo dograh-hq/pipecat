@@ -10,7 +10,8 @@ MiniMax answers HTTP 200 even when it rejects a request and puts the real
 outcome in ``base_resp``, which rides on a non-streamed body and on every
 streaming chunk alike. A caller that checks only the HTTP status therefore
 produces a call that is answered, billed and completely silent, recorded as a
-healthy synthesis. These tests pin each place that report can arrive.
+healthy synthesis. These tests pin each place that report can arrive, and the
+verdict each one carries about whether the service can speak again.
 """
 
 import json
@@ -22,6 +23,7 @@ from aiohttp import web
 from pipecat.frames.frames import ErrorFrame, TTSAudioRawFrame, TTSSpeakFrame
 from pipecat.services.minimax.tts import MiniMaxHttpTTSService
 from pipecat.tests.utils import run_test
+from pipecat.utils.errors import ErrorCategory
 
 AUDIO_HEX = "00ff" * 64
 OK_RESP = {"status_code": 0, "status_msg": "success"}
@@ -177,6 +179,34 @@ async def test_http_level_error_is_still_reported(aiohttp_client):
     assert not audio
     assert errors
     assert "401" in errors[0].error
+    assert errors[0].category is ErrorCategory.AUTHENTICATION
+
+
+@pytest.mark.asyncio
+async def test_permanent_rejection_costs_the_service_its_usability(aiohttp_client):
+    """A code that rejects the configuration rejects every later turn too.
+
+    Reporting it as permanent is what stops the pipeline handing the service
+    more text to speak, instead of leaving the line silent turn after turn.
+    """
+    handler = _streaming_handler([{"base_resp": ERROR_RESP, "trace_id": "t-5"}])
+
+    _, errors = await _frames_for(handler, aiohttp_client)
+
+    assert errors[0].category is ErrorCategory.AUTHORIZATION
+    assert not errors[0].processor.is_usable
+
+
+@pytest.mark.asyncio
+async def test_transient_rejection_leaves_the_service_usable(aiohttp_client):
+    """A rate limit says nothing about whether the next turn will be spoken."""
+    rate_limited = {"status_code": 1002, "status_msg": "rate limit"}
+    handler = _streaming_handler([{"base_resp": rate_limited, "trace_id": "t-6"}])
+
+    _, errors = await _frames_for(handler, aiohttp_client)
+
+    assert errors[0].category is ErrorCategory.RATE_LIMIT
+    assert errors[0].processor.is_usable
 
 
 @pytest.mark.asyncio

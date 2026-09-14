@@ -29,6 +29,7 @@ from pipecat.services.settings import TTSSettings
 from pipecat.services.tts_service import TTSService
 from pipecat.transcriptions.language import Language, resolve_language
 from pipecat.utils.deprecation import deprecated
+from pipecat.utils.errors import ErrorCategory, classify_http_status_code
 from pipecat.utils.tracing.service_decorators import traced_tts
 from pipecat.utils.types import NOT_GIVEN, NotGiven
 
@@ -134,8 +135,41 @@ class MiniMaxTTSSettings(TTSSettings):
         return super().from_mapping(flat)
 
 
-def _base_resp_error(payload: dict) -> str | None:
-    """Return a message if a MiniMax payload reports a failure, else None.
+# What a MiniMax status code says about whether the request could ever
+# succeed. A permanent category - authentication, authorization, invalid
+# request - costs the service its usability the moment it is reported, so a
+# rejected key, an unknown voice or a malformed setting stops the call on the
+# first turn rather than leaving the line silent until the consecutive-silence
+# watchdog gives up. Every other code is transient: it is reported, and the
+# service is still asked to speak the next turn.
+#
+# Codes that reject one piece of text rather than the configuration are
+# deliberately absent, and so report as UNKNOWN: the content-safety codes
+# (1026, 1027) and the invisible-character limit (1042) say nothing about
+# whether the turn after them can be spoken. Voice-cloning codes are absent
+# because T2A never returns them.
+#
+# https://platform.minimax.io/docs/api-reference/errorcode
+_STATUS_CODE_CATEGORIES: dict[int, ErrorCategory] = {
+    1001: ErrorCategory.CONNECTIVITY,  # request timeout
+    1002: ErrorCategory.RATE_LIMIT,
+    1004: ErrorCategory.AUTHENTICATION,  # not authorized / token not match group
+    1008: ErrorCategory.QUOTA,  # insufficient balance
+    1024: ErrorCategory.SERVER,  # internal error
+    1033: ErrorCategory.SERVER,  # system error
+    1039: ErrorCategory.RATE_LIMIT,  # token limit
+    1041: ErrorCategory.RATE_LIMIT,  # connection limit
+    2013: ErrorCategory.INVALID_REQUEST,  # invalid params
+    2042: ErrorCategory.AUTHORIZATION,  # no access to this voice_id
+    2045: ErrorCategory.RATE_LIMIT,  # rate growth limit
+    2049: ErrorCategory.AUTHENTICATION,  # invalid API key
+    2056: ErrorCategory.QUOTA,  # usage limit exceeded for this window
+    20132: ErrorCategory.INVALID_REQUEST,  # invalid samples or voice_id
+}
+
+
+def _base_resp_error(payload: dict) -> ErrorFrame | None:
+    """Return an error frame if a MiniMax payload reports a failure, else None.
 
     MiniMax answers HTTP 200 even when it rejects a request, and puts the real
     outcome in ``base_resp``, which rides on a non-streamed body and on every
@@ -143,6 +177,9 @@ def _base_resp_error(payload: dict) -> str | None:
     audio is coming. Checking only the HTTP status therefore produces a call
     that is answered, billed and completely silent, recorded as a healthy
     synthesis - the failure reaches the person on the line and nobody else.
+
+    The frame carries the category its status code maps to, which is what
+    decides whether the service is left able to attempt the next turn.
 
     https://platform.minimax.io/docs/api-reference/speech-t2a-http
     """
@@ -159,10 +196,13 @@ def _base_resp_error(payload: dict) -> str | None:
     # trace_id is the first thing MiniMax support asks for.
     trace_id = payload.get("trace_id")
     suffix = f" (trace_id={trace_id})" if trace_id else ""
-    return f"MiniMax TTS error: {status_code} {status_msg}{suffix}"
+    return ErrorFrame(
+        error=f"MiniMax TTS error: {status_code} {status_msg}{suffix}",
+        category=_STATUS_CODE_CATEGORIES.get(status_code, ErrorCategory.UNKNOWN),
+    )
 
 
-def _trailing_base_resp_error(buffer: bytearray) -> str | None:
+def _trailing_base_resp_error(buffer: bytearray) -> ErrorFrame | None:
     """Check whatever is still unparsed once the response has ended.
 
     Two things land here. A request rejected before synthesis starts comes back
@@ -450,7 +490,11 @@ class MiniMaxHttpTTSService(TTSService):
             ) as response:
                 if response.status != 200:
                     error_message = f"MiniMax TTS error: HTTP {response.status}"
-                    yield ErrorFrame(error=error_message)
+                    logger.error(error_message)
+                    yield ErrorFrame(
+                        error=error_message,
+                        category=classify_http_status_code(response.status),
+                    )
                     return
 
                 await self.start_tts_usage_metrics(text)
@@ -488,10 +532,10 @@ class MiniMaxHttpTTSService(TTSService):
                             # part-way through a stream shows up here. Checked
                             # before the extra_info skip below, which would
                             # otherwise discard the closing chunk's own report.
-                            error_message = _base_resp_error(data)
-                            if error_message:
-                                logger.error(error_message)
-                                yield ErrorFrame(error=error_message)
+                            error_frame = _base_resp_error(data)
+                            if error_frame:
+                                logger.error(error_frame.error)
+                                yield error_frame
                                 return
 
                             # Skip data blocks containing extra_info
@@ -540,10 +584,10 @@ class MiniMaxHttpTTSService(TTSService):
                 # The response has ended. A rejection never reaches the loop
                 # above, because it arrives without SSE framing or as a final
                 # event with nothing following it to close the block.
-                error_message = _trailing_base_resp_error(buffer)
-                if error_message:
-                    logger.error(error_message)
-                    yield ErrorFrame(error=error_message)
+                error_frame = _trailing_base_resp_error(buffer)
+                if error_frame:
+                    logger.error(error_frame.error)
+                    yield error_frame
                     return
 
         except Exception as e:
