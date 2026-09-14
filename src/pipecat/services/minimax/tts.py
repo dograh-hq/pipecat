@@ -134,6 +134,57 @@ class MiniMaxTTSSettings(TTSSettings):
         return super().from_mapping(flat)
 
 
+def _base_resp_error(payload: dict) -> str | None:
+    """Return a message if a MiniMax payload reports a failure, else None.
+
+    MiniMax answers HTTP 200 even when it rejects a request, and puts the real
+    outcome in ``base_resp``, which rides on a non-streamed body and on every
+    streaming chunk alike. ``status_code`` 0 is success; anything else means no
+    audio is coming. Checking only the HTTP status therefore produces a call
+    that is answered, billed and completely silent, recorded as a healthy
+    synthesis - the failure reaches the person on the line and nobody else.
+
+    https://platform.minimax.io/docs/api-reference/speech-t2a-http
+    """
+    base_resp = payload.get("base_resp")
+    if not isinstance(base_resp, dict):
+        return None
+
+    status_code = base_resp.get("status_code")
+    if not status_code:
+        # 0, None and absent all mean there is nothing wrong to report.
+        return None
+
+    status_msg = base_resp.get("status_msg") or "no message"
+    # trace_id is the first thing MiniMax support asks for.
+    trace_id = payload.get("trace_id")
+    suffix = f" (trace_id={trace_id})" if trace_id else ""
+    return f"MiniMax TTS error: {status_code} {status_msg}{suffix}"
+
+
+def _trailing_base_resp_error(buffer: bytearray) -> str | None:
+    """Check whatever is still unparsed once the response has ended.
+
+    Two things land here. A request rejected before synthesis starts comes back
+    as a plain JSON body with no SSE framing, so the data-block loop never sees
+    it at all. And the final event of a real stream has no following ``data:``
+    to delimit it, so it is left behind too - which is where the closing
+    chunk's own ``base_resp`` lives.
+    """
+    raw = bytes(buffer).strip()
+    if not raw:
+        return None
+    if raw.startswith(b"data:"):
+        raw = raw[5:]
+
+    try:
+        payload = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+
+    return _base_resp_error(payload) if isinstance(payload, dict) else None
+
+
 class MiniMaxHttpTTSService(TTSService):
     """Text-to-speech service using MiniMax's T2A (Text-to-Audio) API.
 
@@ -432,6 +483,17 @@ class MiniMaxHttpTTSService(TTSService):
 
                         try:
                             data = json.loads(data_block[5:].decode("utf-8"))
+
+                            # base_resp rides on every chunk, so a failure
+                            # part-way through a stream shows up here. Checked
+                            # before the extra_info skip below, which would
+                            # otherwise discard the closing chunk's own report.
+                            error_message = _base_resp_error(data)
+                            if error_message:
+                                logger.error(error_message)
+                                yield ErrorFrame(error=error_message)
+                                return
+
                             # Skip data blocks containing extra_info
                             if "extra_info" in data:
                                 logger.debug("Received final chunk with extra info")
@@ -474,6 +536,15 @@ class MiniMaxHttpTTSService(TTSService):
                                 f"Error decoding JSON: {e}, data: {data_block[:100]}",
                             )
                             continue
+
+                # The response has ended. A rejection never reaches the loop
+                # above, because it arrives without SSE framing or as a final
+                # event with nothing following it to close the block.
+                error_message = _trailing_base_resp_error(buffer)
+                if error_message:
+                    logger.error(error_message)
+                    yield ErrorFrame(error=error_message)
+                    return
 
         except Exception as e:
             yield ErrorFrame(error=f"Unknown error occurred: {e}", exception=e)

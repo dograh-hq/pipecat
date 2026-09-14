@@ -2,9 +2,19 @@
 
 Handles G.711 mu-law (ulaw) audio at 8kHz sent by Asterisk's
 chan_websocket / externalMedia over binary WebSocket frames.
+
+chan_websocket ships in Asterisk 20.16.0, 21.11.0, 22.6.0 and 23.0.0 onwards,
+and its control messages arrive as text frames in one of two formats. JSON is
+preferred from 20.18.0, 22.8.0 and 23.2.0; plain text remains the default
+everywhere and is deprecated. Both are read here, because which one arrives
+depends on the operator's chan_websocket.conf or f(<format>) dialstring rather
+than on anything this code controls.
+
+https://docs.asterisk.org/Configuration/Channel-Drivers/WebSocket/
 """
 
 import json
+import re
 from typing import TYPE_CHECKING
 
 from loguru import logger
@@ -24,6 +34,51 @@ from pipecat.utils.enums import EndTaskReason
 
 if TYPE_CHECKING:
     from pipecat.serializers.call_strategies import HangupStrategy, TransferStrategy
+
+
+# Every documented event name is SCREAMING_SNAKE_CASE. Requiring that shape
+# keeps the plain-text branch from turning arbitrary text into a plausible
+# looking event, so "unrecognised" in the log means what it says.
+_EVENT_NAME = re.compile(r"^[A-Z][A-Z0-9_]*$")
+
+
+def _parse_control_message(data: str) -> dict | None:
+    """Read a chan_websocket control message in either format it can arrive in.
+
+    The plain-text form is the first token as the event name followed by
+    space-separated key:value pairs::
+
+        MEDIA_START connection_id:dograh channel:WebSocket/dograh/0x78b3...
+            format:ulaw optimal_frame_size:160 ptime:20
+
+    No value contains a space, so splitting on whitespace and then on the first
+    colon is the whole grammar. Both forms are normalised to the same shape as
+    the JSON one, so callers do not have to care which arrived.
+
+    Returns None only when the message is neither - worth a warning, since it
+    means the protocol has moved on.
+    """
+    text = data.strip()
+    if not text:
+        return None
+
+    if text.startswith("{"):
+        try:
+            message = json.loads(text)
+        except json.JSONDecodeError:
+            return None
+        return message if isinstance(message, dict) else None
+
+    name, *pairs = text.split()
+    if not _EVENT_NAME.match(name):
+        return None
+
+    message = {"event": name}
+    for pair in pairs:
+        key, separator, value = pair.partition(":")
+        if separator:
+            message[key] = value
+    return message
 
 
 class AsteriskFrameSerializer(FrameSerializer):
@@ -202,12 +257,37 @@ class AsteriskFrameSerializer(FrameSerializer):
             )
             return audio_frame
         else:
-            # Text message = JSON control event
-            try:
-                message = json.loads(data)
-                event = message.get("type") or message.get("event")
+            # Text message = control event, JSON or plain text
+            message = _parse_control_message(data if isinstance(data, str) else str(data))
+            if message is None:
+                logger.warning(f"Unrecognised control message from Asterisk: {data}")
+                return None
+
+            event = message.get("event") or message.get("type")
+            if event == "MEDIA_START":
+                self._log_media_start(message)
+            else:
                 logger.debug(f"Asterisk WebSocket event: {event} - {message}")
-                return None
-            except json.JSONDecodeError:
-                logger.warning(f"Failed to parse JSON message from Asterisk: {data}")
-                return None
+            return None
+
+    def _log_media_start(self, message: dict) -> None:
+        """Record what Asterisk declares about the stream it is about to send.
+
+        These are the terms of the audio: they are worth a line of their own
+        because this serializer assumes them rather than negotiating them. A
+        mismatch here means every sample is being decoded wrong, which is
+        otherwise indistinguishable from a bad line.
+        """
+        declared_format = message.get("format")
+        logger.info(
+            f"Asterisk MEDIA_START: format={declared_format} "
+            f"optimal_frame_size={message.get('optimal_frame_size')} "
+            f"ptime={message.get('ptime')} channel_id={message.get('channel_id')}"
+        )
+
+        if declared_format and declared_format != "ulaw":
+            logger.warning(
+                f"Asterisk declared format {declared_format!r}, but this serializer "
+                f"decodes ulaw. Audio will be garbled until the dialstring or "
+                f"chan_websocket.conf asks for ulaw."
+            )
