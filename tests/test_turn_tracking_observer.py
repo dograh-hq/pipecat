@@ -10,6 +10,7 @@ from pipecat.frames.frames import (
     BotStartedSpeakingFrame,
     BotStoppedSpeakingFrame,
     CancelFrame,
+    InterruptionFrame,
     UserMuteStartedFrame,
     UserMuteStoppedFrame,
     UserStartedSpeakingFrame,
@@ -24,6 +25,71 @@ from pipecat.tests.utils import SleepFrame, run_test
 
 class TestTurnTrackingObserver(unittest.IsolatedAsyncioTestCase):
     """Tests for TurnTrackingObserver."""
+
+    async def test_noninterrupting_overlap_waits_for_both_speakers(self):
+        observer = TurnTrackingObserver(turn_end_timeout_secs=0.02)
+        events = []
+
+        @observer.event_handler("on_user_speech_stopped_for_turn")
+        async def user_stopped(_observer, turn, _data):
+            events.append(("user_stopped", turn))
+
+        @observer.event_handler("on_turn_ended")
+        async def ended(_observer, turn, _duration, interrupted):
+            events.append(("ended", turn, interrupted))
+
+        await run_test(
+            IdentityFilter(),
+            frames_to_send=[
+                BotStartedSpeakingFrame(),
+                UserStartedSpeakingFrame(enable_interruptions=False),
+                BotStoppedSpeakingFrame(),
+                SleepFrame(sleep=0.06),
+                UserStoppedSpeakingFrame(),
+                SleepFrame(sleep=0.06),
+            ],
+            expected_down_frames=[
+                BotStartedSpeakingFrame,
+                UserStartedSpeakingFrame,
+                BotStoppedSpeakingFrame,
+                UserStoppedSpeakingFrame,
+            ],
+            observers=[observer],
+        )
+        self.assertEqual(events, [("user_stopped", 1), ("ended", 1, False)])
+
+    async def test_explicit_interruption_ends_overlap_and_next_bot_owns_new_turn(self):
+        observer = TurnTrackingObserver(turn_end_timeout_secs=0.02)
+        events = []
+
+        @observer.event_handler("on_turn_ended")
+        async def ended(_observer, turn, _duration, interrupted):
+            events.append((turn, interrupted))
+
+        await run_test(
+            IdentityFilter(),
+            frames_to_send=[
+                BotStartedSpeakingFrame(),
+                UserStartedSpeakingFrame(enable_interruptions=False),
+                UserStoppedSpeakingFrame(),
+                InterruptionFrame(),
+                BotStoppedSpeakingFrame(),
+                BotStartedSpeakingFrame(),
+                BotStoppedSpeakingFrame(),
+                SleepFrame(sleep=0.06),
+            ],
+            expected_down_frames=[
+                BotStartedSpeakingFrame,
+                UserStartedSpeakingFrame,
+                UserStoppedSpeakingFrame,
+                InterruptionFrame,
+                BotStoppedSpeakingFrame,
+                BotStartedSpeakingFrame,
+                BotStoppedSpeakingFrame,
+            ],
+            observers=[observer],
+        )
+        self.assertEqual(events, [(1, True), (2, False)])
 
     async def test_broadcast_siblings_emit_one_correlated_user_boundary(self):
         """Upstream/downstream siblings represent one logical speaking event."""

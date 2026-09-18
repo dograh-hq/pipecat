@@ -20,6 +20,7 @@ from pipecat.frames.frames import (
     BotStoppedSpeakingFrame,
     CancelFrame,
     EndFrame,
+    InterruptionFrame,
     StartFrame,
     UserMuteStartedFrame,
     UserMuteStoppedFrame,
@@ -77,6 +78,7 @@ class TurnTrackingObserver(BaseObserver):
         # audio, so this must be tracked independently from ``_turn_count``.
         self._bot_speaking_turn: int | None = None
         self._user_speaking_turn: int | None = None
+        self._overlapping_speech = False
         self._is_user_muted = False
         self._has_bot_spoken = False
         self._turn_start_time = 0
@@ -135,6 +137,13 @@ class TurnTrackingObserver(BaseObserver):
             await self._handle_user_started_speaking(data)
         elif isinstance(data.frame, UserStoppedSpeakingFrame):
             await self._handle_user_stopped_speaking(data)
+        elif isinstance(data.frame, InterruptionFrame) and self._overlapping_speech:
+            # An observed overlap only becomes an interruption when playback
+            # is explicitly stopped. Retain the bot's physical playback owner.
+            self._overlapping_speech = False
+            self._cancel_turn_end_timer()
+            await self._end_turn(data, was_interrupted=True)
+            self._is_bot_speaking = False
         elif isinstance(data.frame, BotStartedSpeakingFrame):
             await self._handle_bot_started_speaking(data)
         # A BotStoppedSpeakingFrame can arrive after UserStartedSpeakingFrame
@@ -168,7 +177,7 @@ class TurnTrackingObserver(BaseObserver):
 
     async def _end_turn_after_timeout(self, data: FramePushed):
         """End turn after timeout has expired."""
-        if self._is_turn_active and not self._is_bot_speaking:
+        if self._is_turn_active and not self._is_bot_speaking and self._user_speaking_turn is None:
             logger.trace(f"Turn {self._turn_count} ending due to timeout")
             await self._end_turn(data, was_interrupted=False)
             self._end_turn_timer = None
@@ -180,11 +189,14 @@ class TurnTrackingObserver(BaseObserver):
             return
 
         if self._is_bot_speaking:
-            # Handle interruption - end current turn and start a new one
-            self._cancel_turn_end_timer()  # Cancel any pending end turn timer
-            await self._end_turn(data, was_interrupted=True)
-            self._is_bot_speaking = False  # Bot is considered interrupted
-            await self._start_turn(data)
+            self._cancel_turn_end_timer()
+            if data.frame.enable_interruptions:
+                await self._end_turn(data, was_interrupted=True)
+                self._is_bot_speaking = False
+                self._overlapping_speech = False
+                await self._start_turn(data)
+            else:
+                self._overlapping_speech = True
         elif self._is_turn_active and self._has_bot_spoken:
             # User started speaking during the turn_end_timeout_secs period after bot speech
             self._cancel_turn_end_timer()  # Cancel any pending end turn timer
@@ -214,9 +226,13 @@ class TurnTrackingObserver(BaseObserver):
         turn_number = self._user_speaking_turn or self._turn_count
         await self._call_event_handler("on_user_speech_stopped_for_turn", turn_number, data)
         self._user_speaking_turn = None
+        if self._has_bot_spoken and not self._is_bot_speaking:
+            self._schedule_turn_end(data)
 
     async def _handle_bot_started_speaking(self, data: FramePushed):
         """Handle bot speaking events."""
+        if not self._is_turn_active:
+            await self._start_turn(data)
         self._is_bot_speaking = True
         self._bot_speaking_turn = self._turn_count
         self._has_bot_spoken = True
@@ -229,12 +245,17 @@ class TurnTrackingObserver(BaseObserver):
         turn_number = self._bot_speaking_turn or self._turn_count
         self._is_bot_speaking = False
         self._bot_speaking_turn = None
+        self._overlapping_speech = False
         await self._call_event_handler("on_bot_stopped_speaking", turn_number, data)
 
         # Only schedule the current logical turn to end. An interrupted bot's
         # physical stop can arrive after the next turn has already started and
         # must not schedule that new turn for completion.
-        if self._is_turn_active and turn_number == self._turn_count:
+        if (
+            self._is_turn_active
+            and turn_number == self._turn_count
+            and self._user_speaking_turn is None
+        ):
             # This delay handles cases where bot speech resumes within the same
             # turn, for example HTTP TTS services or function calls.
             self._schedule_turn_end(data)

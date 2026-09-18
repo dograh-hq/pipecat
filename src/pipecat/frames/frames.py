@@ -1205,9 +1205,14 @@ class UserStartedSpeakingFrame(SystemFrame):
 
     Emitted when the user turn starts, which usually means that some
     transcriptions are already available.
+
+    Parameters:
+        enable_interruptions: Whether this turn can interrupt bot playback.
+            False allows observers to track overlapping speech without marking
+            the bot's turn interrupted.
     """
 
-    pass
+    enable_interruptions: bool = True
 
 
 @dataclass
@@ -2382,6 +2387,19 @@ class TTSStoppedFrame(ControlFrame):
     """
 
     context_id: str | None = None
+
+
+@dataclass
+class SpeechBoundaryFrame(ControlFrame):
+    """An ordered boundary that travels through synthesis and output queues.
+
+    Parameters:
+        speech_id: Identifier of the speech request this boundary belongs to.
+        beginning: True for the start of the request, False for its end.
+    """
+
+    speech_id: str
+    beginning: bool
 
 
 # Covariant so a bare ``ServiceUpdateSettingsFrame`` annotation still accepts the
