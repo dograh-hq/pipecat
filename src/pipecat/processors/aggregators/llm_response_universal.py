@@ -141,6 +141,8 @@ class LLMUserAggregatorParams:
             mic mid-speech). Set to 0 to disable. Defaults to 1.0.
         user_turn_strategies: User turn start and stop strategies.
         user_mute_strategies: List of user mute strategies.
+        should_interrupt: Optional synchronous policy allowing interruption at
+            turn start. Returning False preserves turn detection and transcripts.
         user_turn_stop_timeout: Time in seconds to wait before considering the
             user's turn finished.
         user_idle_timeout: Timeout in seconds for detecting user idle state.
@@ -173,6 +175,7 @@ class LLMUserAggregatorParams:
     audio_idle_timeout: float = 1.0
     user_turn_strategies: UserTurnStrategies | None = None
     user_mute_strategies: list[BaseUserMuteStrategy] = field(default_factory=list)
+    should_interrupt: Callable[[], bool] | None = None
     user_turn_stop_timeout: float = 5.0
     user_idle_timeout: float = 0
     vad_analyzer: VADAnalyzer | None = None
@@ -1353,12 +1356,19 @@ class LLMUserAggregator(LLMContextAggregator):
         self._user_turn_start_timestamp = time_now_iso8601()
         self._full_user_turn_aggregation = None
 
+        interruptions_allowed = (
+            self._params.should_interrupt is None or self._params.should_interrupt()
+        )
         if params.enable_user_speaking_frames:
-            await self.broadcast_frame(UserStartedSpeakingFrame)
+            await self.broadcast_frame(
+                UserStartedSpeakingFrame, enable_interruptions=interruptions_allowed
+            )
 
         await self._user_idle_controller.process_frame(UserStartedSpeakingFrame())
 
-        if params.enable_interruptions:
+        # A strategy may disable its own interruption because the provider
+        # already sent one. The frame carries policy, not that emission detail.
+        if params.enable_interruptions and interruptions_allowed:
             await self.broadcast_interruption()
 
         await self._call_event_handler("on_user_turn_started", strategy)
