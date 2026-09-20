@@ -78,7 +78,6 @@ class TurnTrackingObserver(BaseObserver):
         # audio, so this must be tracked independently from ``_turn_count``.
         self._bot_speaking_turn: int | None = None
         self._user_speaking_turn: int | None = None
-        self._overlapping_speech = False
         self._is_user_muted = False
         self._has_bot_spoken = False
         self._turn_start_time = 0
@@ -137,10 +136,8 @@ class TurnTrackingObserver(BaseObserver):
             await self._handle_user_started_speaking(data)
         elif isinstance(data.frame, UserStoppedSpeakingFrame):
             await self._handle_user_stopped_speaking(data)
-        elif isinstance(data.frame, InterruptionFrame) and self._overlapping_speech:
-            # An observed overlap only becomes an interruption when playback
-            # is explicitly stopped. Retain the bot's physical playback owner.
-            self._overlapping_speech = False
+        elif isinstance(data.frame, InterruptionFrame) and self._is_bot_speaking:
+            # Word thresholds can interrupt after a non-interrupting speech onset.
             self._cancel_turn_end_timer()
             await self._end_turn(data, was_interrupted=True)
             self._is_bot_speaking = False
@@ -193,10 +190,7 @@ class TurnTrackingObserver(BaseObserver):
             if data.frame.enable_interruptions:
                 await self._end_turn(data, was_interrupted=True)
                 self._is_bot_speaking = False
-                self._overlapping_speech = False
                 await self._start_turn(data)
-            else:
-                self._overlapping_speech = True
         elif self._is_turn_active and self._has_bot_spoken:
             # User started speaking during the turn_end_timeout_secs period after bot speech
             self._cancel_turn_end_timer()  # Cancel any pending end turn timer
@@ -245,7 +239,6 @@ class TurnTrackingObserver(BaseObserver):
         turn_number = self._bot_speaking_turn or self._turn_count
         self._is_bot_speaking = False
         self._bot_speaking_turn = None
-        self._overlapping_speech = False
         await self._call_event_handler("on_bot_stopped_speaking", turn_number, data)
 
         # Only schedule the current logical turn to end. An interrupted bot's

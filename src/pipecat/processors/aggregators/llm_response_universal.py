@@ -772,6 +772,11 @@ class LLMUserAggregator(LLMContextAggregator):
             self._vad_controller.add_event_handler("on_push_frame", self._on_push_frame)
             self._vad_controller.add_event_handler("on_broadcast_frame", self._on_broadcast_frame)
 
+    @property
+    def user_turn_controller(self) -> UserTurnController:
+        """The turn controller, including its runtime strategy update API."""
+        return self._user_turn_controller
+
     async def setup(self, setup: FrameProcessorSetup):
         """Set up the aggregator.
 
