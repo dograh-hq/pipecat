@@ -169,12 +169,17 @@ class UserTurnController(BaseObject):
     async def update_strategies(self, strategies: UserTurnStrategies):
         """Replace the current strategies with the given ones.
 
+        Retained strategy instances keep their state and running tasks. This
+        allows replacing start strategies while an active turn's stop detector
+        continues waiting for its transcript or timeout.
+
         Args:
             strategies: The new user turn strategies the controller should use.
         """
-        await self._cleanup_strategies()
+        previous = self._user_turn_strategies
+        await self._cleanup_strategies(exclude=[*strategies.start, *strategies.stop])
         self._user_turn_strategies = strategies
-        await self._setup_strategies()
+        await self._setup_strategies(exclude=[*previous.start, *previous.stop])
 
     @property
     def resolves_proposed_turn_start_frames(self) -> bool:
@@ -259,11 +264,13 @@ class UserTurnController(BaseObject):
             if result == ProcessFrameResult.STOP:
                 break
 
-    async def _setup_strategies(self):
+    async def _setup_strategies(self, *, exclude=()):
         if not self._setup:
             raise RuntimeError(f"{self} was not properly set up")
 
         for s in self._user_turn_strategies.start or []:
+            if s in exclude:
+                continue
             await s.setup(self._setup)
             s.add_event_handler("on_push_frame", self._on_push_frame)
             s.add_event_handler("on_broadcast_frame", self._on_broadcast_frame)
@@ -271,6 +278,8 @@ class UserTurnController(BaseObject):
             s.add_event_handler("on_reset_aggregation", self._on_reset_aggregation)
 
         for s in self._user_turn_strategies.stop or []:
+            if s in exclude:
+                continue
             await s.setup(self._setup)
             s.add_event_handler("on_push_frame", self._on_push_frame)
             s.add_event_handler("on_broadcast_frame", self._on_broadcast_frame)
@@ -282,11 +291,13 @@ class UserTurnController(BaseObject):
             )
             s.add_event_handler("on_user_turn_stopped", self._on_user_turn_stopped)
 
-    async def _cleanup_strategies(self):
+    async def _cleanup_strategies(self, *, exclude=()):
         # Remove the handlers _setup_strategies added (symmetric), so re-applying
         # strategies via update_strategies — possibly reusing the same strategy
         # instances — doesn't accumulate duplicate handler registrations.
         for s in self._user_turn_strategies.start or []:
+            if s in exclude:
+                continue
             await s.cleanup()
             s.remove_event_handler("on_push_frame", self._on_push_frame)
             s.remove_event_handler("on_broadcast_frame", self._on_broadcast_frame)
@@ -294,6 +305,8 @@ class UserTurnController(BaseObject):
             s.remove_event_handler("on_reset_aggregation", self._on_reset_aggregation)
 
         for s in self._user_turn_strategies.stop or []:
+            if s in exclude:
+                continue
             await s.cleanup()
             s.remove_event_handler("on_push_frame", self._on_push_frame)
             s.remove_event_handler("on_broadcast_frame", self._on_broadcast_frame)

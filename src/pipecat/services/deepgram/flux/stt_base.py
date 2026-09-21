@@ -20,6 +20,7 @@ from typing_extensions import override
 from pipecat.frames.frames import (
     CancelFrame,
     EndFrame,
+    InterimTranscriptionFrame,
     ProposedUserStartedSpeakingFrame,
     ProposedUserStoppedSpeakingFrame,
     STTMetadataFrame,
@@ -813,6 +814,7 @@ class DeepgramFluxSTTBase(EagerEndOfTurnSTTServiceMixin, STTService):
         logger.debug("User started speaking")
         self._user_is_speaking = True
         await self.broadcast_frame(ProposedUserStartedSpeakingFrame)
+        await self._push_partial_transcript(transcript)
         await self._call_event_handler("on_start_of_turn", transcript)
         if transcript:
             logger.trace(f"Start of turn transcript: {transcript}")
@@ -955,6 +957,7 @@ class DeepgramFluxSTTBase(EagerEndOfTurnSTTServiceMixin, STTService):
             transcript: The current partial transcript text for the ongoing turn.
         """
         if transcript:
+            await self._push_partial_transcript(transcript)
             logger.trace(f"Update event: {transcript}")
             # TTFB (Time To First Byte) metrics are currently disabled for Deepgram Flux.
             # Ideally, TTFB should measure the time from when a user starts speaking
@@ -963,3 +966,10 @@ class DeepgramFluxSTTBase(EagerEndOfTurnSTTServiceMixin, STTService):
             # making this timing measurement meaningless in this context.
             # await self.stop_ttfb_metrics()
             await self._call_event_handler("on_update", transcript)
+
+    async def _push_partial_transcript(self, transcript: str) -> None:
+        """Expose current turn text to transcript-based interruption strategies."""
+        if transcript:
+            await self.push_frame(
+                InterimTranscriptionFrame(transcript, self._user_id, time_now_iso8601())
+            )

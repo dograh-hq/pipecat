@@ -152,6 +152,36 @@ class TestUserTurnController(unittest.IsolatedAsyncioTestCase):
                     len(handler.handlers), 1, f"{name} double-registered on {strategy}"
                 )
 
+    async def test_updating_start_strategy_preserves_pending_stop_timer(self):
+        stop = SpeechTimeoutUserTurnStopStrategy(user_speech_timeout=TRANSCRIPTION_TIMEOUT)
+        controller = UserTurnController(
+            user_turn_strategies=UserTurnStrategies(start=[VADUserTurnStartStrategy()], stop=[stop])
+        )
+        await controller.setup(frame_processor_setup(self.task_manager))
+        ended = asyncio.Event()
+
+        @controller.event_handler("on_user_turn_stopped")
+        async def on_stopped(*_):
+            ended.set()
+
+        try:
+            await controller.process_frame(VADUserStartedSpeakingFrame())
+            await controller.process_frame(
+                TranscriptionFrame("Wait please.", "", "", finalized=True)
+            )
+            await controller.process_frame(VADUserStoppedSpeakingFrame())
+            timer = stop._user_speech_timeout_task
+            self.assertIsNotNone(timer)
+
+            await controller.update_strategies(
+                UserTurnStrategies(start=[MinWordsUserTurnStartStrategy(min_words=2)], stop=[stop])
+            )
+            self.assertIs(stop._user_speech_timeout_task, timer)
+            await asyncio.wait_for(ended.wait(), 1)
+            self.assertFalse(controller.has_active_user_turn)
+        finally:
+            await controller.cleanup()
+
     async def test_inference_triggered_fires_alongside_stopped(self):
         """Default strategies fire both inference-triggered and stopped, in order."""
         controller = UserTurnController(
