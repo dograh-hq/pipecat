@@ -202,27 +202,65 @@ def _base_resp_error(payload: dict) -> ErrorFrame | None:
     )
 
 
-def _trailing_base_resp_error(buffer: bytearray) -> ErrorFrame | None:
-    """Check whatever is still unparsed once the response has ended.
+@dataclass
+class MiniMaxSynthesisOutcome:
+    """Request-local completion evidence, set only after the response is validated."""
 
-    Two things land here. A request rejected before synthesis starts comes back
-    as a plain JSON body with no SSE framing, so the data-block loop never sees
-    it at all. And the final event of a real stream has no following ``data:``
-    to delimit it, so it is left behind too - which is where the closing
-    chunk's own ``base_resp`` lives.
-    """
-    raw = bytes(buffer).strip()
-    if not raw:
-        return None
-    if raw.startswith(b"data:"):
-        raw = raw[5:]
+    completed: bool = False
 
-    try:
+
+async def _response_payloads(response: aiohttp.ClientResponse) -> AsyncGenerator[dict, None]:
+    """Decode SSE events or a plain JSON response, including an unterminated final event."""
+    pending = bytearray()
+    event = bytearray()
+    is_json = None
+    max_event_bytes = 16 * 1024 * 1024
+
+    def decode(raw: bytes | bytearray) -> dict:
         payload = json.loads(raw)
-    except (json.JSONDecodeError, UnicodeDecodeError):
+        if not isinstance(payload, dict):
+            raise ValueError("MiniMax response must be a JSON object")
+        return payload
+
+    def line_received(line: bytes) -> dict | None:
+        line = line.rstrip(b"\r")
+        if not line:
+            if event:
+                payload = decode(event)
+                event.clear()
+                return payload
+        elif line.startswith(b"data:"):
+            event.extend(line[5:].lstrip(b" "))
+            event.extend(b"\n")
+            if len(event) > max_event_bytes:
+                raise ValueError("MiniMax event exceeds the size limit")
+        elif not line.startswith((b":", b"event:", b"id:", b"retry:")):
+            raise ValueError("Invalid MiniMax SSE event")
         return None
 
-    return _base_resp_error(payload) if isinstance(payload, dict) else None
+    async for chunk in response.content.iter_any():
+        pending.extend(chunk)
+        if is_json is None and pending.strip():
+            is_json = pending.lstrip().startswith((b"{", b"["))
+        if not is_json:
+            while b"\n" in pending:
+                line, _, remainder = pending.partition(b"\n")
+                pending = bytearray(remainder)
+                payload = line_received(line)
+                if payload is not None:
+                    yield payload
+        if len(pending) > max_event_bytes:
+            raise ValueError("MiniMax response exceeds the size limit")
+
+    if is_json:
+        yield decode(pending)
+    else:
+        if pending:
+            payload = line_received(bytes(pending))
+            if payload is not None:
+                yield payload
+        if event:
+            yield decode(event)
 
 
 class MiniMaxHttpTTSService(TTSService):
@@ -434,23 +472,8 @@ class MiniMaxHttpTTSService(TTSService):
         self._audio_sample_rate = self.sample_rate
         logger.debug(f"MiniMax TTS initialized with sample_rate: {self.sample_rate}")
 
-    @traced_tts
-    async def run_tts(self, text: str, context_id: str) -> AsyncGenerator[Frame, None]:
-        """Generate TTS audio from text using MiniMax's streaming API.
-
-        Args:
-            text: The text to synthesize into speech.
-            context_id: The context ID for tracking audio frames.
-
-        Yields:
-            Frame: Audio frames containing the synthesized speech.
-        """
-        headers = {
-            "accept": "application/json, text/plain, */*",
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self._api_key}",
-        }
-
+    def _build_request(self, text: str) -> dict:
+        """Snapshot the effective synthesis payload for a single request."""
         # Build voice_setting dict for API
         voice_setting = {
             "voice_id": self._settings.voice,
@@ -473,7 +496,6 @@ class MiniMaxHttpTTSService(TTSService):
             "sample_rate": self._audio_sample_rate,
         }
 
-        # Create payload from settings
         payload = {
             "stream": self._stream,
             "voice_setting": voice_setting,
@@ -484,113 +506,88 @@ class MiniMaxHttpTTSService(TTSService):
         if self._settings.language_boost is not None:
             payload["language_boost"] = self._settings.language_boost
 
+        if self._stream:
+            payload["stream_options"] = {"exclude_aggregated_audio": True}
+        return payload
+
+    @traced_tts
+    async def run_tts(self, text: str, context_id: str) -> AsyncGenerator[Frame, None]:
+        """Synthesize one request and yield its PCM frames or a provider error."""
+        outcome = MiniMaxSynthesisOutcome()
+        async for frame in self._run_tts_request(self._build_request(text), context_id, outcome):
+            yield frame
+
+    async def _run_tts_request(
+        self, payload: dict, context_id: str, outcome: MiniMaxSynthesisOutcome
+    ) -> AsyncGenerator[Frame, None]:
+        """Execute a payload, confirming completion only after a clean, valid response."""
+        outcome.completed = False
+        headers = {
+            "accept": "application/json, text/plain, */*",
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self._api_key}",
+        }
+        audio_settings = payload["audio_setting"]
+        sample_rate = audio_settings["sample_rate"]
+        channels = audio_settings["channel"]
+        alignment = 2 * channels
+        pcm = bytearray()
+        received_audio = False
+        completed = False
         try:
             async with self._session.post(
                 self._base_url, headers=headers, json=payload
             ) as response:
                 if response.status != 200:
-                    error_message = f"MiniMax TTS error: HTTP {response.status}"
-                    logger.error(error_message)
                     yield ErrorFrame(
-                        error=error_message,
+                        error=f"MiniMax TTS error: HTTP {response.status}",
                         category=classify_http_status_code(response.status),
                     )
                     return
 
-                await self.start_tts_usage_metrics(text)
+                await self.start_tts_usage_metrics(payload["text"])
+                async for data in _response_payloads(response):
+                    error = _base_resp_error(data)
+                    if error:
+                        yield error
+                        return
+                    chunk_data = data.get("data") or {}
+                    status = chunk_data.get("status")
+                    if completed:
+                        raise ValueError("MiniMax sent data after synthesis completed")
+                    audio_hex = chunk_data.get("audio") or ""
+                    audio = bytes.fromhex(audio_hex)
+                    # A streaming status-2 event may repeat the entire response.
+                    # Its audio is never appended to the incremental stream.
+                    if not payload["stream"] or status != 2:
+                        pcm.extend(audio)
+                    if status == 2:
+                        completed = True
+                    elif status not in (None, 1):
+                        raise ValueError("Unknown MiniMax synthesis status")
 
-                # Process the streaming response
-                buffer = bytearray()
+                    size = max(alignment, self.chunk_size // alignment * alignment)
+                    while len(pcm) >= alignment:
+                        count = min(size, len(pcm) // alignment * alignment)
+                        audio_chunk = bytes(pcm[:count])
+                        del pcm[:count]
+                        received_audio = True
+                        await self.stop_ttfb_metrics()
+                        yield TTSAudioRawFrame(
+                            audio=audio_chunk,
+                            sample_rate=sample_rate,
+                            num_channels=channels,
+                            context_id=context_id,
+                        )
 
-                CHUNK_SIZE = self.chunk_size
-
-                async for chunk in response.content.iter_chunked(CHUNK_SIZE):
-                    if not chunk:
-                        continue
-
-                    buffer.extend(chunk)
-
-                    # Find complete data blocks
-                    while b"data:" in buffer:
-                        start = buffer.find(b"data:")
-                        next_start = buffer.find(b"data:", start + 5)
-
-                        if next_start == -1:
-                            # No next data block found, keep current data for next iteration
-                            if start > 0:
-                                buffer = buffer[start:]
-                            break
-
-                        # Extract a complete data block
-                        data_block = buffer[start:next_start]
-                        buffer = buffer[next_start:]
-
-                        try:
-                            data = json.loads(data_block[5:].decode("utf-8"))
-
-                            # base_resp rides on every chunk, so a failure
-                            # part-way through a stream shows up here. Checked
-                            # before the extra_info skip below, which would
-                            # otherwise discard the closing chunk's own report.
-                            error_frame = _base_resp_error(data)
-                            if error_frame:
-                                logger.error(error_frame.error)
-                                yield error_frame
-                                return
-
-                            # Skip data blocks containing extra_info
-                            if "extra_info" in data:
-                                logger.debug("Received final chunk with extra info")
-                                continue
-
-                            chunk_data = data.get("data", {})
-                            if not chunk_data:
-                                continue
-
-                            audio_data = chunk_data.get("audio")
-                            if not audio_data:
-                                continue
-
-                            # Process audio data in chunks
-                            for i in range(0, len(audio_data), CHUNK_SIZE * 2):  # *2 for hex string
-                                # Split hex string
-                                hex_chunk = audio_data[i : i + CHUNK_SIZE * 2]
-                                if not hex_chunk:
-                                    continue
-
-                                try:
-                                    # Convert this chunk of data
-                                    audio_chunk = bytes.fromhex(hex_chunk)
-                                    if audio_chunk:
-                                        await self.stop_ttfb_metrics()
-                                        yield TTSAudioRawFrame(
-                                            audio=audio_chunk,
-                                            sample_rate=self.sample_rate,
-                                            num_channels=1,
-                                            context_id=context_id,
-                                        )
-                                except ValueError as e:
-                                    logger.error(
-                                        f"Error converting hex to binary: {e}",
-                                    )
-                                    continue
-
-                        except json.JSONDecodeError as e:
-                            logger.error(
-                                f"Error decoding JSON: {e}, data: {data_block[:100]}",
-                            )
-                            continue
-
-                # The response has ended. A rejection never reaches the loop
-                # above, because it arrives without SSE framing or as a final
-                # event with nothing following it to close the block.
-                error_frame = _trailing_base_resp_error(buffer)
-                if error_frame:
-                    logger.error(error_frame.error)
-                    yield error_frame
-                    return
-
+                if not completed:
+                    raise ValueError("MiniMax response ended before synthesis completed")
+                if pcm:
+                    raise ValueError("MiniMax returned incomplete PCM samples")
+                if not received_audio:
+                    raise ValueError("MiniMax synthesis completed without audio")
+            outcome.completed = True
         except Exception as e:
-            yield ErrorFrame(error=f"Unknown error occurred: {e}", exception=e)
+            yield ErrorFrame(error=f"MiniMax TTS response error: {e}", exception=e)
         finally:
             await self.stop_ttfb_metrics()

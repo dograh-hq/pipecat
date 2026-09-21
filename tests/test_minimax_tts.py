@@ -223,3 +223,61 @@ async def test_absent_base_resp_is_not_treated_as_a_failure(aiohttp_client):
 
     assert audio
     assert not errors
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "body",
+    [
+        _sse(_audio_chunk()),  # Clean EOF without a terminal event.
+        _sse(_audio_chunk()) + b"data:{broken}\n\n" + _sse(_summary_chunk()),
+        _sse({"data": {"audio": "not-hex", "status": 1}}) + _sse(_summary_chunk()),
+        _sse({"data": {"audio": "00", "status": 1}}) + _sse(_summary_chunk()),
+        _sse(_summary_chunk()),  # Completed without any audio.
+        _sse(_audio_chunk()) + _sse(_summary_chunk()) + _sse(_audio_chunk()),
+    ],
+)
+async def test_incomplete_or_malformed_stream_is_reported(body, aiohttp_client):
+    async def handler(_request):
+        return web.Response(body=body, content_type="text/event-stream")
+
+    _, errors = await _frames_for(handler, aiohttp_client)
+    assert errors
+
+
+@pytest.mark.asyncio
+async def test_fragmented_sse_and_unterminated_summary_do_not_duplicate_audio(aiohttp_client):
+    async def handler(request):
+        payload = await request.json()
+        assert payload["stream_options"] == {"exclude_aggregated_audio": True}
+        response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+        await response.prepare(request)
+        summary = _summary_chunk()
+        summary["data"]["audio"] = AUDIO_HEX  # Legacy aggregated final audio.
+        body = (
+            b":keepalive\r\n\r\n"
+            + _sse(_audio_chunk()).replace(b"\n", b"\r\n")
+            + _sse(summary).rstrip()
+        )
+        for i in range(0, len(body), 7):
+            await response.write(body[i : i + 7])
+        return response
+
+    audio, errors = await _frames_for(handler, aiohttp_client)
+    assert not errors
+    assert b"".join(f.audio for f in audio) == bytes.fromhex(AUDIO_HEX)
+
+
+@pytest.mark.asyncio
+async def test_pcm_samples_split_between_events_are_reassembled(aiohttp_client):
+    handler = _streaming_handler(
+        [
+            {"data": {"audio": "01", "status": 1}},
+            {"data": {"audio": "020304", "status": 1}},
+            _summary_chunk(),
+        ]
+    )
+    audio, errors = await _frames_for(handler, aiohttp_client)
+    assert not errors
+    assert b"".join(f.audio for f in audio) == b"\x01\x02\x03\x04"
+    assert all(len(f.audio) % 2 == 0 for f in audio)
