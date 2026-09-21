@@ -210,6 +210,30 @@ async def test_transient_rejection_leaves_the_service_usable(aiohttp_client):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize(
+    "status_code,status_msg,usable",
+    [(1008, "insufficient balance", False), (2056, "usage limit exceeded", True)],
+)
+async def test_balance_and_usage_window_quotas(
+    aiohttp_client, streaming, status_code, status_msg, usable
+):
+    """Balance exhaustion ends service use on its first error; window limits can recover."""
+    payload = {"base_resp": {"status_code": status_code, "status_msg": status_msg}}
+
+    async def json_handler(_request):
+        return web.json_response(payload)
+
+    handler = _streaming_handler([payload]) if streaming else json_handler
+    audio, errors = await _frames_for(handler, aiohttp_client)
+
+    assert not audio
+    assert errors[0].category is ErrorCategory.QUOTA
+    assert str(status_code) in errors[0].error
+    assert errors[0].processor.is_usable is usable
+
+
+@pytest.mark.asyncio
 async def test_absent_base_resp_is_not_treated_as_a_failure(aiohttp_client):
     """Chunks without base_resp are normal; only a non-zero status_code is not."""
     handler = _streaming_handler(

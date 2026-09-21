@@ -140,8 +140,8 @@ class MiniMaxTTSSettings(TTSSettings):
 # request - costs the service its usability the moment it is reported, so a
 # rejected key, an unknown voice or a malformed setting stops the call on the
 # first turn rather than leaving the line silent until the consecutive-silence
-# watchdog gives up. Every other code is transient: it is reported, and the
-# service is still asked to speak the next turn.
+# watchdog gives up. An exhausted balance (1008) also makes the service
+# unusable; a usage-window quota (2056) can recover on a later turn.
 #
 # Codes that reject one piece of text rather than the configuration are
 # deliberately absent, and so report as UNKNOWN: the content-safety codes
@@ -549,6 +549,9 @@ class MiniMaxHttpTTSService(TTSService):
                 async for data in _response_payloads(response):
                     error = _base_resp_error(data)
                     if error:
+                        if data["base_resp"]["status_code"] == 1008:
+                            # Credits must be replenished before any later turn can speak.
+                            await self.set_usable(False)
                         yield error
                         return
                     chunk_data = data.get("data") or {}
