@@ -780,6 +780,69 @@ async def test_textless_response_end_is_emitted_in_order(tts_class):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("preceding_llm_response", [True, False])
+async def test_previous_audio_completion_preserves_textless_response_end(preceding_llm_response):
+    """Earlier audio completing between an empty turn's start and end cannot end that turn."""
+
+    class GatedTTSService(MockWebSocketTTSService):
+        def __init__(self):
+            super().__init__()
+            self.context_ids: list[str] = []
+            self.second_turn_started = asyncio.Event()
+            self.first_context_completed = asyncio.Event()
+
+        async def on_turn_context_created(self, context_id: str):
+            self.context_ids.append(context_id)
+            if len(self.context_ids) == 2:
+                self.second_turn_started.set()
+                await self.first_context_completed.wait()
+
+        async def _handle_audio_context(self, context_id: str):
+            if context_id == self.context_ids[0]:
+                await self.second_turn_started.wait()
+            await super()._handle_audio_context(context_id)
+
+        async def on_audio_context_completed(self, context_id: str):
+            if context_id == self.context_ids[0]:
+                self.first_context_completed.set()
+
+    tts = GatedTTSService()
+    empty_start, empty_end = LLMFullResponseStartFrame(), LLMFullResponseEndFrame()
+    following_start, following_end = LLMFullResponseStartFrame(), LLMFullResponseEndFrame()
+    if preceding_llm_response:
+        preceding_start, preceding_end = LLMFullResponseStartFrame(), LLMFullResponseEndFrame()
+        preceding_frames = [preceding_start, TextFrame(text="Hello there."), preceding_end]
+        expected_boundaries = [preceding_start, preceding_end]
+    else:
+        preceding_frames = [TTSSpeakFrame(text="Hello there.")]
+        expected_boundaries = []
+
+    down, _ = await asyncio.wait_for(
+        run_test(
+            tts,
+            frames_to_send=[
+                *preceding_frames,
+                empty_start,
+                empty_end,
+                following_start,
+                TextFrame(text="World."),
+                following_end,
+            ],
+        ),
+        timeout=5.0,
+    )
+
+    boundaries = [
+        f for f in down if isinstance(f, (LLMFullResponseStartFrame, LLMFullResponseEndFrame))
+    ]
+    expected_boundaries.extend([empty_start, empty_end, following_start, following_end])
+    assert [f.id for f in boundaries] == [f.id for f in expected_boundaries]
+    first_stop = next(f for f in down if isinstance(f, TTSStoppedFrame))
+    assert down.index(first_stop) < down.index(empty_start)
+    assert not tts._pending_llm_response_end_frames
+
+
+@pytest.mark.asyncio
 async def test_http_word_timestamps_verbatim_tokens():
     """HTTP path: text, PTS order, and text-before-audio are all verified.
 

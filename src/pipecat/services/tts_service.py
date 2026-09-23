@@ -366,7 +366,9 @@ class TTSService(AIService):
         # PTS of the last word frame pushed via _add_word_timestamps, used to assign
         # correct PTS to TTSStoppedFrame and LLMFullResponseEndFrame.
         self._word_last_pts: int = 0
-        self._llm_response_started: bool = False
+        # Latest LLM response still awaiting an end frame. Earlier audio contexts
+        # can complete after this response starts, so release is scoped to its ID.
+        self._llm_response_context_id: str | None = None
         # LLMFullResponseEndFrames received in process_frame, keyed by the turn's
         # context_id, held so each can be re-pushed (with corrected PTS) at end of
         # its context instead of creating a new one. Reusing the original frame
@@ -778,9 +780,9 @@ class TTSService(AIService):
             await self._handle_interruption(frame, direction)
             await self.push_frame(frame, direction)
         elif isinstance(frame, LLMFullResponseStartFrame):
-            self._llm_response_started = True
             # New LLM turn → assign a fresh context ID shared by all sentences
             self._turn_context_id = self.create_context_id()
+            self._llm_response_context_id = self._turn_context_id
             await self.on_turn_context_created(self._turn_context_id)
             # Route through the serialization queue so this frame is emitted only
             # after any earlier audio context already queued has fully drained,
@@ -839,8 +841,11 @@ class TTSService(AIService):
                     # response), so no audio context will end to release a held
                     # frame. Emit it in order now, unless an audio context has
                     # already ended this response.
-                    if self._llm_response_started:
-                        self._llm_response_started = False
+                    if (
+                        self._llm_response_context_id is not None
+                        and self._llm_response_context_id == self._turn_context_id
+                    ):
+                        self._llm_response_context_id = None
                         await self._serialization_queue.put(frame)
                 elif self._turn_context_id is not None:
                     # Hold the original frame, keyed by this turn's context_id, so
@@ -865,7 +870,9 @@ class TTSService(AIService):
             self._turn_context_id = self.create_context_id()
             await self.on_turn_context_created(self._turn_context_id)
             # If we are not receiving text from the LLM, we can assume that the SpeakFrame should be automatically added to the context
-            push_assistant_aggregation = frame.append_to_context and not self._llm_response_started
+            push_assistant_aggregation = (
+                frame.append_to_context and self._llm_response_context_id is None
+            )
             # Assumption: text in TTSSpeakFrame does not include inter-frame spaces
             await self._push_tts_frames(
                 AggregatedTextFrame(frame.text, AggregationType.SENTENCE, raw_text=frame.text),
@@ -1048,7 +1055,7 @@ class TTSService(AIService):
         for filter in self._text_filters:
             await filter.handle_interruption()
 
-        self._llm_response_started = False
+        self._llm_response_context_id = None
         self._streamed_text = ""
         self._text_aggregation_metrics_started = False
         self._aggregated_frame_sequencer.clear()  # discard all pending slots on interruption
@@ -1691,14 +1698,14 @@ class TTSService(AIService):
             return
         # Re-push the original end frame held in process_frame (preserving its
         # id) rather than a new one, so observers that dedup by frame.id don't
-        # see a second LLM-response end. Fall back to a fresh frame if an LLM
-        # response was started but none was held for this context (e.g.
-        # _turn_context_id was unset when the end frame arrived).
+        # see a second LLM-response end. Fall back to a fresh frame only for
+        # this context's response; a newer response may already have started.
         frame = self._pending_llm_response_end_frames.pop(context_id, None)
-        if frame is None and self._llm_response_started:
-            frame = LLMFullResponseEndFrame()
+        if self._llm_response_context_id == context_id:
+            self._llm_response_context_id = None
+            if frame is None:
+                frame = LLMFullResponseEndFrame()
         if frame is not None:
-            self._llm_response_started = False
             frame.pts = self._word_last_pts
             await self.push_frame(frame)
 
