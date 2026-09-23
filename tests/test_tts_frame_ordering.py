@@ -738,6 +738,48 @@ async def test_second_turn_start_does_not_race_ahead_of_first_turn_completion():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("tts_class", [MockWebSocketTTSService, MockWebSocketPauseTTSService])
+async def test_textless_response_end_is_emitted_in_order(tts_class):
+    """A response with no text (empty, or tool calls only) produces no audio
+    context, so a word-timestamp service has no context end to release its
+    LLMFullResponseEndFrame from. It must still be emitted once, after earlier
+    audio, without adding an extra end frame to the next spoken turn.
+    """
+    tts = tts_class()
+
+    frames_to_send = [
+        LLMFullResponseStartFrame(),
+        TextFrame(text="Hello there."),
+        LLMFullResponseEndFrame(),
+        LLMFullResponseStartFrame(),
+        LLMFullResponseEndFrame(),
+        LLMFullResponseStartFrame(),
+        TextFrame(text="World."),
+        LLMFullResponseEndFrame(),
+    ]
+    frames_received = await run_test(tts, frames_to_send=frames_to_send)
+    down = frames_received[0]
+
+    relevant = [
+        f
+        for f in down
+        if isinstance(f, (LLMFullResponseStartFrame, TTSStoppedFrame, LLMFullResponseEndFrame))
+    ]
+    type_names = [type(f).__name__ for f in relevant]
+
+    assert type_names == [
+        "LLMFullResponseStartFrame",
+        "TTSStoppedFrame",
+        "LLMFullResponseEndFrame",
+        "LLMFullResponseStartFrame",
+        "LLMFullResponseEndFrame",
+        "LLMFullResponseStartFrame",
+        "TTSStoppedFrame",
+        "LLMFullResponseEndFrame",
+    ], f"Unexpected response boundaries: {type_names}"
+
+
+@pytest.mark.asyncio
 async def test_http_word_timestamps_verbatim_tokens():
     """HTTP path: text, PTS order, and text-before-audio are all verified.
 

@@ -824,6 +824,7 @@ class TTSService(AIService):
                 self._streamed_text = ""
 
             # Reset aggregator state
+            sent_text = self._processing_text
             self._processing_text = False
             self._sent_non_whitespace_in_context = False
             if isinstance(frame, LLMFullResponseEndFrame):
@@ -833,6 +834,14 @@ class TTSService(AIService):
                     # drained (including the final TTSTextFrame).  Pushing
                     # directly would let it race ahead of queued text frames.
                     await self._serialization_queue.put(frame)
+                elif not sent_text:
+                    # Nothing was sent for synthesis (an empty or tool-call-only
+                    # response), so no audio context will end to release a held
+                    # frame. Emit it in order now, unless an audio context has
+                    # already ended this response.
+                    if self._llm_response_started:
+                        self._llm_response_started = False
+                        await self._serialization_queue.put(frame)
                 elif self._turn_context_id is not None:
                     # Hold the original frame, keyed by this turn's context_id, so
                     # _maybe_reset_word_timestamps can re-push it (with the PTS of
