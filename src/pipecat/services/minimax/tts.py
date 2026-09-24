@@ -10,9 +10,15 @@ This module provides integration with MiniMax's T2A (Text-to-Audio) API
 for streaming text-to-speech synthesis.
 """
 
+import asyncio
 import json
+import math
+import random
 from collections.abc import AsyncGenerator, Mapping
+from contextlib import aclosing
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from typing import Any, Self
 
 import aiohttp
@@ -29,9 +35,20 @@ from pipecat.services.settings import TTSSettings
 from pipecat.services.tts_service import TTSService
 from pipecat.transcriptions.language import Language, resolve_language
 from pipecat.utils.deprecation import deprecated
-from pipecat.utils.errors import ErrorCategory, classify_http_status_code
+from pipecat.utils.errors import (
+    ErrorCategory,
+    classify_http_exception,
+    classify_http_status_code,
+)
 from pipecat.utils.tracing.service_decorators import traced_tts
 from pipecat.utils.types import NOT_GIVEN, NotGiven
+
+_MAX_ATTEMPTS = 3
+_RETRY_BASE_DELAY_S = 0.2
+_RETRY_JITTER_S = 0.15
+_RETRYABLE_CATEGORIES = frozenset(
+    {ErrorCategory.RATE_LIMIT, ErrorCategory.CONNECTIVITY, ErrorCategory.SERVER}
+)
 
 
 def language_to_minimax_language(language: Language) -> str:
@@ -204,9 +221,27 @@ def _base_resp_error(payload: dict) -> ErrorFrame | None:
 
 @dataclass
 class MiniMaxSynthesisOutcome:
-    """Request-local completion evidence, set only after the response is validated."""
+    """Request-local completion evidence and retry timing from the current attempt."""
 
     completed: bool = False
+    retry_after_secs: float = 0
+
+
+def _retry_after_seconds(value: str | None) -> float:
+    """Read an HTTP Retry-After delay or date; ignore malformed provider hints."""
+    if value is None:
+        return 0
+    try:
+        seconds = float(value)
+    except ValueError:
+        try:
+            when = parsedate_to_datetime(value)
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=UTC)
+            seconds = (when - datetime.now(UTC)).total_seconds()
+        except (TypeError, ValueError, OverflowError):
+            return 0
+    return max(0, seconds) if math.isfinite(seconds) else 0
 
 
 async def _response_payloads(response: aiohttp.ClientResponse) -> AsyncGenerator[dict, None]:
@@ -323,6 +358,7 @@ class MiniMaxHttpTTSService(TTSService):
         stream: bool = True,
         params: InputParams | None = None,
         settings: Settings | None = None,
+        retry_timeout_secs: float = 5.0,
         **kwargs,
     ):
         """Initialize the MiniMax TTS service.
@@ -357,8 +393,13 @@ class MiniMaxHttpTTSService(TTSService):
 
             settings: Runtime-updatable settings. When provided alongside deprecated
                 parameters, ``settings`` values take precedence.
+            retry_timeout_secs: Maximum time to first audio across the initial request
+                and up to two transient-error retries, including backoff. Once audio
+                starts, synthesis is not retried and the session's HTTP timeouts apply.
             **kwargs: Additional arguments passed to parent TTSService.
         """
+        if not math.isfinite(retry_timeout_secs) or retry_timeout_secs <= 0:
+            raise ValueError("retry_timeout_secs must be positive and finite")
         # 1. Initialize default_settings with hardcoded defaults
         default_settings = self.Settings(
             model="speech-2.8-turbo",
@@ -436,6 +477,7 @@ class MiniMaxHttpTTSService(TTSService):
         self._stream = stream
         self._base_url = f"{base_url}?GroupId={group_id}"
         self._session = aiohttp_session
+        self._retry_timeout_secs = retry_timeout_secs
 
         # Init-only audio format config
         self._audio_bitrate = 128000
@@ -514,14 +556,92 @@ class MiniMaxHttpTTSService(TTSService):
     async def run_tts(self, text: str, context_id: str) -> AsyncGenerator[Frame, None]:
         """Synthesize one request and yield its PCM frames or a provider error."""
         outcome = MiniMaxSynthesisOutcome()
-        async for frame in self._run_tts_request(self._build_request(text), context_id, outcome):
-            yield frame
+        async with aclosing(
+            self._run_tts_request(self._build_request(text), context_id, outcome)
+        ) as frames:
+            async for frame in frames:
+                yield frame
 
     async def _run_tts_request(
         self, payload: dict, context_id: str, outcome: MiniMaxSynthesisOutcome
     ) -> AsyncGenerator[Frame, None]:
+        """Retry transient refusals within one deadline, until the first audio is emitted."""
+        outcome.completed = False
+        audio_emitted = False
+        error = None
+        deadline_at = asyncio.get_running_loop().time() + self._retry_timeout_secs
+        keepalive = self.create_task(self._keep_request_context_alive(context_id))
+        try:
+            try:
+                async with asyncio.timeout_at(deadline_at) as deadline:
+                    for attempt in range(1, _MAX_ATTEMPTS + 1):
+                        error = None
+                        async with aclosing(
+                            self._run_tts_once(payload, context_id, outcome)
+                        ) as frames:
+                            async for frame in frames:
+                                if isinstance(frame, ErrorFrame):
+                                    error = frame
+                                    break
+                                if isinstance(frame, TTSAudioRawFrame) and frame.audio:
+                                    if not audio_emitted:
+                                        audio_emitted = True
+                                        deadline.reschedule(None)
+                                        await self.cancel_task(keepalive)
+                                        keepalive = None
+                                        await self.start_tts_usage_metrics(payload["text"])
+                                        await self.stop_ttfb_metrics()
+                                yield frame
+
+                        if error is None:
+                            return
+                        if (
+                            audio_emitted
+                            or error.category not in _RETRYABLE_CATEGORIES
+                            or attempt == _MAX_ATTEMPTS
+                        ):
+                            break
+
+                        delay = _RETRY_BASE_DELAY_S * 2 ** (attempt - 1) + random.uniform(
+                            0, _RETRY_JITTER_S
+                        )
+                        delay = max(delay, outcome.retry_after_secs)
+                        if asyncio.get_running_loop().time() + delay >= deadline_at:
+                            break
+                        logger.warning(
+                            "{}: MiniMax TTS attempt {}/{} failed ({}); retrying in {:.2f}s",
+                            self,
+                            attempt,
+                            _MAX_ATTEMPTS,
+                            error.error,
+                            delay,
+                        )
+                        await asyncio.sleep(delay)
+            except TimeoutError as exc:
+                error = ErrorFrame(
+                    error="MiniMax TTS timed out before first audio",
+                    exception=exc,
+                    category=ErrorCategory.CONNECTIVITY,
+                )
+            if error is not None:
+                yield error
+        finally:
+            if keepalive is not None:
+                await self.cancel_task(keepalive)
+            await self.stop_ttfb_metrics()
+
+    async def _keep_request_context_alive(self, context_id: str) -> None:
+        """Prevent audio-context expiry while bounded synthesis/retries await first audio."""
+        while True:
+            self._refresh_audio_context(context_id)
+            await asyncio.sleep(min(1.0, self._stop_frame_timeout_s / 2))
+
+    async def _run_tts_once(
+        self, payload: dict, context_id: str, outcome: MiniMaxSynthesisOutcome
+    ) -> AsyncGenerator[Frame, None]:
         """Execute a payload, confirming completion only after a clean, valid response."""
         outcome.completed = False
+        outcome.retry_after_secs = 0
         headers = {
             "accept": "application/json, text/plain, */*",
             "Content-Type": "application/json",
@@ -538,6 +658,7 @@ class MiniMaxHttpTTSService(TTSService):
             async with self._session.post(
                 self._base_url, headers=headers, json=payload
             ) as response:
+                outcome.retry_after_secs = _retry_after_seconds(response.headers.get("Retry-After"))
                 if response.status != 200:
                     yield ErrorFrame(
                         error=f"MiniMax TTS error: HTTP {response.status}",
@@ -545,7 +666,6 @@ class MiniMaxHttpTTSService(TTSService):
                     )
                     return
 
-                await self.start_tts_usage_metrics(payload["text"])
                 async for data in _response_payloads(response):
                     error = _base_resp_error(data)
                     if error:
@@ -575,7 +695,6 @@ class MiniMaxHttpTTSService(TTSService):
                         audio_chunk = bytes(pcm[:count])
                         del pcm[:count]
                         received_audio = True
-                        await self.stop_ttfb_metrics()
                         yield TTSAudioRawFrame(
                             audio=audio_chunk,
                             sample_rate=sample_rate,
@@ -591,6 +710,12 @@ class MiniMaxHttpTTSService(TTSService):
                     raise ValueError("MiniMax synthesis completed without audio")
             outcome.completed = True
         except Exception as e:
-            yield ErrorFrame(error=f"MiniMax TTS response error: {e}", exception=e)
-        finally:
-            await self.stop_ttfb_metrics()
+            yield ErrorFrame(
+                error=f"MiniMax TTS response error: {e}",
+                exception=e,
+                category=(
+                    ErrorCategory.CONNECTIVITY
+                    if isinstance(e, (aiohttp.ClientConnectionError, aiohttp.ClientPayloadError))
+                    else classify_http_exception(e)
+                ),
+            )
