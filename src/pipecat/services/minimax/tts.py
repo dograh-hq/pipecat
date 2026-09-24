@@ -587,8 +587,9 @@ class MiniMaxHttpTTSService(TTSService):
                                     if not audio_emitted:
                                         audio_emitted = True
                                         deadline.reschedule(None)
-                                        await self.cancel_task(keepalive)
-                                        keepalive = None
+                                        if keepalive is not None:
+                                            await self.cancel_task(keepalive)
+                                            keepalive = None
                                         await self.start_tts_usage_metrics(payload["text"])
                                         await self.stop_ttfb_metrics()
                                 yield frame
