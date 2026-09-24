@@ -824,6 +824,7 @@ class TTSService(AIService):
                 self._streamed_text = ""
 
             # Reset aggregator state
+            sent_text = self._processing_text
             self._processing_text = False
             self._sent_non_whitespace_in_context = False
             if isinstance(frame, LLMFullResponseEndFrame):
@@ -833,6 +834,14 @@ class TTSService(AIService):
                     # drained (including the final TTSTextFrame).  Pushing
                     # directly would let it race ahead of queued text frames.
                     await self._serialization_queue.put(frame)
+                elif not sent_text:
+                    # Nothing was sent for synthesis (an empty or tool-call-only
+                    # response), so no audio context will end to release a held
+                    # frame. Emit it in order now, unless an audio context has
+                    # already ended this response.
+                    if self._llm_response_started:
+                        self._llm_response_started = False
+                        await self._serialization_queue.put(frame)
                 elif self._turn_context_id is not None:
                     # Hold the original frame, keyed by this turn's context_id, so
                     # _maybe_reset_word_timestamps can re-push it (with the PTS of
@@ -1686,10 +1695,13 @@ class TTSService(AIService):
         # response was started but none was held for this context (e.g.
         # _turn_context_id was unset when the end frame arrived).
         frame = self._pending_llm_response_end_frames.pop(context_id, None)
-        if frame is None and self._llm_response_started:
+        # Older audio must not end a newer turn that is still receiving frames.
+        can_end_response = self._turn_context_id in (None, context_id)
+        if frame is None and self._llm_response_started and can_end_response:
             frame = LLMFullResponseEndFrame()
         if frame is not None:
-            self._llm_response_started = False
+            if can_end_response:
+                self._llm_response_started = False
             frame.pts = self._word_last_pts
             await self.push_frame(frame)
 
