@@ -89,6 +89,19 @@ async def test_response_done_reports_audio_and_cached_audio_tokens():
 
 
 @pytest.mark.asyncio
+async def test_response_done_with_null_usage_skips_metrics_without_raising():
+    # Some providers (e.g. Yandex Realtime) omit `usage` on interrupted/cancelled
+    # responses rather than sending zeroed counts.
+    service = _service_for_usage_capture()
+    evt = _response_done_evt(None)
+
+    await service._handle_evt_response_done(evt)
+
+    service.start_llm_usage_metrics.assert_not_called()
+    service.stop_processing_metrics.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_response_done_without_cached_details_reports_none():
     service = _service_for_usage_capture()
     evt = _response_done_evt(
