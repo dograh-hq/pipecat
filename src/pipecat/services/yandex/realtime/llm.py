@@ -12,6 +12,7 @@ from websockets.asyncio.client import connect as websocket_connect
 
 from pipecat.services.openai._constants import OPENAI_SAMPLE_RATE
 from pipecat.services.openai.realtime.llm import OpenAIRealtimeLLMService
+from pipecat.utils.types import is_given
 
 YANDEX_REALTIME_BASE_URL = "wss://ai.api.cloud.yandex.net/v1/realtime/openai"
 
@@ -117,9 +118,46 @@ class YandexRealtimeLLMService(OpenAIRealtimeLLMService):
         Args:
             **kwargs: Arguments passed to :class:`OpenAIRealtimeLLMService`.
                 ``base_url`` defaults to Yandex Cloud's realtime endpoint.
+                ``model`` (or an equivalent ``settings``/``session_properties``
+                override) is required: a Yandex model resource such as
+                ``"gpt://<folder-id>/yandexgpt/latest"``. Without it, this
+                would silently inherit :class:`OpenAIRealtimeLLMService`'s
+                OpenAI model default, which Yandex Cloud's endpoint rejects.
+
+        Raises:
+            ValueError: If no model was given.
         """
         kwargs.setdefault("base_url", YANDEX_REALTIME_BASE_URL)
+        if not self._explicit_model_given(kwargs):
+            raise ValueError(
+                "YandexRealtimeLLMService requires an explicit Yandex model "
+                "resource, e.g. model=\"gpt://<folder-id>/yandexgpt/latest\" "
+                "(or settings=Settings(model=...)). Without one, this would "
+                "silently inherit OpenAIRealtimeLLMService's default OpenAI "
+                "model, which is not a valid Yandex Cloud model resource."
+            )
         super().__init__(**kwargs)
+
+    @staticmethod
+    def _explicit_model_given(kwargs: dict) -> bool:
+        """Check whether any of the model-carrying init args were set.
+
+        Mirrors :class:`OpenAIRealtimeLLMService`'s own precedence: the
+        deprecated top-level ``model``/``session_properties`` args, or the
+        canonical ``settings=Settings(model=...)``.
+        """
+        if kwargs.get("model") is not None:
+            return True
+
+        settings = kwargs.get("settings")
+        if settings is not None and is_given(settings.model) and settings.model is not None:
+            return True
+
+        session_properties = kwargs.get("session_properties")
+        if session_properties is not None and session_properties.model is not None:
+            return True
+
+        return False
 
     async def _connect(self):
         try:

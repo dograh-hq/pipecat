@@ -53,6 +53,7 @@ async def test_handle_evt_error_disconnects_the_websocket():
 
     await service._handle_evt_error(_error_evt())
 
+    service.push_error.assert_awaited_once()
     fake_websocket.close.assert_awaited_once()
     assert service._websocket is None
 
