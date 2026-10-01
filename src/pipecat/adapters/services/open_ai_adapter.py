@@ -289,8 +289,7 @@ class OpenAILLMAdapter(BaseLLMAdapter[OpenAILLMInvocationParams]):
         role="tool" while the tools parameter is empty or omitted.
         """
         has_tool_messages = any(
-            msg.get("role") == "tool"
-            or (msg.get("role") == "assistant" and msg.get("tool_calls"))
+            msg.get("role") == "tool" or (msg.get("role") == "assistant" and msg.get("tool_calls"))
             for msg in messages
         )
         if not has_tool_messages:
@@ -334,4 +333,3 @@ class OpenAILLMAdapter(BaseLLMAdapter[OpenAILLMInvocationParams]):
             else:
                 sanitized.append(msg)
         return sanitized
-
