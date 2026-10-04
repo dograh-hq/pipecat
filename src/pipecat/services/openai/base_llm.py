@@ -479,7 +479,7 @@ class BaseOpenAILLMService(LLMService[OpenAILLMAdapter]):
         arguments = ""
         tool_call_id = ""
 
-        self._begin_tool_response()
+        response_generation = self._begin_tool_response()
 
         # Content generated in the current completion, accumulated so the
         # deferral decision below can ask whether any of it is speakable.
@@ -656,6 +656,7 @@ class BaseOpenAILLMService(LLMService[OpenAILLMAdapter]):
             await self._run_or_defer_function_calls(
                 function_calls,
                 text_generated=text_generated,
+                response_generation=response_generation,
             )
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):

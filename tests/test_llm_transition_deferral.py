@@ -13,6 +13,7 @@ from pipecat.frames.frames import (
     CancelFrame,
     EndFrame,
     InterruptionFrame,
+    LLMConfigureOutputFrame,
     StopFrame,
 )
 from pipecat.processors.aggregators.llm_context import LLMContext
@@ -183,4 +184,101 @@ async def test_interruption_during_stream_cannot_arm_a_late_transition(service):
 @pytest.mark.parametrize("text", ["", "...", "\n"])
 async def test_transition_without_speech_does_not_wait(service, text):
     await respond(service, ["end_call"], text=text)
+    service.run_function_calls.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_transition_without_tts_runs_immediately(service):
+    await service.process_frame(LLMConfigureOutputFrame(skip_tts=True), FrameDirection.DOWNSTREAM)
+    await respond(service, ["end_call"])
+    service.run_function_calls.assert_awaited_once()
+
+    service.run_function_calls.reset_mock()
+    await service.process_frame(LLMConfigureOutputFrame(skip_tts=False), FrameDirection.DOWNSTREAM)
+    await respond(service, ["end_call"])
+    service.run_function_calls.assert_not_awaited()
+    await service.process_frame(BotStoppedSpeakingFrame(), FrameDirection.UPSTREAM)
+    service.run_function_calls.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("old_names", [["end_call"], ["end_call", "save_booking"]])
+async def test_fresh_response_does_not_revive_an_interrupted_stream(service, old_names):
+    async def interrupt_and_answer_again():
+        await service.process_frame(InterruptionFrame(), FrameDirection.DOWNSTREAM)
+        await respond(service, ["transfer_agent"])
+
+    await respond(service, old_names, during_stream=interrupt_and_answer_again)
+    await service.process_frame(BotStoppedSpeakingFrame(), FrameDirection.UPSTREAM)
+    dispatched = [
+        fc.function_name
+        for call in service.run_function_calls.await_args_list
+        for fc in call.args[0]
+    ]
+    assert dispatched == (["save_booking"] if "save_booking" in old_names else []) + [
+        "transfer_agent"
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stop_during_stream", [False, True])
+async def test_delayed_interrupted_stop_preserves_the_fresh_response(service, stop_during_stream):
+    await respond(service, ["end_call"])
+    # The service and output transport may receive opposite broadcast siblings.
+    upstream, downstream = InterruptionFrame(), InterruptionFrame()
+    upstream.broadcast_sibling_id = downstream.id
+    downstream.broadcast_sibling_id = upstream.id
+    await service.process_frame(upstream, FrameDirection.UPSTREAM)
+    stopped = BotStoppedSpeakingFrame(interrupted=True)
+    stopped.interruption_id = min(upstream.id, downstream.id)
+
+    async def delayed_stop():
+        await service.process_frame(stopped, FrameDirection.UPSTREAM)
+
+    await respond(
+        service,
+        ["transfer_agent"],
+        during_stream=delayed_stop if stop_during_stream else None,
+    )
+    if not stop_during_stream:
+        await delayed_stop()
+    service.run_function_calls.assert_not_awaited()
+    await service.process_frame(BotStoppedSpeakingFrame(), FrameDirection.UPSTREAM)
+    service.run_function_calls.assert_awaited_once()
+    assert service.run_function_calls.await_args.args[0][0].function_name == "transfer_agent"
+
+
+@pytest.mark.asyncio
+async def test_late_suppressed_transition_is_logged_without_arguments(service):
+    async def interrupt():
+        await service.process_frame(InterruptionFrame(), FrameDirection.DOWNSTREAM)
+
+    with patch("pipecat.services.llm_service.logger") as logger:
+        await respond(service, ["end_call"], during_stream=interrupt)
+    service.run_function_calls.assert_not_awaited()
+    messages = [call.args[0] for call in logger.info.call_args_list]
+    assert any(
+        "end_call" in message and "call-0" in message and "interrupted" in message
+        for message in messages
+    )
+
+
+@pytest.mark.asyncio
+async def test_each_new_interruption_cancels_only_its_own_response(service):
+    await respond(service, ["end_call"])
+    first = InterruptionFrame()
+    await service.process_frame(first, FrameDirection.DOWNSTREAM)
+    await respond(service, ["transfer_agent"])
+    second = InterruptionFrame()
+    await service.process_frame(second, FrameDirection.DOWNSTREAM)
+    await service.process_frame(BotStoppedSpeakingFrame(), FrameDirection.UPSTREAM)
+    service.run_function_calls.assert_not_awaited()
+
+    await respond(service, ["end_call"])
+    for interruption in (second, first):
+        await service.process_frame(
+            BotStoppedSpeakingFrame(interrupted=True, interruption_id=interruption.id),
+            FrameDirection.UPSTREAM,
+        )
+    await service.process_frame(BotStoppedSpeakingFrame(), FrameDirection.UPSTREAM)
     service.run_function_calls.assert_awaited_once()

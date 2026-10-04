@@ -158,7 +158,10 @@ class TestBaseOutputTransportInterruptions(unittest.IsolatedAsyncioTestCase):
                 FrameDirection.DOWNSTREAM,
             )
             await asyncio.wait_for(started.wait(), 1)
-            await transport.process_frame(InterruptionFrame(), FrameDirection.DOWNSTREAM)
+            upstream, interruption = InterruptionFrame(), InterruptionFrame()
+            upstream.broadcast_sibling_id = interruption.id
+            interruption.broadcast_sibling_id = upstream.id
+            await transport.process_frame(interruption, FrameDirection.DOWNSTREAM)
             stops = [
                 call
                 for call in transport.push_frame.call_args_list
@@ -175,6 +178,9 @@ class TestBaseOutputTransportInterruptions(unittest.IsolatedAsyncioTestCase):
                 set(FrameDirection),
             )
             self.assertTrue(all(call.args[0].interrupted for call in stops))
+            self.assertTrue(
+                all(getattr(call.args[0], "interruption_id", None) == upstream.id for call in stops)
+            )
         finally:
             await transport.cancel(CancelFrame())
 

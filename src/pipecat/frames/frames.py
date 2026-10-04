@@ -1441,9 +1441,13 @@ class BotStoppedSpeakingFrame(SystemFrame):
 
     Parameters:
         interrupted: Whether speech stopped because playback was interrupted.
+        interruption_id: The smaller of the originating interruption frame's ID
+            and its broadcast sibling's ID, when available. Associates delayed
+            playback notifications with the interruption already handled.
     """
 
     interrupted: bool = False
+    interruption_id: int | None = None
 
 
 @dataclass

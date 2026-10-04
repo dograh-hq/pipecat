@@ -369,6 +369,8 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService, Generic[TAdapter]
         self._group_parallel_tools = group_parallel_tools
         self._pending_node_transition_function_calls: list[FunctionCallFromLLM] = []
         self._tool_response_interrupted = False
+        self._tool_response_generation = 0
+        self._last_tool_interruption_id: int | None = None
         self._function_call_timeout_secs = function_call_timeout_secs
         if enable_async_tool_cancellation:
             warnings.warn(
@@ -761,7 +763,9 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService, Generic[TAdapter]
             frame: The frame to process.
             direction: The direction of frame processing.
         """
-        if isinstance(frame, (InterruptionFrame, CancelFrame, EndFrame, StopFrame)):
+        if isinstance(frame, InterruptionFrame):
+            self._interrupt_tool_response(frame)
+        elif isinstance(frame, (CancelFrame, EndFrame, StopFrame)):
             self._tool_response_interrupted = True
             self._discard_pending_node_transition_calls(type(frame).__name__)
         await super().process_frame(frame, direction)
@@ -1623,9 +1627,32 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService, Generic[TAdapter]
         """
         return False
 
-    def _begin_tool_response(self) -> None:
+    def _begin_tool_response(self) -> int:
         self._discard_pending_node_transition_calls("new_context")
         self._tool_response_interrupted = False
+        self._tool_response_generation += 1
+        return self._tool_response_generation
+
+    def _interrupt_tool_response(self, frame: InterruptionFrame | BotStoppedSpeakingFrame) -> bool:
+        """Cancel tool control once per interruption, including its playback notification."""
+        interruption_id = (
+            min(
+                frame.id,
+                frame.broadcast_sibling_id if frame.broadcast_sibling_id is not None else frame.id,
+            )
+            if isinstance(frame, InterruptionFrame)
+            else frame.interruption_id
+        )
+        if interruption_id is not None:
+            if (
+                self._last_tool_interruption_id is not None
+                and interruption_id <= self._last_tool_interruption_id
+            ):
+                return False
+            self._last_tool_interruption_id = interruption_id
+        self._tool_response_interrupted = True
+        self._discard_pending_node_transition_calls("interrupted")
+        return True
 
     def _discard_pending_node_transition_calls(self, reason: str) -> None:
         calls, self._pending_node_transition_function_calls = (
@@ -1639,22 +1666,37 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService, Generic[TAdapter]
             )
 
     async def _run_or_defer_function_calls(
-        self, function_calls: list[FunctionCallFromLLM], *, text_generated: bool
+        self,
+        function_calls: list[FunctionCallFromLLM],
+        *,
+        text_generated: bool,
+        response_generation: int | None = None,
     ) -> None:
         """Wait for playback only for a response containing one transition tool."""
         if self._speculation_gate.is_speculating:
             await self.run_function_calls(function_calls)
             return
-        if self._tool_response_interrupted:
+        stale_response = (
+            response_generation is not None
+            and response_generation != self._tool_response_generation
+        )
+        if self._tool_response_interrupted or stale_response:
             # A completion may finish while its interruption is being processed.
             # Ordinary calls remain executable, but workflow control is stale.
-            function_calls = [
-                call
-                for call in function_calls
-                if not self._function_is_node_transition(call.function_name)
-            ]
+            ordinary_calls = []
+            reason = "stale_response" if stale_response else "interrupted"
+            for call in function_calls:
+                if self._function_is_node_transition(call.function_name):
+                    logger.info(
+                        f"{self}: dropping transition {call.function_name} "
+                        f"[{call.tool_call_id}]: {reason}"
+                    )
+                else:
+                    ordinary_calls.append(call)
+            function_calls = ordinary_calls
         if (
             text_generated
+            and not self._skip_tts
             and len(function_calls) == 1
             and self._function_is_node_transition(function_calls[0].function_name)
         ):
@@ -1667,7 +1709,8 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService, Generic[TAdapter]
         self, frame: BotStoppedSpeakingFrame | None = None
     ) -> None:
         if frame is not None and frame.interrupted:
-            self._tool_response_interrupted = True
+            self._interrupt_tool_response(frame)
+            return
         if self._tool_response_interrupted:
             self._discard_pending_node_transition_calls("interrupted")
             return

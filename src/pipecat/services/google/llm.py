@@ -719,7 +719,7 @@ class GoogleLLMService(LLMService[GeminiLLMAdapter]):
 
     @traced_llm
     async def _process_context(self, context: LLMContext):
-        self._begin_tool_response()
+        response_generation = self._begin_tool_response()
         await self.push_frame(LLMFullResponseStartFrame())
 
         prompt_tokens = 0
@@ -910,7 +910,9 @@ class GoogleLLMService(LLMService[GeminiLLMAdapter]):
                         "running function calls without waiting for TTS"
                     )
                 await self._run_or_defer_function_calls(
-                    function_calls, text_generated=text_generated
+                    function_calls,
+                    text_generated=text_generated,
+                    response_generation=response_generation,
                 )
         except (TimeoutError, DeadlineExceeded) as e:
             await self._call_event_handler("on_completion_timeout")
