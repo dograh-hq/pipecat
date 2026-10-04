@@ -31,6 +31,7 @@ from pipecat.adapters.base_llm_adapter import BaseLLMAdapter
 from pipecat.adapters.schemas.direct_function import DirectFunction, DirectFunctionWrapper
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.frames.frames import (
+    BotStoppedSpeakingFrame,
     CancelFrame,
     EagerEndOfTurnCancelFrame,
     EndFrame,
@@ -54,6 +55,7 @@ from pipecat.frames.frames import (
     LLMUpdateSettingsFrame,
     NodeTransitionStartedFrame,
     StartFrame,
+    StopFrame,
 )
 from pipecat.processors.aggregators.async_tool_messages import ASYNC_TOOL_INSTRUCTIONS
 from pipecat.processors.aggregators.llm_context import (
@@ -265,6 +267,10 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService, Generic[TAdapter]
     - on_function_calls_started: Called when function calls are received and
       execution is about to start. Built-in tools (e.g. a ``cancel_<name>`` tool)
       are excluded from this event.
+    - on_function_calls_prepared: Called synchronously with the resolved
+      ``FunctionCallRunnerItem`` batch before dispatch. Applications can take
+      ownership of work that must survive worker shutdown here. Handlers must
+      only schedule work, never wait for it to complete.
     - on_function_calls_cancelled: Called after one or more async tool calls are
       cancelled.
 
@@ -361,6 +367,8 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService, Generic[TAdapter]
         )
         self._run_in_parallel = run_in_parallel
         self._group_parallel_tools = group_parallel_tools
+        self._pending_node_transition_function_calls: list[FunctionCallFromLLM] = []
+        self._tool_response_interrupted = False
         self._function_call_timeout_secs = function_call_timeout_secs
         if enable_async_tool_cancellation:
             warnings.warn(
@@ -423,6 +431,7 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService, Generic[TAdapter]
         self._warned_realtime_service_no_turn_frames: bool = False
 
         self._register_event_handler("on_function_calls_started")
+        self._register_event_handler("on_function_calls_prepared", sync=True)
         self._register_event_handler("on_function_calls_cancelled")
         self._register_event_handler("on_completion_timeout")
 
@@ -752,6 +761,9 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService, Generic[TAdapter]
             frame: The frame to process.
             direction: The direction of frame processing.
         """
+        if isinstance(frame, (InterruptionFrame, CancelFrame, EndFrame, StopFrame)):
+            self._tool_response_interrupted = True
+            self._discard_pending_node_transition_calls(type(frame).__name__)
         await super().process_frame(frame, direction)
 
         if isinstance(frame, InterruptionFrame):
@@ -1611,6 +1623,61 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService, Generic[TAdapter]
         """
         return False
 
+    def _begin_tool_response(self) -> None:
+        self._discard_pending_node_transition_calls("new_context")
+        self._tool_response_interrupted = False
+
+    def _discard_pending_node_transition_calls(self, reason: str) -> None:
+        calls, self._pending_node_transition_function_calls = (
+            self._pending_node_transition_function_calls,
+            [],
+        )
+        for call in calls:
+            logger.info(
+                f"{self}: dropping deferred transition {call.function_name} "
+                f"[{call.tool_call_id}]: {reason}"
+            )
+
+    async def _run_or_defer_function_calls(
+        self, function_calls: list[FunctionCallFromLLM], *, text_generated: bool
+    ) -> None:
+        """Wait for playback only for a response containing one transition tool."""
+        if self._speculation_gate.is_speculating:
+            await self.run_function_calls(function_calls)
+            return
+        if self._tool_response_interrupted:
+            # A completion may finish while its interruption is being processed.
+            # Ordinary calls remain executable, but workflow control is stale.
+            function_calls = [
+                call
+                for call in function_calls
+                if not self._function_is_node_transition(call.function_name)
+            ]
+        if (
+            text_generated
+            and len(function_calls) == 1
+            and self._function_is_node_transition(function_calls[0].function_name)
+        ):
+            self._pending_node_transition_function_calls = function_calls
+            logger.debug(f"{self}: Deferring transition until after TTS")
+        elif function_calls:
+            await self.run_function_calls(function_calls)
+
+    async def _run_pending_node_transition_function_calls(
+        self, frame: BotStoppedSpeakingFrame | None = None
+    ) -> None:
+        if frame is not None and frame.interrupted:
+            self._tool_response_interrupted = True
+        if self._tool_response_interrupted:
+            self._discard_pending_node_transition_calls("interrupted")
+            return
+        calls, self._pending_node_transition_function_calls = (
+            self._pending_node_transition_function_calls,
+            [],
+        )
+        if calls:
+            await self.run_function_calls(calls)
+
     async def run_function_calls(self, function_calls: Sequence[FunctionCallFromLLM]):
         """Execute a sequence of function calls from the LLM.
 
@@ -1690,6 +1757,10 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService, Generic[TAdapter]
                     group_id=group_id,
                 )
             )
+
+        # Applications can accept work before any sibling handler can retire
+        # this worker. Handlers must only schedule work here, never await it.
+        await self._call_event_handler("on_function_calls_prepared", runner_items)
 
         if self._run_in_parallel:
             await self._run_parallel_function_calls(runner_items)

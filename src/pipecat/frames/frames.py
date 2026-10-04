@@ -1438,9 +1438,12 @@ class BotStoppedSpeakingFrame(SystemFrame):
 
     Emitted upstream and downstream by the BaseTransportOutput to indicate the
     bot stopped speaking.
+
+    Parameters:
+        interrupted: Whether speech stopped because playback was interrupted.
     """
 
-    pass
+    interrupted: bool = False
 
 
 @dataclass

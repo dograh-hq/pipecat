@@ -603,7 +603,7 @@ class BaseOutputTransport(FrameProcessor):
             self._create_clock_task()
 
             # Let's send a bot stopped speaking if we have to.
-            await self._bot_stopped_speaking()
+            await self._bot_stopped_speaking(interrupted=True)
 
         async def handle_audio_frame(self, frame: OutputAudioRawFrame):
             """Handle incoming audio frames by buffering and chunking.
@@ -803,7 +803,7 @@ class BaseOutputTransport(FrameProcessor):
             frame.interruptible = not uninterruptible
             await self._audio_queue.put(frame)
 
-        async def _bot_stopped_speaking(self):
+        async def _bot_stopped_speaking(self, *, interrupted: bool = False):
             """Handle bot stopped speaking event."""
             if not self._bot_speaking:
                 return
@@ -822,9 +822,9 @@ class BaseOutputTransport(FrameProcessor):
                 f"Bot{f' [{self._destination}]' if self._destination else ''} stopped speaking"
             )
 
-            downstream_frame = BotStoppedSpeakingFrame()
+            downstream_frame = BotStoppedSpeakingFrame(interrupted=interrupted)
             downstream_frame.transport_destination = self._destination
-            upstream_frame = BotStoppedSpeakingFrame()
+            upstream_frame = BotStoppedSpeakingFrame(interrupted=interrupted)
             upstream_frame.transport_destination = self._destination
 
             # Setting the siblings id
