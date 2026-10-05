@@ -9,6 +9,7 @@ from google.genai import types
 
 from pipecat.clocks.system_clock import SystemClock
 from pipecat.frames.frames import (
+    BotStartedSpeakingFrame,
     BotStoppedSpeakingFrame,
     CancelFrame,
     EndFrame,
@@ -282,3 +283,25 @@ async def test_each_new_interruption_cancels_only_its_own_response(service):
         )
     await service.process_frame(BotStoppedSpeakingFrame(), FrameDirection.UPSTREAM)
     service.run_function_calls.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("more_speech", [None, "text", "playback"])
+async def test_playback_can_finish_before_the_transition_is_parsed(service, more_speech):
+    async def finish_speech():
+        await service.process_frame(BotStoppedSpeakingFrame(), FrameDirection.UPSTREAM)
+        if more_speech == "text":
+            await service._push_llm_text("One more sentence.")
+        elif more_speech == "playback":
+            await service.process_frame(BotStartedSpeakingFrame(), FrameDirection.UPSTREAM)
+
+    await respond(service, ["end_call"], during_stream=finish_speech)
+    if more_speech:
+        service.run_function_calls.assert_not_awaited()
+        await service.process_frame(BotStoppedSpeakingFrame(), FrameDirection.UPSTREAM)
+    service.run_function_calls.assert_awaited_once()
+
+    # A completed response's playback state must not release the next one.
+    service.run_function_calls.reset_mock()
+    await respond(service, ["transfer_agent"])
+    service.run_function_calls.assert_not_awaited()

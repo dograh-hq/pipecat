@@ -31,6 +31,7 @@ from pipecat.adapters.base_llm_adapter import BaseLLMAdapter
 from pipecat.adapters.schemas.direct_function import DirectFunction, DirectFunctionWrapper
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.frames.frames import (
+    BotStartedSpeakingFrame,
     BotStoppedSpeakingFrame,
     CancelFrame,
     EagerEndOfTurnCancelFrame,
@@ -82,6 +83,7 @@ from pipecat.utils.context.llm_context_summarization import (
 )
 from pipecat.utils.deprecation import deprecated
 from pipecat.utils.errors import ErrorCategory
+from pipecat.utils.text.alnum_utils import has_alnum
 from pipecat.utils.types import assert_given
 
 if TYPE_CHECKING:
@@ -369,6 +371,7 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService, Generic[TAdapter]
         self._group_parallel_tools = group_parallel_tools
         self._pending_node_transition_function_calls: list[FunctionCallFromLLM] = []
         self._tool_response_interrupted = False
+        self._tool_response_playback_stopped = False
         self._tool_response_generation = 0
         self._last_tool_interruption_id: int | None = None
         self._function_call_timeout_secs = function_call_timeout_secs
@@ -768,6 +771,8 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService, Generic[TAdapter]
         elif isinstance(frame, (CancelFrame, EndFrame, StopFrame)):
             self._tool_response_interrupted = True
             self._discard_pending_node_transition_calls(type(frame).__name__)
+        elif isinstance(frame, BotStartedSpeakingFrame):
+            self._tool_response_playback_stopped = False
         await super().process_frame(frame, direction)
 
         if isinstance(frame, InterruptionFrame):
@@ -840,6 +845,8 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService, Generic[TAdapter]
         Args:
             text: The text content from the LLM to push.
         """
+        if has_alnum(text):
+            self._tool_response_playback_stopped = False
         # Measured before turn-completion filtering, which can hold text back or
         # drop it entirely — neither says anything about how fast the model
         # answered.
@@ -1630,6 +1637,7 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService, Generic[TAdapter]
     def _begin_tool_response(self) -> int:
         self._discard_pending_node_transition_calls("new_context")
         self._tool_response_interrupted = False
+        self._tool_response_playback_stopped = False
         self._tool_response_generation += 1
         return self._tool_response_generation
 
@@ -1697,6 +1705,7 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService, Generic[TAdapter]
         if (
             text_generated
             and not self._skip_tts
+            and not self._tool_response_playback_stopped
             and len(function_calls) == 1
             and self._function_is_node_transition(function_calls[0].function_name)
         ):
@@ -1711,6 +1720,7 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService, Generic[TAdapter]
         if frame is not None and frame.interrupted:
             self._interrupt_tool_response(frame)
             return
+        self._tool_response_playback_stopped = True
         if self._tool_response_interrupted:
             self._discard_pending_node_transition_calls("interrupted")
             return
