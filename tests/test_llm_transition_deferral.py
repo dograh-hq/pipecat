@@ -1,5 +1,6 @@
 """Replay provider streams and playback/interruption ordering without network calls."""
 
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -47,7 +48,9 @@ async def service(request):
     await llm.cleanup()
 
 
-async def respond(service, names, text="Your booking is confirmed.", during_stream=None):
+async def respond(
+    service, names, text="Your booking is confirmed.", during_stream=None, arguments=None
+):
     if isinstance(service, GoogleLLMService):
 
         async def stream(context):
@@ -68,7 +71,7 @@ async def respond(service, names, text="Your booking is confirmed.", during_stre
                             parts=[
                                 types.Part(
                                     function_call=types.FunctionCall(
-                                        name=name, id=f"call-{i}", args={}
+                                        name=name, id=f"call-{i}", args=arguments or {}
                                     )
                                 )
                                 for i, name in enumerate(names)
@@ -105,7 +108,9 @@ async def respond(service, names, text="Your booking is confirmed.", during_stre
                                         SimpleNamespace(
                                             index=i,
                                             id=f"call-{i}",
-                                            function=SimpleNamespace(name=name, arguments="{}"),
+                                            function=SimpleNamespace(
+                                                name=name, arguments=json.dumps(arguments or {})
+                                            ),
                                         )
                                     ],
                                 )
@@ -254,14 +259,18 @@ async def test_late_suppressed_transition_is_logged_without_arguments(service):
     async def interrupt():
         await service.process_frame(InterruptionFrame(), FrameDirection.DOWNSTREAM)
 
+    sentinel = "private-booking-details-must-not-be-logged"
     with patch("pipecat.services.llm_service.logger") as logger:
-        await respond(service, ["end_call"], during_stream=interrupt)
+        await respond(
+            service, ["end_call"], during_stream=interrupt, arguments={"booking": sentinel}
+        )
     service.run_function_calls.assert_not_awaited()
     messages = [call.args[0] for call in logger.info.call_args_list]
     assert any(
         "end_call" in message and "call-0" in message and "interrupted" in message
         for message in messages
     )
+    assert sentinel not in str(logger.info.call_args_list)
 
 
 @pytest.mark.asyncio

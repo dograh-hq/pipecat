@@ -1240,7 +1240,17 @@ class InterruptionFrame(SystemFrame):
     by any processor.
     """
 
-    pass
+    @property
+    def interruption_id(self) -> int:
+        """Return the shared identity of both broadcast siblings.
+
+        Returns:
+            The smaller sibling ID, or this frame's ID when not broadcast.
+        """
+        return min(
+            self.id,
+            self.broadcast_sibling_id if self.broadcast_sibling_id is not None else self.id,
+        )
 
 
 @dataclass

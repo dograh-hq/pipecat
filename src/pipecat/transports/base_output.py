@@ -605,12 +605,7 @@ class BaseOutputTransport(FrameProcessor):
             # Let's send a bot stopped speaking if we have to.
             await self._bot_stopped_speaking(
                 interrupted=True,
-                interruption_id=min(
-                    frame.id,
-                    frame.broadcast_sibling_id
-                    if frame.broadcast_sibling_id is not None
-                    else frame.id,
-                ),
+                interruption_id=frame.interruption_id,
             )
 
         async def handle_audio_frame(self, frame: OutputAudioRawFrame):

@@ -1643,14 +1643,7 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService, Generic[TAdapter]
 
     def _interrupt_tool_response(self, frame: InterruptionFrame | BotStoppedSpeakingFrame) -> bool:
         """Cancel tool control once per interruption, including its playback notification."""
-        interruption_id = (
-            min(
-                frame.id,
-                frame.broadcast_sibling_id if frame.broadcast_sibling_id is not None else frame.id,
-            )
-            if isinstance(frame, InterruptionFrame)
-            else frame.interruption_id
-        )
+        interruption_id = frame.interruption_id
         if interruption_id is not None:
             if (
                 self._last_tool_interruption_id is not None
