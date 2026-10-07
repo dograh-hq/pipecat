@@ -458,15 +458,22 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService, Generic[TAdapter]
         """
         return self._adapter
 
-    def create_llm_specific_message(self, message: Any) -> LLMSpecificMessage:
+    def create_llm_specific_message(
+        self, message: Any, *, is_metadata: bool = False
+    ) -> LLMSpecificMessage:
         """Create an LLM-specific message (as opposed to a standard message) for use in an LLMContext.
 
         Args:
             message: The message content.
+            is_metadata: Whether other LLMs can omit this data without losing
+                conversation content.
 
         Returns:
             A LLMSpecificMessage instance.
         """
+        if is_metadata:
+            return self.get_llm_adapter().create_llm_specific_message(message, is_metadata=True)
+        # Preserve compatibility with adapters that accept only the message argument.
         return self.get_llm_adapter().create_llm_specific_message(message)
 
     async def run_inference(
