@@ -30,7 +30,7 @@ from pipecat.frames.frames import (
     LLMUpdateSettingsFrame,
     NodeTransitionStartedFrame,
 )
-from pipecat.processors.aggregators.llm_context import NOT_GIVEN, LLMContext
+from pipecat.processors.aggregators.llm_context import NOT_GIVEN, LLMContext, LLMSpecificMessage
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.llm_service import (
     FunctionCallParams,
@@ -91,6 +91,39 @@ class TestUnparameterizedSubclass(unittest.TestCase):
         # should reflect that, regardless of how generics are erased.
         self.assertIsInstance(adapter, OpenAILLMAdapter)
         self.assertIsInstance(adapter, BaseLLMAdapter)
+
+
+class TestCreateLLMSpecificMessage(unittest.TestCase):
+    def test_legacy_adapter_supports_non_metadata_messages(self):
+        class LegacyAdapter(OpenAILLMAdapter):
+            def create_llm_specific_message(self, message):
+                return LLMSpecificMessage(llm="legacy", message=message)
+
+        class LegacyService(MockLLMService):
+            adapter_class = LegacyAdapter
+
+        service = LegacyService()
+        message = {"role": "assistant", "content": "Hello"}
+
+        for kwargs in ({}, {"is_metadata": False}):
+            with self.subTest(kwargs=kwargs):
+                result = service.create_llm_specific_message(message, **kwargs)
+
+                self.assertEqual(result.llm, "legacy")
+                self.assertIs(result.message, message)
+                self.assertFalse(result.is_metadata)
+
+    def test_metadata_aware_adapter_preserves_message_and_metadata_flag(self):
+        service = MockLLMService()
+        message = {"signature": "test"}
+
+        for is_metadata in (False, True):
+            with self.subTest(is_metadata=is_metadata):
+                result = service.create_llm_specific_message(message, is_metadata=is_metadata)
+
+                self.assertEqual(result.llm, service.get_llm_adapter().id_for_llm_specific_messages)
+                self.assertIs(result.message, message)
+                self.assertIs(result.is_metadata, is_metadata)
 
 
 class TestLLMService(unittest.IsolatedAsyncioTestCase):
