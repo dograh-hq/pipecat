@@ -72,7 +72,7 @@ def openai_from_llm_context_tools(
     Returns:
         The tools unchanged, or the SDK's sentinel if there are none.
     """
-    if tools is None or not is_given(tools):
+    if tools is None or not is_given(tools) or len(tools) == 0:
         return OPENAI_NOT_GIVEN
     return tools
 
@@ -185,13 +185,22 @@ class OpenAILLMAdapter(BaseLLMAdapter[OpenAILLMInvocationParams]):
             )
             messages = [{"role": "system", "content": system_instruction}] + messages
 
+        tools = openai_from_llm_context_tools(self.from_standard_tools(context.tools))
+        tool_choice = (
+            openai_from_llm_context_tool_choice(context.tool_choice)
+            if openai_is_given(tools)
+            else OPENAI_NOT_GIVEN
+        )
+
+        if not openai_is_given(tools):
+            messages = self._sanitize_messages_without_tools(messages)
+
         return cast(
             OpenAILLMInvocationParams,
             {
                 "messages": messages,
-                # NOTE; LLMContext's tools are guaranteed to be a ToolsSchema (or NOT_GIVEN)
-                "tools": openai_from_llm_context_tools(self.from_standard_tools(context.tools)),
-                "tool_choice": openai_from_llm_context_tool_choice(context.tool_choice),
+                "tools": tools,
+                "tool_choice": tool_choice,
             },
         )
 
@@ -269,3 +278,58 @@ class OpenAILLMAdapter(BaseLLMAdapter[OpenAILLMInvocationParams]):
         self, tool_choice: LLMContextToolChoice | NotGiven
     ) -> ChatCompletionToolChoiceOptionParam | OpenAINotGiven:
         return openai_from_llm_context_tool_choice(tool_choice)
+
+    def _sanitize_messages_without_tools(
+        self, messages: list[ChatCompletionMessageParam]
+    ) -> list[ChatCompletionMessageParam]:
+        """Normalize orphaned tool calls/messages when no tools are provided.
+
+        Strict inference backends (vLLM, Sarvam, Hugging Face router) reject
+        requests with HTTP 400 if historical messages contain tool_calls or
+        role="tool" while the tools parameter is empty or omitted.
+        """
+        has_tool_messages = any(
+            msg.get("role") == "tool" or (msg.get("role") == "assistant" and msg.get("tool_calls"))
+            for msg in messages
+        )
+        if not has_tool_messages:
+            return messages
+
+        sanitized: list[ChatCompletionMessageParam] = []
+        for msg in messages:
+            role = msg.get("role")
+            if role == "tool":
+                content = msg.get("content")
+                if isinstance(content, str):
+                    formatted_content = f"[Tool result]: {content}"
+                elif isinstance(content, list):
+                    formatted_content = content
+                elif content is not None:
+                    formatted_content = f"[Tool result]: {content}"
+                else:
+                    formatted_content = "[Tool result: completed]"
+                sanitized.append(
+                    cast(
+                        ChatCompletionMessageParam,
+                        {"role": "user", "content": formatted_content},
+                    )
+                )
+            elif role == "assistant" and msg.get("tool_calls"):
+                calls_desc = []
+                for tc in msg.get("tool_calls", []):
+                    fn = tc.get("function", {})
+                    fn_name = fn.get("name", "tool")
+                    calls_desc.append(f"[Called {fn_name}]")
+                text = msg.get("content")
+                if isinstance(text, str) and text.strip():
+                    combined = f"{text}\n" + "\n".join(calls_desc)
+                elif isinstance(text, list):
+                    combined = text + [{"type": "text", "text": "\n".join(calls_desc)}]
+                else:
+                    combined = "\n".join(calls_desc) or "[Called tool]"
+                new_msg = {k: v for k, v in msg.items() if k != "tool_calls"}
+                new_msg["content"] = combined
+                sanitized.append(cast(ChatCompletionMessageParam, new_msg))
+            else:
+                sanitized.append(msg)
+        return sanitized
