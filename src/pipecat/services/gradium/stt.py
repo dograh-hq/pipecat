@@ -536,6 +536,7 @@ class GradiumSTTService(WebsocketSTTService):
                 self._user_id,
                 time_now_iso8601(),
                 language,
+                finalized=True,
             )
         )
         await self._trace_transcription(text, is_final=True, language=language)

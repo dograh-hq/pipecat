@@ -254,6 +254,7 @@ class HuggingFaceSTTService(SegmentedSTTService):
                 time_now_iso8601(),
                 language,
                 result=result,
+                finalized=True,
             )
 
         except Exception as e:

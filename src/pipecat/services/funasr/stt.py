@@ -195,4 +195,5 @@ class FunASRSTTService(SegmentedSTTService):
                 self._user_id,
                 time_now_iso8601(),
                 frame_language,
+                finalized=True,
             )

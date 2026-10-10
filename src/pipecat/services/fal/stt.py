@@ -350,6 +350,7 @@ class FalSTTService(SegmentedSTTService):
                         time_now_iso8601(),
                         Language(self._settings.language),
                         result=response,
+                        finalized=True,
                     )
 
         except Exception as e:

@@ -170,4 +170,4 @@ class MoonshineSTTService(SegmentedSTTService):
         if text:
             await self._handle_transcription(text, True, language)
             logger.debug(f"Transcription: [{text}]")
-            yield TranscriptionFrame(text, self._user_id, time_now_iso8601(), language)
+            yield TranscriptionFrame(text, self._user_id, time_now_iso8601(), language, finalized=True)

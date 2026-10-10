@@ -386,6 +386,7 @@ class WhisperSTTService(SegmentedSTTService):
                 self._user_id,
                 time_now_iso8601(),
                 language,
+                finalized=True,
             )
 
 
@@ -552,6 +553,7 @@ class WhisperSTTServiceMLX(WhisperSTTService):
                     self._user_id,
                     time_now_iso8601(),
                     language,
+                    finalized=True,
                 )
 
         except Exception as e:

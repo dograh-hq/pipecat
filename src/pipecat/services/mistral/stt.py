@@ -293,6 +293,7 @@ class MistralSTTService(STTService):
                                 self._user_id,
                                 time_now_iso8601(),
                                 language=self._detected_language,
+                                finalized=True,
                             )
                         )
                         await self._handle_transcription(event.text, True, self._detected_language)

@@ -707,6 +707,7 @@ class GladiaSTTService(WebsocketSTTService):
                                 time_now_iso8601(),
                                 language,
                                 result=content,
+                                finalized=True,
                             )
                         )
                         await self._handle_transcription(

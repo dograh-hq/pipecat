@@ -287,6 +287,7 @@ class BaseWhisperSTTService(SegmentedSTTService):
                     self._user_id,
                     time_now_iso8601(),
                     result=response,
+                    finalized=True,
                 )
 
         except Exception as e:

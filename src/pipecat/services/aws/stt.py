@@ -561,6 +561,7 @@ class AWSTranscribeSTTService(WebsocketSTTService):
                                             time_now_iso8601(),
                                             language,
                                             result=result,
+                                            finalized=True,
                                         )
                                     )
                                     await self._handle_transcription(
