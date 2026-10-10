@@ -1344,6 +1344,16 @@ class LLMUserAggregator(LLMContextAggregator):
         else:
             content = full_aggregation or segment
 
+        # If a user turn ended without any transcription content, the LLM will
+        # not be invoked and BotStoppedSpeakingFrame will never fire. Re-arm the
+        # idle controller so the call does not freeze in dead silence.
+        if not content and not on_session_end:
+            logger.info(
+                f"{self}: User turn completed with empty aggregation. "
+                "Re-arming user idle timer to prevent call freeze."
+            )
+            await self._user_idle_controller.rearm_idle_timer()
+
         if not on_session_end or content:
             message = UserTurnStoppedMessage(
                 content=content, timestamp=self._user_turn_start_timestamp

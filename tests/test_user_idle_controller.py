@@ -479,6 +479,54 @@ class TestUserIdleController(unittest.IsolatedAsyncioTestCase):
 
         await controller.cleanup()
 
+    async def test_rearm_idle_timer_fires_idle_event(self):
+        """Test that rearm_idle_timer() re-arms the timer and fires on_user_turn_idle."""
+        controller = UserIdleController(user_idle_timeout=USER_IDLE_TIMEOUT)
+        await controller.setup(self.task_manager)
+
+        idle_triggered = False
+
+        @controller.event_handler("on_user_turn_idle")
+        async def on_user_turn_idle(controller):
+            nonlocal idle_triggered
+            idle_triggered = True
+
+        # Simulate user turn starting (cancels timer) and stopping
+        await controller.process_frame(BotStoppedSpeakingFrame())
+        await controller.process_frame(UserStartedSpeakingFrame())
+        await controller.process_frame(UserStoppedSpeakingFrame())
+
+        # Empty turn completed without bot speech -> rearm_idle_timer called
+        await controller.rearm_idle_timer()
+
+        await asyncio.sleep(USER_IDLE_TIMEOUT + 0.1)
+
+        self.assertTrue(idle_triggered)
+
+        await controller.cleanup()
+
+    async def test_rearm_idle_timer_suppressed_during_user_turn_or_function_call(self):
+        """Test that rearm_idle_timer() is safely suppressed if a turn is still active."""
+        controller = UserIdleController(user_idle_timeout=USER_IDLE_TIMEOUT)
+        await controller.setup(self.task_manager)
+
+        idle_triggered = False
+
+        @controller.event_handler("on_user_turn_idle")
+        async def on_user_turn_idle(controller):
+            nonlocal idle_triggered
+            idle_triggered = True
+
+        await controller.process_frame(UserStartedSpeakingFrame())
+        # While user turn is in progress, rearm should be a no-op
+        await controller.rearm_idle_timer()
+
+        await asyncio.sleep(USER_IDLE_TIMEOUT + 0.1)
+
+        self.assertFalse(idle_triggered)
+
+        await controller.cleanup()
+
 
 if __name__ == "__main__":
     unittest.main()

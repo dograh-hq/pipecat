@@ -132,6 +132,12 @@ class UserIdleController(BaseObject):
         elif isinstance(frame, (FunctionCallResultFrame, FunctionCallCancelFrame)):
             self._function_calls_in_progress = max(0, self._function_calls_in_progress - 1)
 
+    async def rearm_idle_timer(self):
+        """Re-arm the idle timer if not currently mid-turn or running function calls."""
+        if not self._user_turn_in_progress and self._function_calls_in_progress == 0:
+            self._waiting_for_user = True
+            await self._start_idle_timer()
+
     async def _start_idle_timer(self):
         """Start (or restart) the idle timer."""
         if self._user_idle_timeout <= 0:

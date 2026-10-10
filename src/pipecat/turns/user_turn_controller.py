@@ -97,6 +97,7 @@ class UserTurnController(BaseObject):
         self._user_speaking = False
 
         self._user_turn = False
+        self._consecutive_speaking_timeouts: int = 0
         self._user_turn_stop_timeout_event = asyncio.Event()
         self._user_turn_stop_timeout_task: asyncio.Task | None = None
 
@@ -388,9 +389,26 @@ class UserTurnController(BaseObject):
                     timeout=self._user_turn_stop_timeout,
                 )
                 self._user_turn_stop_timeout_event.clear()
+                self._consecutive_speaking_timeouts = 0
             except TimeoutError:
-                if self._user_turn and not self._user_speaking:
-                    await self._call_event_handler("on_user_turn_stop_timeout")
-                    await self._trigger_user_turn_stop(
-                        None, UserTurnStoppedParams(enable_user_speaking_frames=True)
-                    )
+                if self._user_turn:
+                    if not self._user_speaking:
+                        self._consecutive_speaking_timeouts = 0
+                        await self._call_event_handler("on_user_turn_stop_timeout")
+                        await self._trigger_user_turn_stop(
+                            None, UserTurnStoppedParams(enable_user_speaking_frames=True)
+                        )
+                    else:
+                        self._consecutive_speaking_timeouts += 1
+                        if self._consecutive_speaking_timeouts >= 2:
+                            logger.warning(
+                                f"{self}: User turn stuck with user_speaking=True for {self._consecutive_speaking_timeouts} "
+                                f"watchdog periods ({self._consecutive_speaking_timeouts * self._user_turn_stop_timeout:.1f}s). "
+                                "Forcing turn closure."
+                            )
+                            self._user_speaking = False
+                            self._consecutive_speaking_timeouts = 0
+                            await self._call_event_handler("on_user_turn_stop_timeout")
+                            await self._trigger_user_turn_stop(
+                                None, UserTurnStoppedParams(enable_user_speaking_frames=True)
+                            )
