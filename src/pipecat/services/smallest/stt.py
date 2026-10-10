@@ -420,6 +420,7 @@ class SmallestSTTService(WebsocketSTTService):
                     time_now_iso8601(),
                     data.get("language"),
                     result=data,
+                    finalized=True,
                 )
             )
         else:
