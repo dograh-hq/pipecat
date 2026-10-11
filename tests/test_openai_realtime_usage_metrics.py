@@ -28,7 +28,7 @@ from pipecat.utils.tracing.service_decorators import _add_token_usage_to_span
 # ---------------------------------------------------------------------------
 
 
-def _response_done_evt(usage: dict) -> events.ResponseDone:
+def _response_done_evt(usage: dict, status: str = "completed") -> events.ResponseDone:
     return events.ResponseDone.model_validate(
         {
             "event_id": "ev_1",
@@ -36,7 +36,7 @@ def _response_done_evt(usage: dict) -> events.ResponseDone:
             "response": {
                 "id": "resp_1",
                 "object": "realtime.response",
-                "status": "completed",
+                "status": status,
                 "status_details": None,
                 "output": [],
                 "usage": usage,
@@ -86,6 +86,19 @@ async def test_response_done_reports_audio_and_cached_audio_tokens():
     assert tokens.input_audio_tokens == 40
     assert tokens.output_audio_tokens == 25
     assert tokens.cache_read_input_audio_tokens == 20
+
+
+@pytest.mark.asyncio
+async def test_response_done_with_null_usage_skips_metrics_without_raising():
+    # Some providers (e.g. Yandex Realtime) omit `usage` on interrupted/cancelled
+    # responses rather than sending zeroed counts.
+    service = _service_for_usage_capture()
+    evt = _response_done_evt(None, status="cancelled")
+
+    await service._handle_evt_response_done(evt)
+
+    service.start_llm_usage_metrics.assert_not_called()
+    service.stop_processing_metrics.assert_awaited_once()
 
 
 @pytest.mark.asyncio

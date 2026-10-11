@@ -1024,28 +1024,32 @@ class OpenAIRealtimeLLMService(LLMService[OpenAIRealtimeLLMAdapter]):
     @traced_openai_realtime(operation="llm_response")
     async def _handle_evt_response_done(self, evt):
         # todo: figure out whether there's anything we need to do for "cancelled" events
-        # usage metrics
-        input_details = (
-            evt.response.usage.input_token_details
-            if hasattr(evt.response.usage, "input_token_details")
-            else None
-        )
-        output_details = (
-            evt.response.usage.output_token_details
-            if hasattr(evt.response.usage, "output_token_details")
-            else None
-        )
-        cached_details = input_details.cached_tokens_details if input_details else None
-        tokens = LLMTokenUsage(
-            prompt_tokens=evt.response.usage.input_tokens,
-            completion_tokens=evt.response.usage.output_tokens,
-            total_tokens=evt.response.usage.total_tokens,
-            cache_read_input_tokens=input_details.cached_tokens if input_details else None,
-            input_audio_tokens=input_details.audio_tokens if input_details else None,
-            output_audio_tokens=output_details.audio_tokens if output_details else None,
-            cache_read_input_audio_tokens=cached_details.audio_tokens if cached_details else None,
-        )
-        await self.start_llm_usage_metrics(tokens)
+        # usage metrics — `response.usage` is optional in the wire schema (some
+        # providers, e.g. Yandex Realtime, omit it on interrupted/cancelled responses)
+        if evt.response.usage is not None:
+            input_details = (
+                evt.response.usage.input_token_details
+                if hasattr(evt.response.usage, "input_token_details")
+                else None
+            )
+            output_details = (
+                evt.response.usage.output_token_details
+                if hasattr(evt.response.usage, "output_token_details")
+                else None
+            )
+            cached_details = input_details.cached_tokens_details if input_details else None
+            tokens = LLMTokenUsage(
+                prompt_tokens=evt.response.usage.input_tokens,
+                completion_tokens=evt.response.usage.output_tokens,
+                total_tokens=evt.response.usage.total_tokens,
+                cache_read_input_tokens=input_details.cached_tokens if input_details else None,
+                input_audio_tokens=input_details.audio_tokens if input_details else None,
+                output_audio_tokens=output_details.audio_tokens if output_details else None,
+                cache_read_input_audio_tokens=(
+                    cached_details.audio_tokens if cached_details else None
+                ),
+            )
+            await self.start_llm_usage_metrics(tokens)
         await self.stop_processing_metrics()
         # Push TTSStoppedFrame here (rather than on each per-item
         # response.output_audio.done) so that a response containing multiple
@@ -1175,8 +1179,13 @@ class OpenAIRealtimeLLMService(LLMService[OpenAIRealtimeLLMAdapter]):
         return False
 
     async def _handle_evt_error(self, evt):
-        # Errors are fatal to this connection. Send an ErrorFrame.
+        # Errors are fatal to this connection. Send an ErrorFrame and tear the
+        # connection down so `self._websocket` stops looking alive — otherwise
+        # every later attempt to send a client event (queued tool results,
+        # session updates, etc.) hits the same dead socket and logs its own
+        # "fatal" error.
         await self.push_error(error_msg=f"Error: {evt}")
+        await self._disconnect()
 
     #
     # state and client events for the current conversation
