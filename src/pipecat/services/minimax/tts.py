@@ -730,6 +730,9 @@ class MiniMaxHttpTTSService(TTSService):
             )
 
 
+# How long to wait for each reply while opening a session.
+_HANDSHAKE_TIMEOUT_SECS = 10
+
 # Status codes only the WebSocket APIs return.
 _WEBSOCKET_STATUS_CODE_CATEGORIES: dict[int, ErrorCategory] = {
     2201: ErrorCategory.CONNECTIVITY,  # closed after ~120 s with no events
@@ -954,6 +957,7 @@ class MiniMaxTTSService(WebsocketTTSService):
         await self._disconnect_websocket()
 
     async def _connect_websocket(self):
+        websocket = None
         try:
             if self._websocket and self._websocket.state is State.OPEN:
                 return
@@ -968,10 +972,11 @@ class MiniMaxTTSService(WebsocketTTSService):
             ):
                 if outgoing is not None:
                     await websocket.send(json.dumps(outgoing))
-                reply = json.loads(await asyncio.wait_for(websocket.recv(), timeout=10))
+                reply = json.loads(
+                    await asyncio.wait_for(websocket.recv(), timeout=_HANDSHAKE_TIMEOUT_SECS)
+                )
                 error = _status_error(reply)
                 if error is not None or reply.get("event") != expected:
-                    await websocket.close()
                     if (
                         error is not None
                         and (reply.get("base_resp") or {}).get("status_code") == 1008
@@ -990,6 +995,10 @@ class MiniMaxTTSService(WebsocketTTSService):
             await self.push_error_frame(ErrorFrame(error=f"{self} error: {e}", exception=e))
             self._websocket = None
             await self._call_event_handler("on_connection_error", f"{e}")
+        finally:
+            # A socket whose handshake did not complete is never used again.
+            if websocket is not None and websocket is not self._websocket:
+                await websocket.close()
 
     async def _disconnect_websocket(self):
         try:

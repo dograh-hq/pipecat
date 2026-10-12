@@ -14,6 +14,7 @@ started but not yet sent audio can deliver a block under a brand-new trace id,
 and every flush pending at the cancel is acknowledged after ``task_canceled``.
 """
 
+import asyncio
 import json
 
 import pytest
@@ -351,38 +352,68 @@ async def test_a_malformed_event_is_skipped_and_the_session_kept(tts):
     assert tts.stopped == ["A"]
 
 
+def _unconnected_service(monkeypatch, port: int):
+    """A service pointed at a local server, still holding a session MiniMax already closed."""
+    tts = MiniMaxTTSService(api_key="test-key", url=f"ws://127.0.0.1:{port}")
+    tts._sample_rate = 8000
+    tts._websocket = _FakeSocket()
+    tts._websocket.state = State.CLOSED
+    tts.errors, tts.events = [], []
+
+    async def push_error_frame(error, force_treat_as_permanent=False):
+        tts.errors.append(error)
+
+    async def call_event_handler(name, *args):
+        tts.events.append(name)
+
+    monkeypatch.setattr(tts, "push_error_frame", push_error_frame)
+    monkeypatch.setattr(tts, "_call_event_handler", call_event_handler)
+    return tts
+
+
 @pytest.mark.asyncio
 async def test_a_rejected_task_start_leaves_no_socket_behind(monkeypatch):
+    closed = asyncio.Event()
+
     async def reject(websocket):
         await websocket.send(json.dumps(_event("connected_success")))
         await websocket.recv()
         failed = {"status_code": 2054, "status_msg": "voice id not exist"}
         await websocket.send(json.dumps(_event("task_failed", base_resp=failed)))
+        await websocket.wait_closed()
+        closed.set()
 
     async with websockets.serve(reject, "127.0.0.1", 0) as server:
-        port = server.sockets[0].getsockname()[1]
-        tts = MiniMaxTTSService(api_key="test-key", url=f"ws://127.0.0.1:{port}")
-        tts._sample_rate = 8000
-        # The previous session, already closed by MiniMax.
-        tts._websocket = _FakeSocket()
-        tts._websocket.state = State.CLOSED
-        errors, events = [], []
-
-        async def push_error_frame(error, force_treat_as_permanent=False):
-            errors.append(error)
-
-        async def call_event_handler(name, *args):
-            events.append(name)
-
-        monkeypatch.setattr(tts, "push_error_frame", push_error_frame)
-        monkeypatch.setattr(tts, "_call_event_handler", call_event_handler)
+        tts = _unconnected_service(monkeypatch, server.sockets[0].getsockname()[1])
         await tts._connect_websocket()
+        await asyncio.wait_for(closed.wait(), timeout=5)
 
     assert tts._websocket is None
-    assert events == ["on_connection_error"]
-    assert [e.error for e in errors] == [
+    assert tts.events == ["on_connection_error"]
+    assert [e.error for e in tts.errors] == [
         "MiniMax TTS error: 2054 voice id not exist (trace_id=session)"
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("replies", [[], ["connected_success"]], ids=["connect", "task_start"])
+async def test_a_handshake_that_times_out_closes_its_socket(monkeypatch, replies):
+    monkeypatch.setattr("pipecat.services.minimax.tts._HANDSHAKE_TIMEOUT_SECS", 0.2)
+    closed = asyncio.Event()
+
+    async def stall(websocket):
+        for event in replies:
+            await websocket.send(json.dumps(_event(event)))
+        await websocket.wait_closed()
+        closed.set()
+
+    async with websockets.serve(stall, "127.0.0.1", 0) as server:
+        tts = _unconnected_service(monkeypatch, server.sockets[0].getsockname()[1])
+        await tts._connect_websocket()
+        await asyncio.wait_for(closed.wait(), timeout=5)
+
+    assert tts._websocket is None
+    assert tts.events == ["on_connection_error"]
 
 
 async def _fake_minimax(websocket):
