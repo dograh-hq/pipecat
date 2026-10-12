@@ -741,7 +741,8 @@ def _status_error(payload: dict) -> ErrorFrame | None:
     error = _base_resp_error(payload)
     if error is not None and error.category == ErrorCategory.UNKNOWN:
         code = (payload.get("base_resp") or {}).get("status_code")
-        error.category = _WEBSOCKET_STATUS_CODE_CATEGORIES.get(code, ErrorCategory.UNKNOWN)
+        if code in _WEBSOCKET_STATUS_CODE_CATEGORIES:
+            error.category = _WEBSOCKET_STATUS_CODE_CATEGORIES[code]
     return error
 
 
@@ -976,12 +977,12 @@ class MiniMaxTTSService(WebsocketTTSService):
                         and (reply.get("base_resp") or {}).get("status_code") == 1008
                     ):
                         await self.set_usable(False)
-                    await self.push_error_frame(
-                        error
-                        or ErrorFrame(
-                            error=f"MiniMax TTS: expected {expected}, got {reply.get('event')}"
-                        )
+                    error = error or ErrorFrame(
+                        error=f"MiniMax TTS: expected {expected}, got {reply.get('event')}"
                     )
+                    await self.push_error_frame(error)
+                    self._websocket = None
+                    await self._call_event_handler("on_connection_error", error.error)
                     return
             self._websocket = websocket
             await self._call_event_handler("on_connected")
@@ -1069,12 +1070,10 @@ class MiniMaxTTSService(WebsocketTTSService):
         await self._cancel_outstanding()
         await super()._handle_interruption(frame, direction)
 
-    async def _finish(self, synthesis: _Synthesis):
-        if self.audio_context_available(synthesis.context_id):
-            await self.append_to_audio_context(
-                synthesis.context_id, TTSStoppedFrame(context_id=synthesis.context_id)
-            )
-            await self.remove_audio_context(synthesis.context_id)
+    async def _finish(self, context_id: str):
+        if self.audio_context_available(context_id):
+            await self.append_to_audio_context(context_id, TTSStoppedFrame(context_id=context_id))
+            await self.remove_audio_context(context_id)
 
     async def _on_audio(self, message: dict, data: dict):
         trace = message.get("trace_id")
@@ -1100,6 +1099,7 @@ class MiniMaxTTSService(WebsocketTTSService):
                     context_id=synthesis.context_id,
                 ),
             )
+        synthesis.audio_bytes += usable
         subtitle = data.get("subtitle")
         if subtitle:
             # Times restart at 0 for every sentence; place them within the reply.
@@ -1110,7 +1110,6 @@ class MiniMaxTTSService(WebsocketTTSService):
             ]
             if word_times:
                 await self.add_word_timestamps(word_times, synthesis.context_id)
-        synthesis.audio_bytes += usable
 
     async def _on_message(self, message: dict):
         event = message.get("event")
@@ -1126,7 +1125,7 @@ class MiniMaxTTSService(WebsocketTTSService):
             # once each (a flushed reply sits in both queues).
             pending = {id(s): s for s in [*self._syntheses, *self._flushes] if not s.stale}
             for synthesis in pending.values():
-                await self._finish(synthesis)
+                await self._finish(synthesis.context_id)
             self._reset_stream_state()
             await self.stop_all_metrics()
             await self.push_error_frame(error)
@@ -1156,7 +1155,7 @@ class MiniMaxTTSService(WebsocketTTSService):
             if synthesis is not None and not synthesis.stale:
                 if synthesis in self._syntheses:
                     self._syntheses.remove(synthesis)
-                await self._finish(synthesis)
+                await self._finish(synthesis.context_id)
         elif event == "task_continued" and data.get("audio"):
             await self._on_audio(message, data)
 
@@ -1167,7 +1166,11 @@ class MiniMaxTTSService(WebsocketTTSService):
             except json.JSONDecodeError:
                 logger.error(f"{self}: invalid JSON from MiniMax: {raw!r:.200}")
                 continue
-            await self._on_message(message)
+            try:
+                await self._on_message(message)
+            except Exception as e:
+                # A malformed event loses its own audio or words, not the session.
+                logger.error(f"{self}: error handling MiniMax event {message!r:.200}: {e}")
 
     @traced_tts
     async def run_tts(self, text: str, context_id: str) -> AsyncGenerator[Frame | None, None]:
@@ -1193,3 +1196,8 @@ class MiniMaxTTSService(WebsocketTTSService):
             yield None
         except Exception as e:
             yield ErrorFrame(error=f"MiniMax TTS error: {e}", exception=e)
+            # No audio will come for this reply, so end it here.
+            for synthesis in [s for s in self._syntheses if s.context_id == context_id]:
+                synthesis.stale = True
+                self._syntheses.remove(synthesis)
+            await self._finish(context_id)

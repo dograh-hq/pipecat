@@ -309,6 +309,82 @@ async def test_a_failed_task_ends_every_reply_and_an_empty_balance_disables_the_
     assert not tts.is_usable
 
 
+@pytest.mark.asyncio
+async def test_a_reply_whose_text_cannot_be_sent_is_ended(tts):
+    async def closed(_raw):
+        raise ConnectionError("socket closed")
+
+    tts._websocket.send = closed
+    frames = [frame async for frame in tts.run_tts("Uno. ", "A")]
+
+    assert [type(f) for f in frames] == [ErrorFrame]
+    assert tts.stopped == ["A"]
+    assert not tts._syntheses
+
+
+class _FakeStream(_FakeSocket):
+    def __init__(self, messages: list[dict]):
+        super().__init__()
+        self._messages = messages
+
+    async def __aiter__(self):
+        for message in self._messages:
+            yield json.dumps(message)
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_event_is_skipped_and_the_session_kept(tts):
+    await _say(tts, "Uno. ", "A")
+    tts._websocket = _FakeStream(
+        [
+            _event("sentence_start"),
+            _event("task_continued", "t1", data={"audio": "not hex"}, is_final=False),
+            _audio("t1", 4, subtitle={"text": "Uno.", "timestamped_words": [{"word": "Uno"}]}),
+            _audio("t1", 6),
+            _event("task_flushed"),
+        ]
+    )
+
+    await tts._receive_messages()
+
+    assert tts.audio == [("A", 4), ("A", 6)]
+    assert tts.stopped == ["A"]
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_task_start_leaves_no_socket_behind(monkeypatch):
+    async def reject(websocket):
+        await websocket.send(json.dumps(_event("connected_success")))
+        await websocket.recv()
+        failed = {"status_code": 2054, "status_msg": "voice id not exist"}
+        await websocket.send(json.dumps(_event("task_failed", base_resp=failed)))
+
+    async with websockets.serve(reject, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        tts = MiniMaxTTSService(api_key="test-key", url=f"ws://127.0.0.1:{port}")
+        tts._sample_rate = 8000
+        # The previous session, already closed by MiniMax.
+        tts._websocket = _FakeSocket()
+        tts._websocket.state = State.CLOSED
+        errors, events = [], []
+
+        async def push_error_frame(error, force_treat_as_permanent=False):
+            errors.append(error)
+
+        async def call_event_handler(name, *args):
+            events.append(name)
+
+        monkeypatch.setattr(tts, "push_error_frame", push_error_frame)
+        monkeypatch.setattr(tts, "_call_event_handler", call_event_handler)
+        await tts._connect_websocket()
+
+    assert tts._websocket is None
+    assert events == ["on_connection_error"]
+    assert [e.error for e in errors] == [
+        "MiniMax TTS error: 2054 voice id not exist (trace_id=session)"
+    ]
+
+
 async def _fake_minimax(websocket):
     """Just enough of the bidirectional protocol: one sentence per flush, with word subtitles."""
     await websocket.send(json.dumps(_event("connected_success")))
