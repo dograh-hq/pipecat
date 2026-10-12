@@ -457,12 +457,26 @@ def test_v3_language_set_extends_the_v2_5_set():
 
 def test_language_code_is_gated_by_model():
     """A language the model doesn't cover is dropped rather than sent."""
-    # Welsh is v3-only.
+    # Welsh is supported by v3 but not Flash v2.5.
     assert elevenlabs_language_code("eleven_v3_conversational", "cy") == "cy"
     assert elevenlabs_language_code("eleven_flash_v2_5", "cy") is None
     # German is common to both.
     assert elevenlabs_language_code("eleven_flash_v2_5", "de") == "de"
     assert elevenlabs_language_code("eleven_v3", "de") == "de"
+
+
+@pytest.mark.parametrize("model", ["eleven_v4", "eleven_v4_turbo"])
+@pytest.mark.parametrize("code", ["da", "en", "am", "yue", "zu"])
+def test_v4_language_hints_are_supported(model, code):
+    from pipecat.transcriptions.language import Language
+
+    language_code = language_to_elevenlabs_language(Language(code))
+    assert elevenlabs_language_code(model, language_code) == code
+
+
+@pytest.mark.parametrize("model", ["eleven_v3", "eleven_v4", "eleven_v4_turbo"])
+def test_unsupported_language_hints_are_omitted(model):
+    assert elevenlabs_language_code(model, "xx") is None
 
 
 def test_models_without_language_support_send_no_code():

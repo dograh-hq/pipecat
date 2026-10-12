@@ -10,6 +10,8 @@ import asyncio
 import base64
 import json
 import unittest
+from unittest.mock import patch
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from websockets.protocol import State
@@ -22,6 +24,7 @@ from pipecat.services.elevenlabs.dialogue.tts import (
 )
 from pipecat.services.elevenlabs.tts import calculate_word_times
 from pipecat.services.tts_service import TextAggregationMode
+from pipecat.transcriptions.language import Language
 
 _WS_ALIGNMENT_KEYS = ("chars", "charStartTimesMs", "charDurationsMs")
 
@@ -424,11 +427,44 @@ def test_dialogue_token_aggregation_is_refused():
     assert service._is_streaming_tokens is False
 
 
-def test_dialogue_non_v3_model_warns_without_raising():
-    """The wrong-model warning names the service, so it needs a constructed one."""
-    service = _make_dialogue_service(model="eleven_flash_v2_5")
+def test_dialogue_defaults_to_eleven_v4_turbo():
+    with patch("pipecat.services.elevenlabs.dialogue.tts.logger.warning") as warning:
+        service = _make_dialogue_service(language=Language.DA)
+        query = parse_qs(urlsplit(service._build_websocket_url()).query)
 
-    assert service._settings.model == "eleven_flash_v2_5"
+    assert service._settings.model == "eleven_v4_turbo"
+    assert query["model_id"] == ["eleven_v4_turbo"]
+    assert query["language_code"] == ["da"]
+    warning.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "model", ["eleven_v3", "eleven_v3_conversational", "eleven_v4", "eleven_v4_turbo"]
+)
+def test_dialogue_supported_models_preserve_language_without_warning(model):
+    with patch("pipecat.services.elevenlabs.dialogue.tts.logger.warning") as warning:
+        service = _make_dialogue_service(model=model, language=Language.DA)
+        query = parse_qs(urlsplit(service._build_websocket_url()).query)
+
+    assert query["model_id"] == [model]
+    assert query["language_code"] == ["da"]
+    warning.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "model", ["eleven_flash_v2_5", "eleven_turbo_v2_5", "eleven_multilingual_v2"]
+)
+def test_dialogue_non_dialogue_model_warns_without_raising(model):
+    """The wrong-model warning names the service, so it needs a constructed one."""
+    with patch("pipecat.services.elevenlabs.dialogue.tts.logger.warning") as warning:
+        service = _make_dialogue_service(model=model)
+
+    assert service._settings.model == model
+    warning.assert_called_once_with(
+        f"{service}: Text-to-Dialogue requires an eleven_v3 or eleven_v4 model, "
+        f"got {model!r}. "
+        "Use ElevenLabsTTSService for Flash, Turbo v2.5, and Multilingual models."
+    )
 
 
 def test_dialogue_appends_trailing_space_under_sentence_aggregation():
