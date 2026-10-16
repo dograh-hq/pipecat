@@ -254,5 +254,28 @@ async def test_switching_the_http_service_to_v4_flash_takes_its_capabilities():
     assert "temperature" not in payload
 
 
+@pytest.mark.asyncio
+async def test_switching_model_clamps_pace_and_forces_preprocessing(monkeypatch):
+    service = _service(model="bulbul:v2", pace=2.8, enable_preprocessing=False)
+    monkeypatch.setattr(service, "_disconnect", AsyncMock())
+    monkeypatch.setattr(service, "_connect", AsyncMock())
+
+    await service._update_settings(SarvamTTSService.Settings(model=V4_FLASH))
+
+    assert service._settings.pace == 2.0
+    assert service._settings.enable_preprocessing is True
+
+
+@pytest.mark.asyncio
+async def test_explicit_voice_matching_current_voice_is_preserved_on_model_switch(monkeypatch):
+    service = _service(model="bulbul:v3", voice="shubh")
+    monkeypatch.setattr(service, "_disconnect", AsyncMock())
+    monkeypatch.setattr(service, "_connect", AsyncMock())
+
+    await service._update_settings(SarvamTTSService.Settings(model=V4_FLASH, voice="shubh"))
+
+    assert service._settings.voice == "shubh"
+
+
 if __name__ == "__main__":
     unittest.main()

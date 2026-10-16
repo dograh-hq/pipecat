@@ -631,8 +631,17 @@ class SarvamHttpTTSService(TTSService):
                 self._sync_model_name_to_metrics()
             else:
                 self._config = config
-                if "voice" not in changed:
+                if not is_given(getattr(delta, "voice", NOT_GIVEN)) or delta.voice is None:
                     self._settings.voice = config.default_speaker
+                pace_min, pace_max = config.pace_range
+                pace = self._settings.pace
+                if pace is not None and (pace < pace_min or pace > pace_max):
+                    logger.warning(
+                        f"Pace {pace} is outside model range ({pace_min}-{pace_max}). Clamping."
+                    )
+                    self._settings.pace = max(pace_min, min(pace_max, pace))
+                if config.preprocessing_always_enabled:
+                    self._settings.enable_preprocessing = True
 
         return changed
 
@@ -1103,8 +1112,17 @@ class SarvamTTSService(InterruptibleTTSService):
                 self._sync_model_name_to_metrics()
             else:
                 self._config = config
-                if "voice" not in changed:
+                if not is_given(getattr(delta, "voice", NOT_GIVEN)) or delta.voice is None:
                     self._settings.voice = config.default_speaker
+                pace_min, pace_max = config.pace_range
+                pace = self._settings.pace
+                if pace is not None and (pace < pace_min or pace > pace_max):
+                    logger.warning(
+                        f"Pace {pace} is outside model range ({pace_min}-{pace_max}). Clamping."
+                    )
+                    self._settings.pace = max(pace_min, min(pace_max, pace))
+                if config.preprocessing_always_enabled:
+                    self._settings.enable_preprocessing = True
                 # The model is a URL query parameter, so a new model needs a new connection.
                 self._websocket_url = (
                     f"{self._url}?model={self._settings.model}&send_completion_event=true"
