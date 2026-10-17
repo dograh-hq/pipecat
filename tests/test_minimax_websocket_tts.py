@@ -63,15 +63,15 @@ def _subtitle(text: str, pieces: list[tuple[str, int, int, int, int]]) -> dict:
     }
 
 
-# Pieces MiniMax returned for this sentence on the live API (speech-2.8-turbo, Italian voice).
+# Anonymized subtitle pieces from the live API (speech-2.8-turbo, Italian voice).
 BUONGIORNO = _subtitle(
-    "Buongiorno, sono Filippo di Glik.",
+    "Buongiorno, sono Filippo di Acme.",
     [
         ("B", 0, 1, 33, 131), ("u", 1, 2, 131, 197), ("ong", 2, 5, 197, 263), ("ior", 5, 8, 263, 361),
         ("no", 8, 10, 361, 492), (",", 10, 11, 492, 591), (" ", 11, 12, 591, 624), ("son", 12, 15, 624, 886),
         ("o", 15, 16, 886, 1017), (" ", 16, 17, 1017, 1050), ("F", 17, 18, 1050, 1149), ("ili", 18, 21, 1149, 1214),
         ("p", 21, 22, 1214, 1247), ("po", 22, 24, 1247, 1313), (" ", 24, 25, 1313, 1346), ("di", 25, 27, 1346, 1444),
-        (" ", 27, 28, 1444, 1477), ("G", 28, 29, 1477, 1510), ("li", 29, 31, 1510, 1543), ("k", 31, 32, 1543, 1641),
+        (" ", 27, 28, 1444, 1477), ("A", 28, 29, 1477, 1510), ("cm", 29, 31, 1510, 1543), ("e", 31, 32, 1543, 1641),
         (".", 32, 33, 1641, 1871),
     ],
 )  # fmt: skip
@@ -147,7 +147,7 @@ def test_subtitle_pieces_are_rebuilt_into_whole_words():
         ("sono", 0.624, 1.017),
         ("Filippo", 1.05, 1.313),
         ("di", 1.346, 1.444),
-        ("Glik.", 1.477, 1.871),
+        ("Acme.", 1.477, 1.871),
     ]
 
 
@@ -258,7 +258,7 @@ async def test_nothing_is_cancelled_once_every_reply_is_delivered(tts):
 @pytest.mark.asyncio
 async def test_word_times_are_offset_by_the_sentences_before_them(tts):
     """Times restart at 0 for each sentence, and a word counts once 80 ms (or half of it) has played."""
-    await _say(tts, "Buongiorno, sono Filippo di Glik. ", "A", flush=False)
+    await _say(tts, "Buongiorno, sono Filippo di Acme. ", "A", flush=False)
     await _say(tts, "Parlo con lei? ", "A")
     second = _subtitle(
         "Parlo con lei?",
@@ -278,7 +278,7 @@ async def test_word_times_are_offset_by_the_sentences_before_them(tts):
         ("A", "sono", 0.704),
         ("A", "Filippo", 1.13),
         ("A", "di", 1.395),
-        ("A", "Glik.", 1.557),
+        ("A", "Acme.", 1.557),
         ("A", "Parlo", 2.1),
         ("A", "con", 2.385),
         ("A", "lei?", 2.55),
