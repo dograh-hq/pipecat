@@ -219,7 +219,14 @@ class OutputAudioRawFrame(DataFrame, AudioRawFrame):
     A chunk of raw audio that will be played by the output transport. If the
     transport supports multiple audio destinations (e.g. multiple audio tracks)
     the destination name can be specified in transport_destination.
+
+    Parameters:
+        unmixed_audio: PCM before the output mixer, at the same sample rate, channel
+            count and length as audio. Set by the output transport for recording;
+            None means no separate unmixed audio is available.
     """
+
+    unmixed_audio: bytes | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self):
         super().__post_init__()
