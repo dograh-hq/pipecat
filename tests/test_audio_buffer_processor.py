@@ -32,6 +32,9 @@ from pipecat.utils.asyncio.task_manager import TaskManager
 
 
 class _PassthroughResampler:
+    async def reset(self):
+        pass
+
     async def resample(
         self, audio: bytes, in_rate: int, out_rate: int
     ) -> bytes:  # pragma: no cover - trivial
@@ -39,7 +42,11 @@ class _PassthroughResampler:
 
 
 async def _make_processor(
-    *, buffer_size: int = 0, start: bool = True, auto_start: bool = False
+    *,
+    buffer_size: int = 0,
+    start: bool = True,
+    auto_start: bool = False,
+    use_unmixed_audio_for_bot_track: bool = False,
 ) -> AudioBufferProcessor:
     """Create a processor ready to record.
 
@@ -55,9 +62,11 @@ async def _make_processor(
         num_channels=2,
         buffer_size=buffer_size,
         auto_start_recording=auto_start,
+        use_unmixed_audio_for_bot_track=use_unmixed_audio_for_bot_track,
     )
     processor._input_resampler = _PassthroughResampler()
     processor._output_resampler = _PassthroughResampler()
+    processor._unmixed_output_resampler = _PassthroughResampler()
 
     task_manager = TaskManager()
     await processor.setup(
@@ -1235,6 +1244,94 @@ class TestTurnAudio(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(events, [("user", 1, TURN_CHUNK), ("bot", 1, TURN_CHUNK)])
+
+
+class TestUnmixedBotTrack(unittest.IsolatedAsyncioTestCase):
+    async def test_split_track_uses_clean_audio_with_matching_padding_and_flushes(self):
+        for enabled in (False, True):
+            for buffer_size in (0, 8):
+                with self.subTest(enabled=enabled, buffer_size=buffer_size):
+                    processor = await _make_processor(
+                        buffer_size=buffer_size, use_unmixed_audio_for_bot_track=enabled
+                    )
+                    merged, users, bots = [], [], []
+
+                    @processor.event_handler("on_audio_data")
+                    async def on_audio(_, audio, rate, channels, merged=merged):
+                        merged.append(audio)
+
+                    @processor.event_handler("on_track_audio_data")
+                    async def on_tracks(_, user, bot, rate, channels, users=users, bots=bots):
+                        users.append(user)
+                        bots.append(bot)
+
+                    first = OutputAudioRawFrame(struct.pack("<hh", 101, 102), 16000, 1)
+                    first.unmixed_audio = struct.pack("<hh", 1, 2)
+                    last = OutputAudioRawFrame(struct.pack("<hh", 103, 104), 16000, 1)
+                    last.unmixed_audio = struct.pack("<hh", 3, 4)
+                    try:
+                        for frame in (
+                            InputAudioRawFrame(struct.pack("<hh", 10, 20), 16000, 1),
+                            first,
+                            InputAudioRawFrame(struct.pack("<hh", 30, 40), 16000, 1),
+                            InputAudioRawFrame(struct.pack("<hh", 50, 60), 16000, 1),
+                            last,
+                        ):
+                            await processor.process_frame(frame, FrameDirection.DOWNSTREAM)
+                        await processor.stop_recording()
+                        await processor.cleanup()
+
+                        self.assertEqual(
+                            b"".join(users), struct.pack("<6h", 10, 20, 30, 40, 50, 60)
+                        )
+                        expected = (1, 2, 0, 0, 3, 4) if enabled else (101, 102, 0, 0, 103, 104)
+                        self.assertEqual(b"".join(bots), struct.pack("<6h", *expected))
+                        # Stereo merged output keeps the ambient-containing right channel.
+                        self.assertEqual(
+                            b"".join(merged),
+                            struct.pack("<12h", 10, 101, 20, 102, 30, 0, 40, 0, 50, 103, 60, 104),
+                        )
+                        self.assertEqual(first.audio, struct.pack("<hh", 101, 102))
+                    finally:
+                        await processor.cleanup()
+
+    async def test_output_gaps_and_recording_restarts_keep_clean_track_aligned(self):
+        processor = await _make_processor(use_unmixed_audio_for_bot_track=True)
+        chunks = []
+        emitted = asyncio.Event()
+
+        @processor.event_handler("on_track_audio_data")
+        async def on_tracks(_, user, bot, rate, channels):
+            chunks.append((user, bot))
+            emitted.set()
+
+        try:
+            first = OutputAudioRawFrame(struct.pack("<h", 1100) * 160, 16000, 1)
+            first.unmixed_audio = struct.pack("<h", 100) * 160
+            await processor.process_frame(first, FrameDirection.DOWNSTREAM)
+            processor._last_bot_buffer_update_time -= 0.5
+            # Without a mixer, output PCM is itself the clean source.
+            last = OutputAudioRawFrame(struct.pack("<h", 200) * 160, 16000, 1)
+            await processor.process_frame(last, FrameDirection.DOWNSTREAM)
+            await processor.stop_recording()
+            await asyncio.wait_for(emitted.wait(), 1)
+            user, bot = chunks[-1]
+            self.assertEqual(len(user), len(bot))
+            self.assertEqual(bot[:320], first.unmixed_audio)
+            self.assertEqual(bot[-320:], last.audio)
+            self.assertGreater(len(bot[320:-320]), 0)
+            self.assertEqual(set(bot[320:-320]), {0})
+
+            emitted.clear()
+            await processor.start_recording()
+            await processor.process_frame(
+                InputAudioRawFrame(b"\x01\x00" * 160, 16000, 1), FrameDirection.DOWNSTREAM
+            )
+            await processor.stop_recording()
+            await asyncio.wait_for(emitted.wait(), 1)
+            self.assertEqual(chunks[-1], (b"\x01\x00" * 160, b"\x00\x00" * 160))
+        finally:
+            await processor.cleanup()
 
 
 if __name__ == "__main__":

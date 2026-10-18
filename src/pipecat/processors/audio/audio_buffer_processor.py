@@ -105,6 +105,7 @@ class AudioBufferProcessor(FrameProcessor):
         buffer_size: int = 0,
         enable_turn_audio: bool = False,
         auto_start_recording: bool = False,
+        use_unmixed_audio_for_bot_track: bool = False,
         **kwargs,
     ):
         """Initialize the audio buffer processor.
@@ -117,6 +118,9 @@ class AudioBufferProcessor(FrameProcessor):
             auto_start_recording: Whether to start recording automatically when
                 the pipeline starts, without requiring a call to
                 :meth:`start_recording` or an ``AudioBufferStartRecordingFrame``.
+            use_unmixed_audio_for_bot_track: Use audio before the output mixer for
+                the separate bot track and bot turn audio when available. Merged
+                audio still includes the mixer. Defaults to False.
             **kwargs: Additional arguments passed to parent class.
         """
         super().__init__(**kwargs)
@@ -127,9 +131,11 @@ class AudioBufferProcessor(FrameProcessor):
         self._buffer_size = buffer_size
         self._enable_turn_audio = enable_turn_audio
         self._auto_start_recording = auto_start_recording
+        self._use_unmixed_audio_for_bot_track = use_unmixed_audio_for_bot_track
 
         self._user_audio_buffer = bytearray()
         self._bot_audio_buffer = bytearray()
+        self._unmixed_bot_audio_buffer = bytearray()
 
         self._user_speaking = False
         self._bot_speaking = False
@@ -145,7 +151,11 @@ class AudioBufferProcessor(FrameProcessor):
         self._recording = False
 
         self._input_resampler = create_stream_resampler()
-        self._output_resampler = create_stream_resampler()
+        self._output_resampler = create_stream_resampler(
+            clear_after_secs=None if use_unmixed_audio_for_bot_track else 0.2
+        )
+        self._unmixed_output_resampler = create_stream_resampler(clear_after_secs=None)
+        self._last_output_resample_time: float | None = None
         self._last_user_buffer_update_time: float | None = None
         self._last_bot_buffer_update_time: float | None = None
 
@@ -300,6 +310,7 @@ class AudioBufferProcessor(FrameProcessor):
             self._bot_speaking = False
 
         resampled = None
+        unmixed = None
         if isinstance(frame, InputAudioRawFrame):
             resampled = await self._resample_input_audio(frame)
             # Ignoring in case we don't have audio
@@ -338,6 +349,12 @@ class AudioBufferProcessor(FrameProcessor):
                 self._user_audio_buffer.extend(resampled)
         elif isinstance(frame, OutputAudioRawFrame):
             resampled = await self._resample_output_audio(frame)
+            if self._use_unmixed_audio_for_bot_track:
+                unmixed = await self._unmixed_output_resampler.resample(
+                    frame.unmixed_audio if frame.unmixed_audio is not None else frame.audio,
+                    frame.sample_rate,
+                    self._sample_rate,
+                )
             # Ignoring in case we don't have audio
             if len(resampled) > 0:
                 now = time.monotonic()
@@ -361,6 +378,13 @@ class AudioBufferProcessor(FrameProcessor):
                     # silence already injected by the sync above).
                     self._last_user_buffer_update_time = time.monotonic()
                 # Add bot audio.
+                if unmixed is not None:
+                    # Reuse the mixed track's clock, including any silence added
+                    # by caller audio or a gap between output frames.
+                    self._sync_buffer_to_position(
+                        self._unmixed_bot_audio_buffer, len(self._bot_audio_buffer)
+                    )
+                    self._unmixed_bot_audio_buffer.extend(unmixed)
                 self._bot_audio_buffer.extend(resampled)
 
         if self._buffer_size > 0 and (
@@ -372,7 +396,7 @@ class AudioBufferProcessor(FrameProcessor):
 
         # Process turn recording with preprocessed data.
         if self._enable_turn_audio:
-            await self._process_turn_recording(frame, resampled)
+            await self._process_turn_recording(frame, unmixed if unmixed is not None else resampled)
 
     def _sync_buffer_to_position(self, buffer: bytearray, target_position: int):
         """Pad buffer with silence if it's behind the target position.
@@ -534,10 +558,14 @@ class AudioBufferProcessor(FrameProcessor):
         )
 
         # Call new handler with separate tracks
+        bot_audio = self._bot_audio_buffer
+        if self._use_unmixed_audio_for_bot_track:
+            self._sync_buffer_to_position(self._unmixed_bot_audio_buffer, len(bot_audio))
+            bot_audio = self._unmixed_bot_audio_buffer
         await self._call_event_handler(
             "on_track_audio_data",
             bytes(self._user_audio_buffer),
-            bytes(self._bot_audio_buffer),
+            bytes(bot_audio),
             self._sample_rate,
             self._num_channels,
         )
@@ -551,6 +579,7 @@ class AudioBufferProcessor(FrameProcessor):
         self._reset_all_audio_buffers(clear_turn_audio=clear_turn_audio)
         self._last_user_buffer_update_time = None
         self._last_bot_buffer_update_time = None
+        self._last_output_resample_time = None
 
     def _reset_all_audio_buffers(self, clear_turn_audio: bool = True):
         """Reset all audio buffers to empty state."""
@@ -562,6 +591,7 @@ class AudioBufferProcessor(FrameProcessor):
         """Clear user and bot buffers while preserving turn buffers and timestamps."""
         self._user_audio_buffer = bytearray()
         self._bot_audio_buffer = bytearray()
+        self._unmixed_bot_audio_buffer = bytearray()
         now = time.monotonic()
         self._last_user_buffer_update_time = now
         self._last_bot_buffer_update_time = now
@@ -594,6 +624,17 @@ class AudioBufferProcessor(FrameProcessor):
 
     async def _resample_output_audio(self, frame: OutputAudioRawFrame) -> bytes:
         """Resample audio frame to the target sample rate."""
+        if self._use_unmixed_audio_for_bot_track:
+            # Both histories must reset on the same gap, or their output sample
+            # counts can diverge around the resampler's inactivity threshold.
+            now = time.monotonic()
+            if (
+                self._last_output_resample_time is None
+                or now - self._last_output_resample_time > 0.2
+            ):
+                await self._output_resampler.reset()
+                await self._unmixed_output_resampler.reset()
+            self._last_output_resample_time = now
         return await self._output_resampler.resample(
             frame.audio, frame.sample_rate, self._sample_rate
         )
