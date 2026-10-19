@@ -1332,7 +1332,12 @@ async def test_sarvam_stt_update_settings_keyterms(monkeypatch):
     service._connect.reset_mock()
     await service._update_settings(SarvamSTTService.Settings(model="saaras:v3", keyterms=None))
     assert service._settings.model == "saaras:v3"
-    assert service._config.supports_keyterms is False
+    # Explicit invalid model values like None or "" are rejected before applying
+    with pytest.raises(ValueError, match="Unsupported model"):
+        await service._update_settings(STTSettings(model=None))
+
+    with pytest.raises(ValueError, match="Unsupported model"):
+        await service._update_settings(STTSettings(model=""))
 
     service_v3 = SarvamSTTService(api_key="test-key", model="saaras:v3")
     with pytest.raises(ValueError, match="does not support keyterms parameter"):

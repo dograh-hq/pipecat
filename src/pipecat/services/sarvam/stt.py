@@ -506,8 +506,8 @@ class SarvamSTTService(STTService):
         """
         # Resolve effective model to validate capabilities against proposed model
         model_delta = getattr(delta, "model", NOT_GIVEN)
-        if is_given(model_delta) and model_delta:
-            effective_model = str(model_delta)
+        if is_given(model_delta):
+            effective_model = str(model_delta) if model_delta is not None else ""
         else:
             effective_model = str(assert_given(self._settings.model))
         if effective_model not in MODEL_CONFIGS:
