@@ -105,12 +105,14 @@ class ModelConfig:
     Parameters:
         supports_mode: Whether the model accepts mode parameter.
         supports_language: Whether the model accepts language parameter.
+        supports_keyterms: Whether the model accepts keyterms parameter.
         default_language: Default language code (None = auto-detect).
         default_mode: Default mode (None = not applicable).
     """
 
     supports_mode: bool
     supports_language: bool
+    supports_keyterms: bool
     default_language: str | None
     default_mode: SarvamMode | None
 
@@ -119,16 +121,68 @@ MODEL_CONFIGS: dict[str, ModelConfig] = {
     "saaras:v3": ModelConfig(
         supports_mode=True,
         supports_language=True,
+        supports_keyterms=False,
         default_language="unknown",
         default_mode="transcribe",
     ),
     "saaras:v4": ModelConfig(
         supports_mode=True,
         supports_language=True,
+        supports_keyterms=True,
         default_language="unknown",
         default_mode="transcribe",
     ),
 }
+
+# Sarvam caps a connection at 50 keyterms with max 64 characters per keyterm.
+_MAX_KEYTERMS = 50
+_MAX_KEYTERM_CHARS = 64
+
+
+def _prepare_keyterms(keyterms: list[str] | None | NotGiven) -> list[str]:
+    """Normalize keyterms to the limits Sarvam accepts on a connection.
+
+    Drops blank entries, deduplicates while preserving order, truncates individual terms
+    to :data:`_MAX_KEYTERM_CHARS` characters, and limits to :data:`_MAX_KEYTERMS` terms,
+    warning about whatever is dropped or truncated.
+
+    Args:
+        keyterms: Keyterms from settings, which may be unset or ``None``.
+
+    Returns:
+        The keyterms to send, in the order given.
+    """
+    if not is_given(keyterms) or not keyterms:
+        return []
+
+    prepared: list[str] = []
+    seen: set[str] = set()
+    distinct_count = 0
+
+    for term in keyterms:
+        stripped = term.strip()
+        if not stripped:
+            continue
+        if len(stripped) > _MAX_KEYTERM_CHARS:
+            logger.warning(
+                f"Sarvam keyterm {stripped!r} exceeds {_MAX_KEYTERM_CHARS} characters; "
+                f"truncating to {stripped[:_MAX_KEYTERM_CHARS]!r}"
+            )
+            stripped = stripped[:_MAX_KEYTERM_CHARS]
+        if stripped in seen:
+            continue
+        seen.add(stripped)
+        distinct_count += 1
+        if len(prepared) < _MAX_KEYTERMS:
+            prepared.append(stripped)
+
+    if distinct_count > _MAX_KEYTERMS:
+        logger.warning(
+            f"Sarvam accepts at most {_MAX_KEYTERMS} keyterms; "
+            f"dropping {distinct_count - _MAX_KEYTERMS} keyterm(s)"
+        )
+
+    return prepared
 
 
 @dataclass
@@ -136,6 +190,7 @@ class SarvamSTTSettings(STTSettings):
     """Settings for SarvamSTTService.
 
     Parameters:
+        keyterms: List of key terms or phrases to bias transcription towards (saaras:v4 only).
         vad_signals: Enable VAD signals in response.
         high_vad_sensitivity: Enable high VAD sensitivity.
         positive_speech_threshold: VAD probability threshold (0.0-1.0) above which
@@ -158,6 +213,7 @@ class SarvamSTTSettings(STTSettings):
             connection start.
     """
 
+    keyterms: list[str] | None | NotGiven = field(default_factory=lambda: NOT_GIVEN)
     vad_signals: bool | None | NotGiven = field(default_factory=lambda: NOT_GIVEN)
     high_vad_sensitivity: bool | None | NotGiven = field(default_factory=lambda: NOT_GIVEN)
     positive_speech_threshold: float | None | NotGiven = field(default_factory=lambda: NOT_GIVEN)
@@ -227,6 +283,7 @@ class SarvamSTTService(STTService):
         api_key: str,
         model: str | None = None,
         mode: SarvamMode | None = None,
+        keyterms: list[str] | None = None,
         sample_rate: int | None = None,
         input_audio_codec: str = "wav",
         params: InputParams | None = None,
@@ -249,6 +306,8 @@ class SarvamSTTService(STTService):
             mode: Mode of operation. Options: transcribe, translate, verbatim,
                 translit, codemix. Only applicable to models that support it.
                 Defaults to the model's default mode.
+            keyterms: Optional list of key terms or phrases to bias transcription towards.
+                Only supported on saaras:v4.
             sample_rate: Audio sample rate. Defaults to 16000 if not specified.
             input_audio_codec: Audio codec/format of the input file. Defaults to "wav".
             params: Configuration parameters for Sarvam STT service.
@@ -270,6 +329,7 @@ class SarvamSTTService(STTService):
         default_settings = self.Settings(
             model="saaras:v4",
             language=None,
+            keyterms=None,
             vad_signals=None,
             high_vad_sensitivity=None,
             positive_speech_threshold=None,
@@ -288,6 +348,9 @@ class SarvamSTTService(STTService):
         if model is not None:
             self._warn_init_param_moved_to_settings("model", "model")
             default_settings.model = model
+
+        if keyterms is not None:
+            default_settings.keyterms = keyterms
 
         # --- 3. Deprecated params overrides ---
         if params is not None:
@@ -317,6 +380,15 @@ class SarvamSTTService(STTService):
         if default_settings.language is not None and not self._config.supports_language:
             raise ValueError(
                 f"Model '{resolved_model}' does not support language parameter (auto-detects language)."
+            )
+        if (
+            is_given(default_settings.keyterms)
+            and default_settings.keyterms is not None
+            and not self._config.supports_keyterms
+        ):
+            raise ValueError(
+                f"Model '{resolved_model}' does not support keyterms parameter. "
+                "Only saaras:v4 supports keyterms."
             )
 
         # Resolve mode default from model config
@@ -439,12 +511,19 @@ class SarvamSTTService(STTService):
                     f"Model '{self._settings.model}' does not support language parameter "
                     "(auto-detects language)."
                 )
+        if is_given(delta.keyterms) and delta.keyterms is not None:
+            if not self._config.supports_keyterms:
+                raise ValueError(
+                    f"Model '{self._settings.model}' does not support keyterms parameter "
+                    "(only saaras:v4 supports keyterms)."
+                )
 
         changed = await super()._update_settings(delta)
 
         # These are all WebSocket connect-time parameters; reconnect to apply.
         reconnect_fields = {
             "language",
+            "keyterms",
             "positive_speech_threshold",
             "negative_speech_threshold",
             "min_speech_frames",
@@ -584,6 +663,14 @@ class SarvamSTTService(STTService):
             # Headers are supplied through request_options because this is a
             # documented SDK parameter that survives SDK signature changes.
             request_options: RequestOptions = {"additional_headers": self._sdk_headers}
+
+            # Add keyterms for models that support it (saaras:v4)
+            if self._config.supports_keyterms:
+                prepared_keyterms = _prepare_keyterms(self._settings.keyterms)
+                if prepared_keyterms:
+                    request_options["additional_query_parameters"] = {
+                        "keyterms": json.dumps(prepared_keyterms)
+                    }
 
             try:
                 self._websocket_context = self._sarvam_client.speech_to_text_streaming.connect(
@@ -927,6 +1014,7 @@ class SarvamRealtimeSTTSettings(STTSettings):
         default_factory=lambda: NOT_GIVEN
     )
     mode: SarvamMode | NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    keyterms: list[str] | None | NotGiven = field(default_factory=lambda: NOT_GIVEN)
     prompt: str | None | NotGiven = field(default_factory=lambda: NOT_GIVEN)
     threshold: float | None | NotGiven = field(default_factory=lambda: NOT_GIVEN)
     silence_duration_ms: int | None | NotGiven = field(default_factory=lambda: NOT_GIVEN)
@@ -1023,6 +1111,7 @@ class SarvamRealtimeSTTService(WebsocketSTTService):
             language_code="en-IN",
             stream_type="balanced",
             mode="transcribe",
+            keyterms=None,
             prompt=None,
             threshold=None,
             silence_duration_ms=None,
@@ -1478,6 +1567,10 @@ class SarvamRealtimeSTTService(WebsocketSTTService):
             "return_timestamps": str(self._return_timestamps).lower(),
         }
         optional: dict[str, Any] = {"prompt": self._settings.prompt}
+        if self._settings.model == "saaras:v4":
+            prepared_keyterms = _prepare_keyterms(self._settings.keyterms)
+            if prepared_keyterms:
+                optional["keyterms"] = json.dumps(prepared_keyterms)
         if self._endpointing == "vad":
             optional["prefix_padding_ms"] = self._prefix_padding_ms
             optional.update(

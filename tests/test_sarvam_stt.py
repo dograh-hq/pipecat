@@ -37,6 +37,7 @@ from pipecat.services.sarvam.stt import (
     SarvamRealtimeSTTService,
     SarvamRealtimeSTTSettings,
     SarvamSTTService,
+    _prepare_keyterms,
     language_to_sarvam_language,
 )
 from pipecat.services.settings import STTSettings
@@ -1241,3 +1242,125 @@ def test_get_language_string_returns_model_default_when_unset():
 
     assert service._get_language_string() == service._config.default_language
     assert service._config.default_language == "unknown"
+
+
+# --- Keyterms tests ---
+
+
+def test_prepare_keyterms_empty():
+    assert _prepare_keyterms(None) == []
+    assert _prepare_keyterms([]) == []
+    assert _prepare_keyterms(["   ", ""]) == []
+
+
+def test_prepare_keyterms_strips_and_deduplicates():
+    terms = [" Sarvam ", "Dograh", "Sarvam", "  New Delhi  ", "Dograh"]
+    assert _prepare_keyterms(terms) == ["Sarvam", "Dograh", "New Delhi"]
+
+
+def test_prepare_keyterms_truncates_long_term():
+    long_term = "a" * 80
+    prepared = _prepare_keyterms([long_term])
+    assert len(prepared) == 1
+    assert prepared[0] == "a" * 64
+
+
+def test_prepare_keyterms_truncates_to_max_50():
+    terms = [f"term_{i}" for i in range(60)]
+    prepared = _prepare_keyterms(terms)
+    assert len(prepared) == 50
+    assert prepared == [f"term_{i}" for i in range(50)]
+
+
+def test_sarvam_stt_saaras_v4_accepts_keyterms():
+    service1 = SarvamSTTService(
+        api_key="test-key",
+        model="saaras:v4",
+        keyterms=["Sarvam", "Dograh"],
+    )
+    assert service1._settings.keyterms == ["Sarvam", "Dograh"]
+
+    service2 = SarvamSTTService(
+        api_key="test-key",
+        settings=SarvamSTTService.Settings(model="saaras:v4", keyterms=["AI"]),
+    )
+    assert service2._settings.keyterms == ["AI"]
+
+
+def test_sarvam_stt_saaras_v3_rejects_keyterms():
+    with pytest.raises(ValueError, match="does not support keyterms parameter"):
+        SarvamSTTService(
+            api_key="test-key",
+            model="saaras:v3",
+            keyterms=["Sarvam"],
+        )
+
+    with pytest.raises(ValueError, match="does not support keyterms parameter"):
+        SarvamSTTService(
+            api_key="test-key",
+            settings=SarvamSTTService.Settings(model="saaras:v3", keyterms=["Sarvam"]),
+        )
+
+
+@pytest.mark.asyncio
+async def test_sarvam_stt_update_settings_keyterms():
+    service = SarvamSTTService(api_key="test-key", model="saaras:v4")
+    # saaras:v4 allows updating keyterms
+    changed = await service._update_settings(SarvamSTTService.Settings(keyterms=["New Term"]))
+    assert "keyterms" in changed
+    assert service._settings.keyterms == ["New Term"]
+
+    service_v3 = SarvamSTTService(api_key="test-key", model="saaras:v3")
+    with pytest.raises(ValueError, match="does not support keyterms parameter"):
+        await service_v3._update_settings(SarvamSTTService.Settings(keyterms=["Term"]))
+
+
+@pytest.mark.asyncio
+async def test_sarvam_stt_connect_passes_keyterms_query_param(monkeypatch):
+    service = SarvamSTTService(
+        api_key="test-key",
+        settings=SarvamSTTService.Settings(
+            model="saaras:v4",
+            keyterms=["Sarvam", "New Delhi"],
+        ),
+    )
+
+    captured_connect_kwargs = {}
+
+    def _fake_connect(**kwargs):
+        captured_connect_kwargs.update(kwargs)
+        fake_ctx = AsyncMock()
+        fake_socket = AsyncMock()
+        fake_ctx.__aenter__ = AsyncMock(return_value=fake_socket)
+        fake_ctx.__aexit__ = AsyncMock(return_value=None)
+        return fake_ctx
+
+    monkeypatch.setattr(service._sarvam_client.speech_to_text_streaming, "connect", _fake_connect)
+
+    await service._connect()
+
+    request_options = captured_connect_kwargs.get("request_options", {})
+    query_params = request_options.get("additional_query_parameters", {})
+    assert "keyterms" in query_params
+    assert json.loads(query_params["keyterms"]) == ["Sarvam", "New Delhi"]
+
+    await service._disconnect()
+
+
+def test_sarvam_realtime_stt_saaras_v4_includes_keyterms_in_query():
+    service = SarvamRealtimeSTTService(
+        api_key="test-key",
+        settings=SarvamRealtimeSTTService.Settings(model="saaras:v4", keyterms=["Sarvam", "AI"]),
+    )
+    query = _query(service)
+    assert "keyterms" in query
+    assert json.loads(query["keyterms"][0]) == ["Sarvam", "AI"]
+
+
+def test_sarvam_realtime_stt_saaras_v3_omits_keyterms_in_query():
+    service = SarvamRealtimeSTTService(
+        api_key="test-key",
+        settings=SarvamRealtimeSTTService.Settings(model="saaras:v3-realtime", keyterms=["Sarvam"]),
+    )
+    query = _query(service)
+    assert "keyterms" not in query
