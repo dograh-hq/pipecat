@@ -177,6 +177,7 @@ def test_v4_flash_clamps_pace_to_its_own_range():
 
     assert service._settings.pace == 2.0
 
+
 @pytest.mark.asyncio
 async def test_switching_to_v4_flash_reconnects_with_its_capabilities(monkeypatch):
     """The model is pinned on the URL, so the switch needs a new connection."""
@@ -285,7 +286,9 @@ async def test_switching_model_clamps_pace_and_forces_preprocessing(service_fact
     ],
     ids=["websocket", "http"],
 )
-async def test_explicit_voice_matching_current_voice_is_preserved_on_model_switch(service_factory, monkeypatch):
+async def test_explicit_voice_matching_current_voice_is_preserved_on_model_switch(
+    service_factory, monkeypatch
+):
     service = service_factory(model="bulbul:v3", voice="shubh")
     if hasattr(service, "_disconnect"):
         monkeypatch.setattr(service, "_disconnect", AsyncMock())
