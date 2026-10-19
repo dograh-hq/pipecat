@@ -1303,12 +1303,36 @@ def test_sarvam_stt_saaras_v3_rejects_keyterms():
 
 
 @pytest.mark.asyncio
-async def test_sarvam_stt_update_settings_keyterms():
+async def test_sarvam_stt_update_settings_keyterms(monkeypatch):
     service = SarvamSTTService(api_key="test-key", model="saaras:v4")
+    monkeypatch.setattr(service, "_disconnect", AsyncMock())
+    monkeypatch.setattr(service, "_connect", AsyncMock())
+
     # saaras:v4 allows updating keyterms
     changed = await service._update_settings(SarvamSTTService.Settings(keyterms=["New Term"]))
     assert "keyterms" in changed
     assert service._settings.keyterms == ["New Term"]
+    service._disconnect.assert_awaited_once()
+    service._connect.assert_awaited_once()
+
+    # Plain STTSettings delta does not raise AttributeError
+    service._disconnect.reset_mock()
+    service._connect.reset_mock()
+    changed_lang = await service._update_settings(STTSettings(language=Language.HI))
+    assert "language" in changed_lang
+    service._disconnect.assert_awaited_once()
+    service._connect.assert_awaited_once()
+
+    # Switching model to saaras:v3 when keyterms are set raises ValueError
+    with pytest.raises(ValueError, match="does not support keyterms parameter"):
+        await service._update_settings(STTSettings(model="saaras:v3"))
+
+    # Clearing keyterms when switching model to saaras:v3 succeeds
+    service._disconnect.reset_mock()
+    service._connect.reset_mock()
+    await service._update_settings(SarvamSTTService.Settings(model="saaras:v3", keyterms=None))
+    assert service._settings.model == "saaras:v3"
+    assert service._config.supports_keyterms is False
 
     service_v3 = SarvamSTTService(api_key="test-key", model="saaras:v3")
     with pytest.raises(ValueError, match="does not support keyterms parameter"):
@@ -1357,10 +1381,35 @@ def test_sarvam_realtime_stt_saaras_v4_includes_keyterms_in_query():
     assert json.loads(query["keyterms"][0]) == ["Sarvam", "AI"]
 
 
-def test_sarvam_realtime_stt_saaras_v3_omits_keyterms_in_query():
+def test_sarvam_realtime_stt_saaras_v3_rejects_keyterms():
+    with pytest.raises(ValueError, match="does not support keyterms parameter"):
+        SarvamRealtimeSTTService(
+            api_key="test-key",
+            settings=SarvamRealtimeSTTService.Settings(
+                model="saaras:v3-realtime", keyterms=["Sarvam"]
+            ),
+        )
+
+
+@pytest.mark.asyncio
+async def test_sarvam_realtime_stt_update_settings_keyterms(monkeypatch):
     service = SarvamRealtimeSTTService(
         api_key="test-key",
-        settings=SarvamRealtimeSTTService.Settings(model="saaras:v3-realtime", keyterms=["Sarvam"]),
+        settings=SarvamRealtimeSTTService.Settings(model="saaras:v4"),
     )
-    query = _query(service)
-    assert "keyterms" not in query
+    monkeypatch.setattr(service, "_disconnect", AsyncMock())
+    monkeypatch.setattr(service, "_connect", AsyncMock())
+
+    changed = await service._update_settings(
+        SarvamRealtimeSTTService.Settings(keyterms=["Sarvam", "AI"])
+    )
+    assert "keyterms" in changed
+    assert service._settings.keyterms == ["Sarvam", "AI"]
+    service._disconnect.assert_awaited_once()
+    service._connect.assert_awaited_once()
+
+    # Reject keyterms update when updating to saaras:v3-realtime
+    with pytest.raises(ValueError, match="does not support keyterms parameter"):
+        await service._update_settings(
+            SarvamRealtimeSTTService.Settings(model="saaras:v3-realtime")
+        )

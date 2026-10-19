@@ -504,24 +504,47 @@ class SarvamSTTService(STTService):
         Raises:
             ValueError: If a setting is not supported by the current model.
         """
+        # Resolve effective model to validate capabilities against proposed model
+        effective_model = (
+            delta.model
+            if is_given(getattr(delta, "model", NOT_GIVEN)) and delta.model
+            else self._settings.model
+        )
+        if effective_model not in MODEL_CONFIGS:
+            allowed = ", ".join(sorted(MODEL_CONFIGS.keys()))
+            raise ValueError(f"Unsupported model '{effective_model}'. Allowed values: {allowed}.")
+        effective_config = MODEL_CONFIGS[effective_model]
+
         # Validate against model capabilities before applying
-        if is_given(delta.language) and delta.language is not None:
-            if not self._config.supports_language:
+        delta_language = getattr(delta, "language", NOT_GIVEN)
+        if is_given(delta_language) and delta_language is not None:
+            if not effective_config.supports_language:
                 raise ValueError(
-                    f"Model '{self._settings.model}' does not support language parameter "
+                    f"Model '{effective_model}' does not support language parameter "
                     "(auto-detects language)."
                 )
-        if is_given(delta.keyterms) and delta.keyterms is not None:
-            if not self._config.supports_keyterms:
+
+        delta_keyterms = getattr(delta, "keyterms", NOT_GIVEN)
+        proposed_keyterms = (
+            delta_keyterms
+            if is_given(delta_keyterms)
+            else getattr(self._settings, "keyterms", None)
+        )
+        if is_given(proposed_keyterms) and proposed_keyterms is not None:
+            if not effective_config.supports_keyterms:
                 raise ValueError(
-                    f"Model '{self._settings.model}' does not support keyterms parameter "
+                    f"Model '{effective_model}' does not support keyterms parameter "
                     "(only saaras:v4 supports keyterms)."
                 )
 
         changed = await super()._update_settings(delta)
 
+        if "model" in changed:
+            self._config = MODEL_CONFIGS[self._settings.model]
+
         # These are all WebSocket connect-time parameters; reconnect to apply.
         reconnect_fields = {
+            "model",
             "language",
             "keyterms",
             "positive_speech_threshold",
@@ -1400,6 +1423,7 @@ class SarvamRealtimeSTTService(WebsocketSTTService):
         delta = self._with_derived_language_code(delta)
         proposed = self._settings.copy()
         proposed.apply_update(delta)
+        self._validate_settings(proposed)
 
         # Drawn from the runtime-updatable set, so the payload carries nothing
         # a `config.update` would have to reject.
@@ -1415,11 +1439,15 @@ class SarvamRealtimeSTTService(WebsocketSTTService):
             return changed
 
         # `language` reaches Sarvam as `language_code`, so it is never unhandled.
-        unsupported = set(changed) - _RUNTIME_CONFIG_FIELDS - {"language"}
+        # `keyterms` and `model` trigger a reconnect, so they are not unhandled either.
+        unsupported = set(changed) - _RUNTIME_CONFIG_FIELDS - {"language", "keyterms", "model"}
         if unsupported:
             self._warn_unhandled_updated_settings({key: changed[key] for key in unsupported})
 
-        if payload:
+        if "keyterms" in changed or "model" in changed:
+            await self._disconnect()
+            await self._connect()
+        elif payload:
             await self._send_config_update(payload)
         return changed
 
@@ -1653,6 +1681,10 @@ class SarvamRealtimeSTTService(WebsocketSTTService):
         if model not in _SUPPORTED_REALTIME_MODELS:
             allowed = ", ".join(sorted(_SUPPORTED_REALTIME_MODELS))
             raise ValueError(f"Unsupported model '{model}'. Allowed values: {allowed}.")
+        if is_given(settings.keyterms) and settings.keyterms is not None and model != "saaras:v4":
+            raise ValueError(
+                f"Model '{model}' does not support keyterms parameter. Only saaras:v4 supports keyterms."
+            )
 
     @traced_stt
     async def _trace_transcription(
