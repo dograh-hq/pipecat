@@ -505,11 +505,11 @@ class SarvamSTTService(STTService):
             ValueError: If a setting is not supported by the current model.
         """
         # Resolve effective model to validate capabilities against proposed model
-        effective_model = (
-            delta.model
-            if is_given(getattr(delta, "model", NOT_GIVEN)) and delta.model
-            else self._settings.model
-        )
+        model_delta = getattr(delta, "model", NOT_GIVEN)
+        if is_given(model_delta) and model_delta:
+            effective_model = str(model_delta)
+        else:
+            effective_model = str(assert_given(self._settings.model))
         if effective_model not in MODEL_CONFIGS:
             allowed = ", ".join(sorted(MODEL_CONFIGS.keys()))
             raise ValueError(f"Unsupported model '{effective_model}'. Allowed values: {allowed}.")
@@ -540,7 +540,9 @@ class SarvamSTTService(STTService):
         changed = await super()._update_settings(delta)
 
         if "model" in changed:
-            self._config = MODEL_CONFIGS[self._settings.model]
+            model_key = str(assert_given(self._settings.model))
+            if model_key in MODEL_CONFIGS:
+                self._config = MODEL_CONFIGS[model_key]
 
         # These are all WebSocket connect-time parameters; reconnect to apply.
         reconnect_fields = {
