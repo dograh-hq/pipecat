@@ -48,7 +48,21 @@ class SarvamLLMService(OpenAILLMService):
     # This value is used by BaseOpenAILLMService when calling the adapter.
     supports_developer_role = False
 
-    _SUPPORTED_MODELS = frozenset({"sarvam-105b"})
+    _SUPPORTED_MODELS = frozenset(
+        {
+            "sarvam-105b",
+            "sarvam-105b-conversations",
+            "sarvam-105b-32k",
+            "sarvam-30b",
+            "sarvam-30b-16k",
+            "glm-5-3",
+            "glm5.3",
+            "gemma-4-31b",
+            "gemma4",
+            "deepseek-v4.1-flash",
+            "deepseekv4.1-flash",
+        }
+    )
     Settings = SarvamLLMSettings
     _settings: Settings
 
@@ -148,9 +162,12 @@ class SarvamLLMService(OpenAILLMService):
         return params
 
     def _validate_model(self, model: str):
+        if not model or not model.strip():
+            raise ValueError("Sarvam LLM requires a non-empty model string.")
         if model not in self._SUPPORTED_MODELS:
-            allowed = ", ".join(sorted(self._SUPPORTED_MODELS))
-            raise ValueError(f"Unsupported Sarvam LLM model '{model}'. Allowed values: {allowed}.")
+            logger.warning(
+                f"Sarvam LLM model '{model}' is not in known models list ({', '.join(sorted(self._SUPPORTED_MODELS))}). Proceeding anyway."
+            )
 
     def _validate_tool_parameters(self, params_from_context: OpenAILLMInvocationParams):
         tools = params_from_context.get("tools", NOT_GIVEN)

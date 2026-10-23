@@ -83,6 +83,8 @@ class SarvamTTSModel(StrEnum):
     BULBUL_V2 = "bulbul:v2"
     BULBUL_V3_BETA = "bulbul:v3-beta"
     BULBUL_V3 = "bulbul:v3"
+    BULBUL_V4_FLASH = "bulbul:v4-flash"
+    BULBUL_V4 = "bulbul:v4"
 
 
 class SarvamTTSSpeakerV2(StrEnum):
@@ -102,9 +104,9 @@ class SarvamTTSSpeakerV2(StrEnum):
 
 
 class SarvamTTSSpeakerV3(StrEnum):
-    """Available speakers for bulbul:v3-beta model.
+    """Available speakers for bulbul:v3 and bulbul:v3-beta models.
 
-    Includes a wider variety of voices with different characteristics.
+    Includes a wide variety of voices with different characteristics.
     """
 
     ADITYA = "aditya"
@@ -132,6 +134,43 @@ class SarvamTTSSpeakerV3(StrEnum):
     ADVAIT = "advait"
     AMELIA = "amelia"
     SOPHIA = "sophia"
+    ANAND = "anand"
+    TANYA = "tanya"
+    TARUN = "tarun"
+    SUNNY = "sunny"
+    MANI = "mani"
+    GOKUL = "gokul"
+    VIJAY = "vijay"
+    SHRUTI = "shruti"
+    SUHANI = "suhani"
+    MOHIT = "mohit"
+    KAVITHA = "kavitha"
+    REHAN = "rehan"
+    SOHAM = "soham"
+    RUPALI = "rupali"
+
+
+class SarvamTTSSpeakerV4(StrEnum):
+    """Popular speaker personas for bulbul:v4-flash.
+
+    In addition to these, all v3 speakers and 200+ persona voice IDs in the format
+    `<name>_<language>_<style>` are supported by the bulbul:v4-flash endpoint.
+    """
+
+    SHUBH_ENHI_ADS = "shubh_enhi_ads"
+    SHUBH_ENHI_CONVERSATIONAL = "shubh_enhi_conversational"
+    RITU_ENHI_CONVERSATIONAL = "ritu_enhi_conversational"
+    ADITYA_ENHI_CONVERSATIONAL = "aditya_enhi_conversational"
+    PRIYA_ENHI_CONVERSATIONAL = "priya_enhi_conversational"
+    NEHA_ENHI_CONVERSATIONAL = "neha_enhi_conversational"
+    RAHUL_ENHI_CONVERSATIONAL = "rahul_enhi_conversational"
+    POOJA_ENHI_CONVERSATIONAL = "pooja_enhi_conversational"
+    ROHAN_ENHI_CONVERSATIONAL = "rohan_enhi_conversational"
+    ANAND_ENHI_CONVERSATIONAL = "anand_enhi_conversational"
+    KAVYA_ENHI_CONVERSATIONAL = "kavya_enhi_conversational"
+    AMIT_ENHI_CONVERSATIONAL = "amit_enhi_conversational"
+    DEV_ENHI_CONVERSATIONAL = "dev_enhi_conversational"
+    ISHITA_ENHI_CONVERSATIONAL = "ishita_enhi_conversational"
 
 
 @dataclass(frozen=True)
@@ -189,6 +228,26 @@ TTS_MODEL_CONFIGS: dict[str, TTSModelConfig] = {
         pace_range=(0.5, 2.0),
         preprocessing_always_enabled=True,
         speakers=tuple(s.value for s in SarvamTTSSpeakerV3),
+    ),
+    "bulbul:v4-flash": TTSModelConfig(
+        supports_pitch=False,
+        supports_loudness=False,
+        supports_temperature=True,
+        default_sample_rate=22050,
+        default_speaker="shubh_enhi_ads",
+        pace_range=(0.5, 2.0),
+        preprocessing_always_enabled=True,
+        speakers=tuple(s.value for s in SarvamTTSSpeakerV4) + tuple(s.value for s in SarvamTTSSpeakerV3),
+    ),
+    "bulbul:v4": TTSModelConfig(
+        supports_pitch=False,
+        supports_loudness=False,
+        supports_temperature=True,
+        default_sample_rate=22050,
+        default_speaker="shubh_enhi_ads",
+        pace_range=(0.5, 2.0),
+        preprocessing_always_enabled=True,
+        speakers=tuple(s.value for s in SarvamTTSSpeakerV4) + tuple(s.value for s in SarvamTTSSpeakerV3),
     ),
 }
 

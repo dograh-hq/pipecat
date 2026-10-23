@@ -145,6 +145,16 @@ MODEL_CONFIGS: dict[str, ModelConfig] = {
         use_translate_endpoint=False,
         use_translate_method=False,
     ),
+    "saaras:v4": ModelConfig(
+        supports_prompt=False,
+        supports_mode=True,
+        supports_language=True,
+        supports_vad_params=True,
+        default_language="unknown",
+        default_mode="transcribe",
+        use_translate_endpoint=False,
+        use_translate_method=False,
+    ),
 }
 
 
@@ -366,7 +376,7 @@ class SarvamSTTService(STTService):
                 if getattr(default_settings, param_name) is not None:
                     raise ValueError(
                         f"Model '{resolved_model}' does not support {param_name} parameter. "
-                        f"Fine-grained VAD parameters are only supported by saaras:v3."
+                        f"Fine-grained VAD parameters are only supported by saaras:v3 and saaras:v4."
                     )
 
         # Resolve mode default from model config
@@ -497,7 +507,7 @@ class SarvamSTTService(STTService):
                 if is_given(val) and val is not None:
                     raise ValueError(
                         f"Model '{self._settings.model}' does not support {param_name} "
-                        f"parameter. Fine-grained VAD parameters are only supported by saaras:v3."
+                        f"parameter. Fine-grained VAD parameters are only supported by saaras:v3 and saaras:v4."
                     )
 
         changed = await super()._update_settings(delta)
