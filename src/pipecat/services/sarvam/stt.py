@@ -842,12 +842,12 @@ class SarvamSTTService(STTService):
                         await self.cancel_task(self._end_speech_fallback_task)
                         self._end_speech_fallback_task = None
                     await self._start_metrics()
-                    logger.debug("User started speaking")
+                    logger.info("Sarvam STT: VAD START_SPEECH detected (user speaking)")
                     await self._call_event_handler("on_speech_started")
                     await self.broadcast_frame(UserStartedSpeakingFrame)
 
                 elif signal == "END_SPEECH":
-                    logger.debug("User stopped speaking — waiting for data message")
+                    logger.info("Sarvam STT: VAD END_SPEECH detected (waiting for data message)")
                     await self._call_event_handler("on_speech_stopped")
                     # Set pending flag and arm safety fallback timer so that if
                     # Sarvam discards non-speech noise without sending a data message,
@@ -879,6 +879,9 @@ class SarvamSTTService(STTService):
                 await self._call_event_handler("on_utterance_end")
 
                 if transcript and transcript.strip():
+                    logger.info(
+                        f"Sarvam STT: finalized transcript='{transcript.strip()}' (language={language})"
+                    )
                     # Record tracing for this transcription event
                     await self._handle_transcription(transcript, True, language)
                     # Report usage before the transcription frame so tracing
@@ -894,14 +897,14 @@ class SarvamSTTService(STTService):
                             finalized=True,
                         )
                     )
-
-                # Emit UserStoppedSpeakingFrame after the transcript so that
-                # ExternalUserTurnStopStrategy receives text before the stop
-                # signal and can fire the LLM turn immediately.  We also emit
-                # it for empty transcripts (bot audio bleedthrough / silence)
-                # so the pipeline never deadlocks waiting for text that won't
-                # arrive.
-                if self._end_speech_pending:
+                    # A finalized transcript marks the completion of the user's utterance.
+                    # Broadcast UserStoppedSpeakingFrame immediately so the turn controller
+                    # triggers the LLM response without delay, regardless of whether END_SPEECH
+                    # was received before, after, or dropped by server-side VAD.
+                    self._end_speech_pending = False
+                    await self.broadcast_frame(UserStoppedSpeakingFrame)
+                elif self._end_speech_pending:
+                    # Empty transcript with pending end_speech (silence / bleedthrough)
                     self._end_speech_pending = False
                     await self.broadcast_frame(UserStoppedSpeakingFrame)
 
@@ -917,7 +920,7 @@ class SarvamSTTService(STTService):
             await asyncio.sleep(timeout)
             if self._end_speech_pending:
                 self._end_speech_pending = False
-                logger.debug(
+                logger.info(
                     "Sarvam STT: No data message received after END_SPEECH within "
                     f"{timeout}s; emitting fallback UserStoppedSpeakingFrame"
                 )
