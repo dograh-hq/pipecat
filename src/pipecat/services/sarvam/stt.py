@@ -415,6 +415,13 @@ class SarvamSTTService(STTService):
             self._register_event_handler("on_speech_stopped")
             self._register_event_handler("on_utterance_end")
 
+        # Tracks whether END_SPEECH was received and we're waiting for the
+        # accompanying `data` message before emitting UserStoppedSpeakingFrame.
+        # This ensures the TranscriptionFrame always arrives before the stop
+        # frame, matching the Deepgram ordering that ExternalUserTurnStopStrategy
+        # relies on.
+        self._end_speech_pending: bool = False
+
         logger.info(f"Sarvam STT initialized with SDK headers: {self._sdk_headers}")
 
     def language_to_service_language(self, language: Language) -> str:
@@ -824,6 +831,7 @@ class SarvamSTTService(STTService):
                 logger.debug(f"VAD Signal: {signal}, Occurred at: {timestamp}")
 
                 if signal == "START_SPEECH":
+                    self._end_speech_pending = False
                     await self._start_metrics()
                     logger.debug("User started speaking")
                     await self._call_event_handler("on_speech_started")
@@ -831,9 +839,13 @@ class SarvamSTTService(STTService):
                     await self.broadcast_interruption()
 
                 elif signal == "END_SPEECH":
-                    logger.debug("User stopped speaking")
+                    logger.debug("User stopped speaking — waiting for data message")
                     await self._call_event_handler("on_speech_stopped")
-                    await self.broadcast_frame(UserStoppedSpeakingFrame)
+                    # Do NOT emit UserStoppedSpeakingFrame here. The `data`
+                    # message with the transcript arrives next; we emit the stop
+                    # frame there so ExternalUserTurnStopStrategy always sees
+                    # transcript text before the stop signal (mirrors Deepgram).
+                    self._end_speech_pending = True
 
             elif message.type == "data":
                 transcript = message.data.transcript
@@ -867,6 +879,16 @@ class SarvamSTTService(STTService):
                             finalized=True,
                         )
                     )
+
+                # Emit UserStoppedSpeakingFrame after the transcript so that
+                # ExternalUserTurnStopStrategy receives text before the stop
+                # signal and can fire the LLM turn immediately.  We also emit
+                # it for empty transcripts (bot audio bleedthrough / silence)
+                # so the pipeline never deadlocks waiting for text that won't
+                # arrive.
+                if self._end_speech_pending:
+                    self._end_speech_pending = False
+                    await self.broadcast_frame(UserStoppedSpeakingFrame)
 
                 await self.stop_processing_metrics()
 
