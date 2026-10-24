@@ -11,6 +11,7 @@ API. It supports real-time transcription with Voice Activity Detection (VAD) and
 can handle multiple audio formats for Indian language speech recognition.
 """
 
+import asyncio
 import base64
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
@@ -421,6 +422,7 @@ class SarvamSTTService(STTService):
         # frame, matching the Deepgram ordering that ExternalUserTurnStopStrategy
         # relies on.
         self._end_speech_pending: bool = False
+        self._end_speech_fallback_task: asyncio.Task | None = None
 
         logger.info(f"Sarvam STT initialized with SDK headers: {self._sdk_headers}")
 
@@ -776,6 +778,10 @@ class SarvamSTTService(STTService):
         """Disconnect from Sarvam WebSocket API using SDK."""
         await self._cancel_keepalive_task()
 
+        if self._end_speech_fallback_task:
+            await self.cancel_task(self._end_speech_fallback_task)
+            self._end_speech_fallback_task = None
+
         if self._receive_task:
             await self.cancel_task(self._receive_task)
             self._receive_task = None
@@ -832,6 +838,9 @@ class SarvamSTTService(STTService):
 
                 if signal == "START_SPEECH":
                     self._end_speech_pending = False
+                    if self._end_speech_fallback_task:
+                        await self.cancel_task(self._end_speech_fallback_task)
+                        self._end_speech_fallback_task = None
                     await self._start_metrics()
                     logger.debug("User started speaking")
                     await self._call_event_handler("on_speech_started")
@@ -841,13 +850,20 @@ class SarvamSTTService(STTService):
                 elif signal == "END_SPEECH":
                     logger.debug("User stopped speaking — waiting for data message")
                     await self._call_event_handler("on_speech_stopped")
-                    # Do NOT emit UserStoppedSpeakingFrame here. The `data`
-                    # message with the transcript arrives next; we emit the stop
-                    # frame there so ExternalUserTurnStopStrategy always sees
-                    # transcript text before the stop signal (mirrors Deepgram).
+                    # Set pending flag and arm safety fallback timer so that if
+                    # Sarvam discards non-speech noise without sending a data message,
+                    # UserStoppedSpeakingFrame is still emitted within 250ms (avoids deadlocks).
                     self._end_speech_pending = True
+                    if self._end_speech_fallback_task:
+                        await self.cancel_task(self._end_speech_fallback_task)
+                    self._end_speech_fallback_task = self.create_task(
+                        self._flush_end_speech_fallback(timeout=0.25)
+                    )
 
             elif message.type == "data":
+                if self._end_speech_fallback_task:
+                    await self.cancel_task(self._end_speech_fallback_task)
+                    self._end_speech_fallback_task = None
                 transcript = message.data.transcript
                 language_code = message.data.language_code
                 # Prefer language from message (auto-detected for translate models). Fallback to configured.
@@ -895,6 +911,20 @@ class SarvamSTTService(STTService):
         except Exception as e:
             await self.push_error(error_msg=f"Failed to handle message: {e}", exception=e)
             await self.stop_all_metrics()
+
+    async def _flush_end_speech_fallback(self, timeout: float = 0.25):
+        """Fallback to emit UserStoppedSpeakingFrame if Sarvam sends no data message."""
+        try:
+            await asyncio.sleep(timeout)
+            if self._end_speech_pending:
+                self._end_speech_pending = False
+                logger.debug(
+                    "Sarvam STT: No data message received after END_SPEECH within "
+                    f"{timeout}s; emitting fallback UserStoppedSpeakingFrame"
+                )
+                await self.broadcast_frame(UserStoppedSpeakingFrame)
+        except asyncio.CancelledError:
+            pass
 
     @traced_stt
     async def _handle_transcription(

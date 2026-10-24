@@ -309,11 +309,10 @@ class SpeechTimeoutUserTurnStopStrategy(BaseUserTurnStopStrategy):
     async def _maybe_trigger_user_turn_stopped(self):
         """Trigger user turn stopped if all required conditions are met.
 
-        Both timers must be done (stt is marked done immediately on the
-        fallback path and when finalization short-circuits the safety net),
-        the user must not be currently speaking, and — when
-        ``wait_for_transcript`` is True — at least one transcript must
-        have been received.
+        When both timers have completed, end the turn. If text was transcribed,
+        it flushes to the LLM. If text is empty (noise, cough, breath), the
+        turn completes and LLMUserContextAggregator cleanly skips LLM execution
+        without deadlocking in dead air.
         """
         if self._vad_user_speaking:
             return
@@ -321,8 +320,15 @@ class SpeechTimeoutUserTurnStopStrategy(BaseUserTurnStopStrategy):
         if self._wait_for_transcript and not self._text:
             return
 
+        # Both timers completed: trigger turn stop.
         if self._user_speech_wait_done and self._stt_wait_done:
             await self.trigger_user_turn_stopped()
+            return
+
+        # Direct turn driving (wait_for_transcript=False): fire as soon as silence timer elapses.
+        if not self._wait_for_transcript and self._user_speech_wait_done:
+            await self.trigger_user_turn_stopped()
+            return
 
     async def _cancel_all_tasks(self):
         """Cancel any running timer tasks and clear the handles."""
