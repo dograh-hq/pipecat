@@ -147,6 +147,7 @@ class BaseOpenAILLMService(LLMService[OpenAILLMAdapter]):
         settings: Settings | None = None,
         retry_timeout_secs: float | None = 5.0,
         retry_on_timeout: bool | None = False,
+        stream_chunk_timeout_secs: float | None = 10.0,
         **kwargs,
     ):
         """Initialize the BaseOpenAILLMService.
@@ -174,6 +175,7 @@ class BaseOpenAILLMService(LLMService[OpenAILLMAdapter]):
                 parameters, ``settings`` values take precedence.
             retry_timeout_secs: Request timeout in seconds. Defaults to 5.0 seconds.
             retry_on_timeout: Whether to retry the request once if it times out.
+            stream_chunk_timeout_secs: Maximum seconds to wait for each streaming chunk before terminating the stream. Defaults to 10.0 seconds.
             **kwargs: Additional arguments passed to the parent LLMService.
         """
         # 1. Initialize default_settings with hardcoded defaults
@@ -220,6 +222,7 @@ class BaseOpenAILLMService(LLMService[OpenAILLMAdapter]):
         self._service_tier = service_tier
         self._retry_timeout_secs = retry_timeout_secs
         self._retry_on_timeout = retry_on_timeout
+        self._stream_chunk_timeout_secs = stream_chunk_timeout_secs
         self._full_model_name: str = ""
         self._client = self.create_client(
             api_key=api_key,
@@ -456,7 +459,23 @@ class BaseOpenAILLMService(LLMService[OpenAILLMAdapter]):
                     await stream.aclose()
 
         async with _closing(chunk_stream) as chunk_iter:
-            async for chunk in chunk_iter:
+            while True:
+                try:
+                    if self._stream_chunk_timeout_secs and self._stream_chunk_timeout_secs > 0:
+                        chunk = await asyncio.wait_for(
+                            chunk_iter.__anext__(), timeout=self._stream_chunk_timeout_secs
+                        )
+                    else:
+                        chunk = await chunk_iter.__anext__()
+                except StopAsyncIteration:
+                    break
+                except TimeoutError:
+                    logger.warning(
+                        f"{self}: LLM stream stalled (no chunk received for {self._stream_chunk_timeout_secs}s). "
+                        "Terminating stream to prevent pipeline deadlock."
+                    )
+                    break
+
                 if chunk.usage:
                     cached_tokens = (
                         chunk.usage.prompt_tokens_details.cached_tokens

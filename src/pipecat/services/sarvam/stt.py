@@ -845,7 +845,6 @@ class SarvamSTTService(STTService):
                     logger.debug("User started speaking")
                     await self._call_event_handler("on_speech_started")
                     await self.broadcast_frame(UserStartedSpeakingFrame)
-                    await self.broadcast_interruption()
 
                 elif signal == "END_SPEECH":
                     logger.debug("User stopped speaking — waiting for data message")
