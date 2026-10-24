@@ -31,6 +31,7 @@ from pipecat.frames.frames import (
     BotStoppedSpeakingFrame,
     Frame,
     FunctionCallsFromLLMInfoFrame,
+    InterruptionFrame,
     LLMContextFrame,
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
@@ -634,8 +635,8 @@ class BaseOpenAILLMService(LLMService[OpenAILLMAdapter]):
         """
         await super().process_frame(frame, direction)
 
-        # Handle BotStoppedSpeakingFrame to execute pending node-transition calls.
-        if isinstance(frame, BotStoppedSpeakingFrame):
+        # Handle BotStoppedSpeakingFrame or InterruptionFrame to execute pending node-transition calls.
+        if isinstance(frame, (BotStoppedSpeakingFrame, InterruptionFrame)):
             await self._run_pending_node_transition_function_calls()
             await self.push_frame(frame, direction)
         elif isinstance(frame, LLMContextFrame):

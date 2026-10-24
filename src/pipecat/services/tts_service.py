@@ -790,12 +790,18 @@ class TTSService(AIService):
                     # drained (including the final TTSTextFrame).  Pushing
                     # directly would let it race ahead of queued text frames.
                     await self._serialization_queue.put(frame)
-                elif self._turn_context_id is not None:
+                elif self._turn_context_id is not None and (
+                    self.audio_context_available(self._turn_context_id)
+                    or self._playing_context_id == self._turn_context_id
+                ):
                     # Hold the original frame, keyed by this turn's context_id, so
                     # _maybe_reset_word_timestamps can re-push it (with the PTS of
                     # the last word frame) at end of that context, rather than
                     # emitting a fresh frame with a new id.
                     self._pending_llm_response_end_frames[self._turn_context_id] = frame
+                else:
+                    self._llm_response_started = False
+                    await self.push_frame(frame, direction)
             else:
                 await self.push_frame(frame, direction)
 
