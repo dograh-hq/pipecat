@@ -19,6 +19,7 @@ class SpokenTextSanitizer:
     _TAGS = (
         "<function=",
         "<call:",
+        "</call:",
         "<think",
         "<thought",
         "<thinking",
@@ -33,8 +34,9 @@ class SpokenTextSanitizer:
     )
     _VARIABLE = re.compile(r"(?:[a-z][a-z0-9]*|[\w]+[_.][\w.]*)(?:\s*\|.*)?$")
 
-    def __init__(self):
+    def __init__(self, *, preserve_whitespace: bool = True):
         """Initialize an empty response buffer."""
+        self._preserve_whitespace = preserve_whitespace
         self.reset()
 
     def reset(self) -> None:
@@ -78,6 +80,21 @@ class SpokenTextSanitizer:
                     return index + 1
         return None
 
+    @staticmethod
+    def _structured_array(text: str, *, final: bool) -> bool | None:
+        """Recognize JSON values while retaining ambiguous literal prefixes."""
+        value = text[1:].lstrip()
+        if not value or value == "-":
+            return True if final else None
+        if value[0] in '[{"0123456789]' or re.match(r"-\d", value):
+            return True
+        for literal in ("true", "false", "null"):
+            if literal.startswith(value):
+                return True if final else None
+            if value.startswith(literal) and value[len(literal)] in " \t\r\n,]":
+                return True
+        return False
+
     def _drain(self, *, final: bool) -> str:
         output = []
         while self._pending and not self._discard:
@@ -105,9 +122,12 @@ class SpokenTextSanitizer:
                     value = ""
                 self._pending = value + text[end + 2 :]
                 continue
-            if text.startswith("[") and not final and not text[1:].strip():
-                break
-            if text.startswith("{") or re.match(r'\[\s*[\[\{"\d\]]', text):
+            array = False
+            if text.startswith("["):
+                array = self._structured_array(text, final=final)
+                if array is None:
+                    break
+            if text.startswith("{") or array:
                 if text == "{" and not final:
                     break
                 end = self._structure_end(text)
@@ -139,18 +159,21 @@ class SpokenTextSanitizer:
                     end = text.find(">")
                     if end < 0 and not final:
                         break
-                    if (
-                        end >= 0
-                        and not tag[1]
-                        and tag[2] not in ("call:", "|")
-                        and text[end - 1] != "/"
-                    ):
-                        name = "function" if tag[2] == "function=" else tag[2]
-                        closing = re.search(rf"</{name}\s*>", lowered[end + 1 :])
+                    if end >= 0 and not tag[1] and tag[2] != "|" and text[end - 1] != "/":
+                        name = (
+                            lowered[1:end].split()[0]
+                            if tag[2] == "call:"
+                            else "function"
+                            if tag[2] == "function="
+                            else tag[2]
+                        )
+                        closing = re.search(rf"</{re.escape(name)}\s*>", lowered[end + 1 :])
                         if closing is None and not final:
                             break
                         end = end + closing.end() if closing else len(text) - 1
                     self._pending = text[end + 1 :] if end >= 0 else ""
+                    if self._preserve_whitespace:
+                        output.append(" ")
                     self._after_control = True
                     continue
 
@@ -236,58 +259,72 @@ class SpokenTextFilter(BaseTextFilter):
 
         Args:
             custom_patterns: Additional regexes evaluated on complete utterances.
-                When supplied, streaming text is buffered until response end.
-            preserve_whitespace: Replace custom-pattern matches with a space
+                When supplied, streaming text is buffered until response end;
+                memory use grows with the response length.
+            preserve_whitespace: Replace removed XML tags and custom-pattern matches with a space
                 instead of removing them without a separator.
         """
         self._sanitizer = SpokenTextSanitizer()
         self._preserve_whitespace = preserve_whitespace
         self._patterns = [re.compile(p, re.DOTALL | re.IGNORECASE) for p in custom_patterns or []]
-        self._custom_pending = ""
-        self._custom_overflow = False
+        self._custom_pending: list[str] = []
+        self._stream_patterns: list[re.Pattern[str]] | None = None
+        self._stream_preserve_whitespace = preserve_whitespace
 
-    def _custom(self, text: str) -> str:
-        for pattern in self._patterns:
-            text = pattern.sub(" " if self._preserve_whitespace else "", text)
+    @staticmethod
+    def _custom(text: str, patterns: list[re.Pattern[str]], preserve_whitespace: bool) -> str:
+        for pattern in patterns:
+            text = pattern.sub(" " if preserve_whitespace else "", text)
         return text
 
     async def filter(self, text: str) -> str:
         """Sanitize a complete, independent utterance."""
-        sanitizer = SpokenTextSanitizer()
-        return self._custom(sanitizer.feed(text) + sanitizer.finish())
+        sanitizer = SpokenTextSanitizer(preserve_whitespace=self._preserve_whitespace)
+        return self._custom(
+            sanitizer.feed(text) + sanitizer.finish(), self._patterns, self._preserve_whitespace
+        )
 
     async def filter_stream(self, text: str) -> str:
         """Sanitize one chunk of the current response."""
+        if self._stream_patterns is None:
+            self._stream_patterns = self._patterns
+            self._stream_preserve_whitespace = self._preserve_whitespace
+            self._sanitizer = SpokenTextSanitizer(preserve_whitespace=self._preserve_whitespace)
         clean = self._sanitizer.feed(text)
-        if not self._patterns:
+        if not self._stream_patterns:
             return clean
         # Arbitrary regexes need the complete utterance to match across chunks.
-        if not self._custom_overflow:
-            self._custom_pending += clean
-            if len(self._custom_pending) > SpokenTextSanitizer.MAX_PENDING_CHARS:
-                self._custom_overflow = True
-                self._custom_pending = ""
+        # The unfinished-control limit does not apply to ordinary response text.
+        if clean:
+            self._custom_pending.append(clean)
         return ""
 
     async def flush(self) -> str:
         """Finish and reset the current response."""
-        text = self._custom_pending + self._sanitizer.finish()
-        text = "" if self._custom_overflow else self._custom(text)
-        self._custom_pending = ""
-        self._custom_overflow = False
+        text = "".join(self._custom_pending) + self._sanitizer.finish()
+        text = self._custom(
+            text,
+            self._stream_patterns if self._stream_patterns is not None else self._patterns,
+            self._stream_preserve_whitespace,
+        )
+        self._custom_pending.clear()
+        self._stream_patterns = None
         return text
 
     async def handle_interruption(self):
         """Discard unfinished syntax and custom-pattern buffers."""
         self._sanitizer.reset()
-        self._custom_pending = ""
-        self._custom_overflow = False
+        self._custom_pending.clear()
+        self._stream_patterns = None
 
     async def update_settings(self, settings: Mapping[str, Any]):
-        """Update custom regexes and their whitespace replacement policy."""
+        """Update settings for independent utterances and the next response.
+
+        An active stream keeps its settings until it is flushed or interrupted.
+        """
         if "preserve_whitespace" in settings:
             self._preserve_whitespace = settings["preserve_whitespace"]
         if "custom_patterns" in settings:
             self._patterns = [
-                re.compile(p, re.DOTALL | re.IGNORECASE) for p in settings["custom_patterns"]
+                re.compile(p, re.DOTALL | re.IGNORECASE) for p in settings["custom_patterns"] or []
             ]

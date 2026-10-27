@@ -382,6 +382,8 @@ class TTSService(AIService):
         # correct PTS to TTSStoppedFrame and LLMFullResponseEndFrame.
         self._word_last_pts: int = 0
         self._llm_response_started: bool = False
+        # Input filtering follows response boundaries, independently of audio playback.
+        self._receiving_llm_response: bool = False
         # LLMFullResponseEndFrames received in process_frame, keyed by the turn's
         # context_id, held so each can be re-pushed (with corrected PTS) at end of
         # its context instead of creating a new one. Reusing the original frame
@@ -870,7 +872,7 @@ class TTSService(AIService):
         ):
             await self.push_frame(frame, direction)
         elif isinstance(frame, AggregatedTextFrame):
-            await self._push_tts_frames(frame)
+            await self._push_tts_frames(frame, stream_filters=self._receiving_llm_response)
         elif (
             isinstance(frame, TextFrame)
             and not isinstance(frame, InterimTranscriptionFrame)
@@ -886,6 +888,8 @@ class TTSService(AIService):
             for filter in self._text_filters:
                 if filter.filter_before_aggregation:
                     await filter.handle_interruption()
+                    await filter.reset_interruption()
+            self._receiving_llm_response = True
             self._llm_response_started = True
             # New LLM turn → assign a fresh context ID shared by all sentences
             self._turn_context_id = self.create_context_id()
@@ -897,6 +901,7 @@ class TTSService(AIService):
             # playing out downstream).
             await self._serialization_queue.put(frame)
         elif isinstance(frame, (LLMFullResponseEndFrame, EndFrame)):
+            self._receiving_llm_response = False
             tail = ""
             for filter in self._text_filters:
                 if filter.filter_before_aggregation:
@@ -1164,6 +1169,7 @@ class TTSService(AIService):
             await filter.handle_interruption()
 
         self._llm_response_started = False
+        self._receiving_llm_response = False
         self._streamed_text = ""
         self._text_aggregation_metrics_started = False
         self._aggregated_frame_sequencer.clear()  # discard all pending slots on interruption
@@ -1285,6 +1291,7 @@ class TTSService(AIService):
         push_assistant_aggregation: bool | None = False,
         *,
         text_is_sanitized: bool = False,
+        stream_filters: bool = False,
     ):
         type = src_frame.aggregated_by
         text = src_frame.text
@@ -1292,11 +1299,18 @@ class TTSService(AIService):
         if not text_is_sanitized:
             for filter in self._text_filters:
                 if filter.filter_before_aggregation:
-                    text = await filter.filter(text)
+                    if stream_filters:
+                        text = await filter.filter_stream(text)
+                        # Buffered text can span source frames. Use the released
+                        # speech as the canonical source for word alignment.
+                        src_frame.raw_text = text
+                    else:
+                        await filter.reset_interruption()
+                        text = await filter.filter(text)
             if text != src_frame.text:
                 src_frame.text = text
                 src_frame.raw_text = text
-            elif src_frame.raw_text:
+            elif src_frame.raw_text and not stream_filters:
                 for filter in self._text_filters:
                     if filter.filter_before_aggregation:
                         src_frame.raw_text = await filter.filter(src_frame.raw_text)
