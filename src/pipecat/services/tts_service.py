@@ -883,6 +883,9 @@ class TTSService(AIService):
             await self._handle_interruption(frame, direction)
             await self.push_frame(frame, direction)
         elif isinstance(frame, LLMFullResponseStartFrame):
+            for filter in self._text_filters:
+                if filter.filter_before_aggregation:
+                    await filter.handle_interruption()
             self._llm_response_started = True
             # New LLM turn → assign a fresh context ID shared by all sentences
             self._turn_context_id = self.create_context_id()
@@ -894,6 +897,12 @@ class TTSService(AIService):
             # playing out downstream).
             await self._serialization_queue.put(frame)
         elif isinstance(frame, (LLMFullResponseEndFrame, EndFrame)):
+            tail = ""
+            for filter in self._text_filters:
+                if filter.filter_before_aggregation:
+                    tail = await filter.filter_stream(tail) + await filter.flush()
+            if tail:
+                await self._process_text_frame(TextFrame(tail), text_is_sanitized=True)
             # Flush any remaining text (including text waiting for lookahead)
             remaining = await self._text_aggregator.flush()
             # Stop the aggregation metric (no-op if already stopped on first sentence).
@@ -906,7 +915,8 @@ class TTSService(AIService):
                         raw_text=remaining.full_match
                         if isinstance(remaining, PatternMatch)
                         else remaining.text,
-                    )
+                    ),
+                    text_is_sanitized=True,
                 )
 
             # Force-promote any sentence still pending in the sequencer (streaming
@@ -1207,8 +1217,13 @@ class TTSService(AIService):
         if self._pause_frame_processing:
             await self.resume_processing_frames()
 
-    async def _process_text_frame(self, frame: TextFrame):
-        async for aggregate in self._text_aggregator.aggregate(frame.text):
+    async def _process_text_frame(self, frame: TextFrame, *, text_is_sanitized: bool = False):
+        text = frame.text
+        if not text_is_sanitized:
+            for filter in self._text_filters:
+                if filter.filter_before_aggregation:
+                    text = await filter.filter_stream(text)
+        async for aggregate in self._text_aggregator.aggregate(text):
             includes_inter_frame_spaces = (
                 frame.includes_inter_frame_spaces
                 if aggregate.type == AggregationType.TOKEN
@@ -1223,6 +1238,7 @@ class TTSService(AIService):
             await self._push_tts_frames(
                 AggregatedTextFrame(aggregate.text, aggregate.type, raw_text=raw_text),
                 includes_inter_frame_spaces,
+                text_is_sanitized=True,
             )
 
     async def _push_sequencer_frames(self, frames: list[Frame], context_id: str | None):
@@ -1267,9 +1283,23 @@ class TTSService(AIService):
         includes_inter_frame_spaces: bool = False,
         append_tts_text_to_context: bool = True,
         push_assistant_aggregation: bool | None = False,
+        *,
+        text_is_sanitized: bool = False,
     ):
         type = src_frame.aggregated_by
         text = src_frame.text
+
+        if not text_is_sanitized:
+            for filter in self._text_filters:
+                if filter.filter_before_aggregation:
+                    text = await filter.filter(text)
+            if text != src_frame.text:
+                src_frame.text = text
+                src_frame.raw_text = text
+            elif src_frame.raw_text:
+                for filter in self._text_filters:
+                    if filter.filter_before_aggregation:
+                        src_frame.raw_text = await filter.filter(src_frame.raw_text)
 
         # Create context ID and store metadata
         context_id = self.create_context_id()
@@ -1311,8 +1341,15 @@ class TTSService(AIService):
 
         # Process all filters.
         for filter in self._text_filters:
-            await filter.reset_interruption()
-            text = await filter.filter(text)
+            if not filter.filter_before_aggregation:
+                await filter.reset_interruption()
+                text = await filter.filter(text)
+
+        if text != src_frame.text:
+            # Filters remove content from the conversation; pronunciation transforms
+            # below change synthesis only. Word alignment must see the filtered source.
+            src_frame.text = text
+            src_frame.raw_text = text
 
         # Post-filter whitespace gate. Mirrors the pre-filter logic so filter
         # output that collapses to whitespace-only is handled consistently.

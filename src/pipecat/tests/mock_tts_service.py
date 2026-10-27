@@ -4,7 +4,7 @@
 # SPDX-License-Identifier: BSD 2-Clause License
 #
 
-"""Mock TTS service for testing XMLFunctionTagFilter integration."""
+"""Mock TTS service for testing spoken text filter integration."""
 
 import asyncio
 from collections.abc import AsyncGenerator
