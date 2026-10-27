@@ -946,6 +946,12 @@ class GrokRealtimeLLMService(LLMService[GrokRealtimeLLMAdapter]):
 
     async def _handle_evt_input_audio_transcription_completed(self, evt):
         """Handle input audio transcription completed event."""
+        # Grok also sends cumulative provisional text under the completed event
+        # name. Only the final snapshot belongs in the user's conversation turn.
+        if getattr(evt, "status", None) == "in_progress":
+            await self._handle_evt_input_audio_transcription_updated(evt)
+            return
+
         await self._call_event_handler("on_conversation_item_updated", evt.item_id, None)
 
         # Only push transcription if we have actual text (not empty or just whitespace)

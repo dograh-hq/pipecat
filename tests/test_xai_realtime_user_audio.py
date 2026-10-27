@@ -7,11 +7,18 @@
 """Tests for user-audio and interruption handling in GrokRealtimeLLMService."""
 
 import base64
+import json
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
-from pipecat.frames.frames import InputAudioRawFrame
+from pipecat.frames.frames import (
+    InputAudioRawFrame,
+    InterimTranscriptionFrame,
+    TranscriptionFrame,
+)
+from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.xai.realtime import events
 from pipecat.services.xai.realtime.events import SessionProperties, TurnDetection
 from pipecat.services.xai.realtime.llm import GrokRealtimeLLMService
@@ -53,6 +60,50 @@ def _audio_frame(data: bytes = b"\xaa\xbb") -> InputAudioRawFrame:
 def test_default_model_is_grok_voice_latest():
     service = GrokRealtimeLLMService(api_key="test-key")
     assert service._settings.model == "grok-voice-latest"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "status_fields, frame_type",
+    [
+        ({"status": "in_progress"}, InterimTranscriptionFrame),
+        ({"status": "completed"}, TranscriptionFrame),
+        ({}, TranscriptionFrame),
+        ({"status": None}, TranscriptionFrame),
+    ],
+    ids=["provisional", "final", "legacy-omitted", "legacy-null"],
+)
+async def test_completed_transcription_uses_status_to_select_frame(status_fields, frame_type):
+    service, _ = _make_service(server_vad=True)
+    service.push_frame = AsyncMock()
+    service._call_event_handler = AsyncMock()
+    event = events.parse_server_event(
+        json.dumps(
+            {
+                "type": "conversation.item.input_audio_transcription.completed",
+                "event_id": "event-1",
+                "item_id": "user-item-1",
+                "content_index": 0,
+                "transcript": "Can you hear me?",
+                **status_fields,
+            }
+        )
+    )
+
+    await service._handle_evt_input_audio_transcription_completed(event)
+
+    service.push_frame.assert_awaited_once()
+    frame, direction = service.push_frame.await_args.args
+    assert type(frame) is frame_type
+    assert frame.text == "Can you hear me?"
+    assert frame.result.status == status_fields.get("status")
+    assert direction == FrameDirection.UPSTREAM
+    if frame_type is InterimTranscriptionFrame:
+        service._call_event_handler.assert_not_awaited()
+    else:
+        service._call_event_handler.assert_awaited_once_with(
+            "on_conversation_item_updated", "user-item-1", None
+        )
 
 
 @pytest.mark.asyncio
