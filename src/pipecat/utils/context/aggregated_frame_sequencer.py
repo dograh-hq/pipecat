@@ -667,10 +667,19 @@ class AggregatedFrameSequencer:
                 if slot.tracker:
                     remaining_text = slot.tracker.get_remaining_tts_text()
                     raw_remaining = slot.tracker.get_remaining_llm_text()
-                    if raw_remaining and remaining_text and remaining_text not in raw_remaining:
+                    display_remaining = slot.tracker.get_remaining_user_facing_text()
+                    if (
+                        raw_remaining
+                        and remaining_text
+                        and remaining_text not in raw_remaining
+                        and (not display_remaining or display_remaining not in raw_remaining)
+                    ):
                         logger.warning(
-                            f"{self._name} force-complete: raw_remaining {repr(raw_remaining)} "
-                            f"does not contain remaining_text {repr(remaining_text)}, discarding"
+                            f"{self._name} force-complete: remaining source does not contain "
+                            "the remaining speech or display text; discarding source "
+                            f"(source_chars={len(raw_remaining)}, "
+                            f"speech_chars={len(remaining_text)}, "
+                            f"display_chars={len(display_remaining or '')})"
                         )
                         raw_remaining = None
                     if remaining_text:
