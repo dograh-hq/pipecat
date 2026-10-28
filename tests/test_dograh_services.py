@@ -6,6 +6,7 @@
 
 """Tests for Dograh-managed AI services."""
 
+import asyncio
 import json
 from unittest.mock import AsyncMock, patch
 from urllib.parse import parse_qs
@@ -182,6 +183,64 @@ async def test_tts_usage_is_not_billed_again_when_context_finishes():
 
     assert frames == [None]
     service.start_tts_usage_metrics.assert_awaited_once_with("hello")
+
+
+class _ErrorWebsocket:
+    def __init__(self, message):
+        self._message = message
+        self.close = AsyncMock()
+
+    async def __aiter__(self):
+        yield json.dumps(self._message)
+
+
+def _tts_receiving(message):
+    service = DograhTTSService(api_key="test-key")
+    service._websocket = _ErrorWebsocket(message)
+    service.push_frame = AsyncMock()
+    service.push_error = AsyncMock()
+    service.stop_all_metrics = AsyncMock()
+    return service
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("message", "error_msg"),
+    [
+        (
+            {"type": "error", "error": "voice_not_found", "message": "Voice 'abc' not found"},
+            "TTS service voice not found: Voice 'abc' not found",
+        ),
+        (
+            {"type": "error", "error": "quota_exceeded", "message": "Quota exceeded"},
+            "TTS service quota exceeded: Quota exceeded",
+        ),
+    ],
+)
+async def test_tts_errors_every_reconnect_would_repeat_are_permanent(message, error_msg):
+    service = _tts_receiving(message)
+    websocket = service._websocket
+    keepalive = service._keepalive_task = object()
+    service.cancel_task = AsyncMock()
+
+    with pytest.raises(asyncio.CancelledError):
+        await service._receive_messages()
+
+    service.push_error.assert_awaited_once_with(error_msg=error_msg, force_treat_as_permanent=True)
+    service.cancel_task.assert_awaited_once_with(keepalive)
+    assert service._keepalive_task is None
+    websocket.close.assert_awaited_once()
+    assert service._websocket is None
+
+
+@pytest.mark.asyncio
+async def test_tts_other_errors_are_raised_for_reconnect():
+    service = _tts_receiving({"type": "error", "message": "Upstream timed out"})
+
+    with pytest.raises(Exception, match="Dograh TTS error: Upstream timed out"):
+        await service._receive_messages()
+
+    service.push_error.assert_not_awaited()
 
 
 @pytest.mark.asyncio
