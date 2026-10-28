@@ -349,37 +349,40 @@ class DograhTTSService(WebsocketTTSService):
                     await self.push_frame(TTSStoppedFrame())
                     await self.stop_all_metrics()
 
-                    # Check if this is a quota error
-                    is_quota_error = (
-                        "quota" in error_msg.lower() and "exceeded" in error_msg.lower()
-                    )
-
-                    # For quota errors, push a fatal error frame to trigger pipeline shutdown
-                    if is_quota_error:
-                        logger.info(f"TTS quota exceeded: {error_msg}")
-
-                        # Mark the service unusable. Dograh workers use the
-                        # v1.8 ProcessorUnusablePolicy.CANCEL contract.
-                        await self.push_error(
-                            error_msg=f"TTS service quota exceeded: {error_msg}",
-                            force_treat_as_permanent=True,
-                        )
-
-                        # Close the websocket gracefully
-                        logger.info("Closing websocket connection gracefully due to quota exceeded")
-                        try:
-                            if self._websocket:
-                                await self._websocket.close(
-                                    code=1000, reason="Quota exceeded - closing gracefully"
-                                )
-                                self._websocket = None
-                        except Exception as close_error:
-                            logger.debug(f"Error while closing websocket: {close_error}")
-
-                        # Raise CancelledError to cleanly cancel the receive task
-                        raise asyncio.CancelledError("Quota exceeded - cancelling receive task")
+                    # Errors that every reconnect would hit again: an exhausted
+                    # quota, or a voice that is neither a Dograh voice nor a
+                    # provider voice the account may use.
+                    if msg.get("error") == "voice_not_found":
+                        failure = "voice not found"
+                    elif "quota" in error_msg.lower() and "exceeded" in error_msg.lower():
+                        failure = "quota exceeded"
                     else:
                         raise Exception(f"Dograh TTS error: {error_msg}")
+
+                    logger.info(f"TTS {failure}: {error_msg}")
+
+                    # Mark the service unusable. Dograh workers use the
+                    # v1.8 ProcessorUnusablePolicy.CANCEL contract.
+                    await self.push_error(
+                        error_msg=f"TTS service {failure}: {error_msg}",
+                        force_treat_as_permanent=True,
+                    )
+
+                    # Close the websocket gracefully
+                    logger.info(f"Closing websocket connection gracefully due to {failure}")
+                    try:
+                        if self._websocket:
+                            await self._websocket.close(
+                                code=1000, reason=f"{failure.capitalize()} - closing gracefully"
+                            )
+                            self._websocket = None
+                    except Exception as close_error:
+                        logger.debug(f"Error while closing websocket: {close_error}")
+
+                    # Raise CancelledError to cleanly cancel the receive task
+                    raise asyncio.CancelledError(
+                        f"{failure.capitalize()} - cancelling receive task"
+                    )
 
             except asyncio.CancelledError:
                 raise
