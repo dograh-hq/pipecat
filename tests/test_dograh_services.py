@@ -220,11 +220,15 @@ def _tts_receiving(message):
 async def test_tts_errors_every_reconnect_would_repeat_are_permanent(message, error_msg):
     service = _tts_receiving(message)
     websocket = service._websocket
+    keepalive = service._keepalive_task = object()
+    service.cancel_task = AsyncMock()
 
     with pytest.raises(asyncio.CancelledError):
         await service._receive_messages()
 
     service.push_error.assert_awaited_once_with(error_msg=error_msg, force_treat_as_permanent=True)
+    service.cancel_task.assert_awaited_once_with(keepalive)
+    assert service._keepalive_task is None
     websocket.close.assert_awaited_once()
     assert service._websocket is None
 

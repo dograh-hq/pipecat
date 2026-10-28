@@ -368,6 +368,10 @@ class DograhTTSService(WebsocketTTSService):
                         force_treat_as_permanent=True,
                     )
 
+                    if self._keepalive_task:
+                        await self.cancel_task(self._keepalive_task)
+                        self._keepalive_task = None
+
                     # Close the websocket gracefully
                     logger.info(f"Closing websocket connection gracefully due to {failure}")
                     try:
