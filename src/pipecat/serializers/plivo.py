@@ -146,7 +146,9 @@ class PlivoFrameSerializer(FrameSerializer):
                 "auth_token": self._auth_token,
             }
 
-            if frame_reason == EndTaskReason.TRANSFER_CALL.value and not self._transfer_attempted:
+            if frame_reason == EndTaskReason.TRANSFER_CALL.value:
+                if self._transfer_attempted:
+                    return None
                 self._transfer_attempted = True
                 if self._transfer_strategy:
                     success = await self._transfer_strategy.execute_transfer(context)

@@ -1403,9 +1403,13 @@ class TTSService(AIService):
         """Speak the turn's remaining text and complete the turn."""
         self._receiving_llm_response = False
         tail = ""
-        for filter in self._text_filters:
-            if filter.filter_before_aggregation:
-                tail = await filter.filter_stream(tail) + await filter.flush()
+        try:
+            for filter in self._text_filters:
+                if filter.filter_before_aggregation:
+                    tail = await filter.filter_stream(tail) + await filter.flush()
+        except Exception as e:
+            await self._report_text_filter_error(e)
+            tail = ""
         if tail:
             await self._handle_text(TextFrame(tail), text_is_sanitized=True)
         # Flush any remaining text (including text waiting for lookahead)
@@ -1675,13 +1679,25 @@ class TTSService(AIService):
         """Whether the service is streaming tokens directly without sentence aggregation."""
         return self._text_aggregation_mode == TextAggregationMode.TOKEN
 
+    async def _report_text_filter_error(self, exception: Exception):
+        """Report application filtering failures without speaking unfiltered text."""
+        await self.push_error(
+            error_msg=f"Error filtering text for TTS: {exception}",
+            exception=exception,
+            category=ErrorCategory.APPLICATION,
+        )
+
     async def _handle_text(self, frame: TextFrame, *, text_is_sanitized: bool = False):
         """Sanitize streamed text before sentence boundaries are detected."""
         text = frame.text
-        if not text_is_sanitized:
-            for filter in self._text_filters:
-                if filter.filter_before_aggregation:
-                    text = await filter.filter_stream(text)
+        try:
+            if not text_is_sanitized:
+                for filter in self._text_filters:
+                    if filter.filter_before_aggregation:
+                        text = await filter.filter_stream(text)
+        except Exception as e:
+            await self._report_text_filter_error(e)
+            return
         async for aggregate in self._text_aggregator.aggregate(text):
             if aggregate.type != TextType.TOKEN:
                 # Stop the aggregation metric on the first sentence only.
@@ -1706,26 +1722,30 @@ class TTSService(AIService):
         whole: bool = False,
     ):
         """Filter speech and context together, then synthesize or pass skipped text on."""
-        if src_frame.text_type not in self._skip_text_types:
-            text = src_frame.text
-            for filter in self._text_filters:
-                if filter.filter_before_aggregation:
-                    if text_is_sanitized:
-                        continue
-                    if self._receiving_llm_response and not whole:
-                        text = await filter.filter_stream(text)
-                        src_frame.raw_text = text
+        try:
+            if src_frame.text_type not in self._skip_text_types:
+                text = src_frame.text
+                for filter in self._text_filters:
+                    if filter.filter_before_aggregation:
+                        if text_is_sanitized:
+                            continue
+                        if self._receiving_llm_response and not whole:
+                            text = await filter.filter_stream(text)
+                            src_frame.raw_text = text
+                        else:
+                            await filter.reset_interruption()
+                            text = await filter.filter(text)
+                            if src_frame.raw_text:
+                                src_frame.raw_text = await filter.filter(src_frame.raw_text)
                     else:
                         await filter.reset_interruption()
                         text = await filter.filter(text)
-                        if src_frame.raw_text:
-                            src_frame.raw_text = await filter.filter(src_frame.raw_text)
-                else:
-                    await filter.reset_interruption()
-                    text = await filter.filter(text)
-            if text != src_frame.text:
-                src_frame.text = text
-                src_frame.raw_text = text
+                if text != src_frame.text:
+                    src_frame.text = text
+                    src_frame.raw_text = text
+        except Exception as e:
+            await self._report_text_filter_error(e)
+            return
         context_id = context_id or self.create_context_id()
         if src_frame.text_type in self._skip_text_types:
             await self._push_skipped_text(src_frame, context_id)

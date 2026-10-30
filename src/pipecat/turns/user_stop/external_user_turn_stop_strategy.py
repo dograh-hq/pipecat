@@ -86,7 +86,6 @@ class ExternalUserTurnStopStrategy(BaseUserTurnStopStrategy):
         # Whether this strategy decided since the user last spoke or new text
         # arrived. The controller clears the decisions on speech, so it decides
         # again after that, but never repeats a decision that still counts.
-        self._external_stop_received = False
         self._decided = False
         self._transcript_task: asyncio.Task | None = None
 

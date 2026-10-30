@@ -1,5 +1,7 @@
 """Response-scoped filters cover upstream aggregation and independent speech."""
 
+from unittest.mock import AsyncMock
+
 import pytest
 
 from pipecat.frames.frames import (
@@ -18,6 +20,7 @@ from pipecat.processors.aggregators.llm_response_universal import LLMAssistantAg
 from pipecat.processors.frame_processor import FrameProcessor
 from pipecat.services.tts_service import TTSService, TTSSettings
 from pipecat.tests.utils import SleepFrame, run_test
+from pipecat.utils.errors import ErrorCategory
 from pipecat.utils.text.base_text_aggregator import AggregationType
 from pipecat.utils.text.base_text_filter import BaseTextFilter
 from pipecat.utils.text.spoken_text_filter import SpokenTextFilter
@@ -152,3 +155,64 @@ async def test_new_response_and_independent_speech_reset_custom_filter_interrupt
         expected_down_frames=None,
     )
     assert normalized(" ".join(tts.requests)) == "First reply. Second reply. Announcement."
+
+
+class FailingFilter(BaseTextFilter):
+    def __init__(self, *, before_aggregation):
+        self.filter_before_aggregation = before_aggregation
+
+    async def filter(self, text):
+        raise ValueError("filter failed")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["stream", "aggregated", "independent"])
+async def test_filter_failures_remain_application_errors_without_synthesis(path):
+    tts = OfflineTTS(text_filter=FailingFilter(before_aggregation=path != "aggregated"))
+    tts.push_error = AsyncMock()
+    if path == "stream":
+        await tts._handle_text(LLMTextFrame("Private text."))
+    else:
+        await tts._handle_aggregated_text(
+            AggregatedTextFrame("Private text.", AggregationType.SENTENCE),
+            whole=path == "independent",
+        )
+
+    assert tts.requests == []
+    tts.push_error.assert_awaited_once()
+    assert tts.push_error.await_args.kwargs["category"] == ErrorCategory.APPLICATION
+    assert isinstance(tts.push_error.await_args.kwargs["exception"], ValueError)
+
+
+@pytest.mark.asyncio
+async def test_failed_filter_flush_reports_error_and_still_finishes_response():
+    class FailedFlushFilter(BaseTextFilter):
+        filter_before_aggregation = True
+
+        async def filter(self, text):
+            return ""
+
+        async def flush(self):
+            raise ValueError("flush failed")
+
+    tts = OfflineTTS(text_filter=FailedFlushFilter())
+    errors = []
+
+    @tts.event_handler("on_error")
+    async def on_error(_service, frame):
+        errors.append(frame)
+
+    down, _ = await run_test(
+        tts,
+        frames_to_send=[
+            LLMFullResponseStartFrame(),
+            LLMTextFrame("Private text."),
+            LLMFullResponseEndFrame(),
+        ],
+        expected_down_frames=None,
+    )
+
+    assert tts.requests == []
+    assert errors
+    assert all(error.category == ErrorCategory.APPLICATION for error in errors)
+    assert any(isinstance(frame, LLMFullResponseEndFrame) for frame in down)

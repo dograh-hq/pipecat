@@ -155,7 +155,9 @@ class TelnyxFrameSerializer(FrameSerializer):
         """
         if isinstance(frame, (EndFrame, CancelFrame)):
             frame_reason = getattr(frame, "reason", None)
-            if frame_reason == EndTaskReason.TRANSFER_CALL.value and not self._transfer_attempted:
+            if frame_reason == EndTaskReason.TRANSFER_CALL.value:
+                if self._transfer_attempted:
+                    return None
                 self._transfer_attempted = True
                 if self._transfer_strategy:
                     context = {

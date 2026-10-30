@@ -857,7 +857,7 @@ class GeminiLiveLLMService(LLMService[GeminiLiveLLMAdapter]):
         # tool's final result back to the provider, since the async-tool
         # message in the context only carries the id.
         self._tool_call_id_to_name: dict[str, str] = {}
-        # tool_call_id -> (tool_name, tool_result_message). Results are queued
+        # tool_call_id -> (tool_name, result, is_final, spoken). Results are queued
         # here when the context updates while a reconnect is still in flight,
         # then replayed once the session is ready again.
         self._pending_tool_results: dict[str, tuple[str, dict[str, Any], bool, bool]] = {}

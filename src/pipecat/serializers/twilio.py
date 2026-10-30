@@ -218,7 +218,9 @@ class TwilioFrameSerializer(FrameSerializer):
             frame_reason = getattr(frame, "reason", None)
             logger.debug(f"Processing {type(frame).__name__} with reason: {frame_reason}")
 
-            if frame_reason == EndTaskReason.TRANSFER_CALL.value and not self._transfer_attempted:
+            if frame_reason == EndTaskReason.TRANSFER_CALL.value:
+                if self._transfer_attempted:
+                    return None
                 self._transfer_attempted = True
                 if self._transfer_strategy:
                     context = {
