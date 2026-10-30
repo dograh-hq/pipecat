@@ -42,6 +42,12 @@ CALLER_HEADERS = {
     "Speechify-Caller-Version": pipecat_version(),
 }
 
+# Pinned so behavior doesn't depend on the workspace default; `pcm_16000` is 16 kHz from here on.
+SPEECHIFY_API_VERSION = "2026-09-30"
+
+# PCM rates Speechify can synthesize, as the `pcm_<rate>` output formats.
+SPEECHIFY_PCM_SAMPLE_RATES = (8000, 16000, 22050, 24000, 44100, 48000)
+
 SPEECHIFY_DEFAULT_SAMPLE_RATE = 24000
 
 
@@ -67,25 +73,23 @@ def language_to_speechify_language(language: Language) -> str | None:
 
 
 def _output_format_from_sample_rate(sample_rate: int) -> tuple[str, int]:
-    """Return Speechify's reliable native PCM format and sample rate.
+    """Pick the Speechify PCM output format for a sample rate.
 
     Args:
-        sample_rate: The downstream desired sample rate in Hz.
+        sample_rate: The desired audio sample rate in Hz.
 
     Returns:
-        Tuple of (output_format, sample_rate) for Speechify's native 24 kHz PCM.
-
-    Speechify returns 24 kHz PCM from the timestamped streaming endpoint even when
-    ``pcm_16000`` is requested and the response header says 16 kHz. Using the native
-    rate explicitly keeps frame metadata truthful; Pipecat's output transport performs
-    any required resampling to the downstream transport rate.
+        Tuple of (output_format, sample_rate), where the returned sample rate is the one
+        Speechify will actually synthesize at. It differs from the requested rate when
+        Speechify has no matching PCM format (e.g. 32000 Hz), so callers must stamp the
+        returned rate onto their audio frames and let the output transport resample.
     """
-    if sample_rate != SPEECHIFY_DEFAULT_SAMPLE_RATE:
-        logger.debug(
-            "Speechify synthesizes timestamped PCM at {} Hz; Pipecat will resample to {} Hz",
-            SPEECHIFY_DEFAULT_SAMPLE_RATE,
-            sample_rate,
-        )
+    if sample_rate in SPEECHIFY_PCM_SAMPLE_RATES:
+        return f"pcm_{sample_rate}", sample_rate
+    logger.warning(
+        f"Speechify has no PCM output format for {sample_rate} Hz, "
+        f"synthesizing at {SPEECHIFY_DEFAULT_SAMPLE_RATE} Hz instead"
+    )
     return f"pcm_{SPEECHIFY_DEFAULT_SAMPLE_RATE}", SPEECHIFY_DEFAULT_SAMPLE_RATE
 
 
@@ -253,20 +257,43 @@ class SpeechifyTTSSettings(TTSSettings):
             Adds latency.
         text_normalization: Whether to spell out numbers, dates and similar tokens
             before synthesis. Adds latency.
+        safety_identifier: Stable, opaque identifier for the end user a request is
+            synthesized for, so Speechify can rate-limit or block that user instead of
+            the whole workspace. 1 to 64 characters of letters, digits and
+            ``. _ - : | + / =`` — a keyed hash of an internal user id, never personal
+            data such as an email address, which Speechify rejects.
+        pronunciations: How specific words in the text should be spoken, up to 200
+            entries. Each entry gives the ``text`` to match and exactly one of ``ipa``
+            (phones from the model's set, for a single word) or ``alias`` (replacement
+            text), plus an optional ``case_sensitive``::
+
+                [{"text": "Pipecat", "ipa": "p ˈaɪ p k æ t"},
+                 {"text": "TTS", "alias": "text to speech"}]
+
+            Speechify applies these on ``simba-3.5`` in every language it lists under
+            ``pronunciation_languages`` in ``GET /v1/audio/models``, which excludes
+            English; any other model or language returns ``pronunciations_unsupported``.
     """
 
     loudness_normalization: bool | None | NotGiven = field(default_factory=lambda: NOT_GIVEN)
     text_normalization: bool | None | NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    safety_identifier: str | None | NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    pronunciations: list[dict[str, Any]] | None | NotGiven = field(
+        default_factory=lambda: NOT_GIVEN
+    )
 
 
 class SpeechifyHttpTTSService(TTSService):
     """Speechify HTTP-based TTS service with word timestamps.
 
     Streams PCM audio and word-level speech marks over Server-Sent Events from
-    Speechify's ``/v1/audio/stream/with-timestamps`` endpoint. Speech marks are only
-    produced by the streaming-native models, ``simba-3.2`` (English) and ``simba-3.0``
-    (multilingual); the legacy ``simba-english`` and ``simba-multilingual`` models are
-    rejected by this endpoint.
+    Speechify's ``/v1/audio/stream/with-timestamps`` endpoint. Defaults to ``simba-3.5``,
+    which covers 48 languages, English included, under one model id.
+
+    Requests pin Speechify's API version to :data:`SPEECHIFY_API_VERSION` rather than
+    letting the workspace default decide it. The legacy ``simba-english`` and
+    ``simba-multilingual`` models are retired at that version and return a
+    ``model_retired`` error.
     """
 
     Settings = SpeechifyTTSSettings
@@ -295,11 +322,13 @@ class SpeechifyHttpTTSService(TTSService):
             **kwargs: Additional arguments passed to the parent service.
         """
         default_settings = self.Settings(
-            model="simba-3.2",
+            model="simba-3.5",
             voice="geffen_32",
             language=None,
             loudness_normalization=None,
             text_normalization=None,
+            safety_identifier=None,
+            pronunciations=None,
         )
         if settings is not None:
             default_settings.apply_update(settings)
@@ -319,6 +348,7 @@ class SpeechifyHttpTTSService(TTSService):
         self._headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
+            "Speechify-Version": SPEECHIFY_API_VERSION,
             **CALLER_HEADERS,
         }
 
@@ -398,6 +428,14 @@ class SpeechifyHttpTTSService(TTSService):
         language = assert_given(self._settings.language)
         if language:
             payload["language"] = language
+
+        safety_identifier = assert_given(self._settings.safety_identifier)
+        if safety_identifier:
+            payload["safety_identifier"] = safety_identifier
+
+        pronunciations = assert_given(self._settings.pronunciations)
+        if pronunciations:
+            payload["pronunciations"] = pronunciations
 
         options: dict[str, Any] = {}
         loudness_normalization = assert_given(self._settings.loudness_normalization)

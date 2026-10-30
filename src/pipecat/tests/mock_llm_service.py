@@ -123,7 +123,7 @@ class MockLLMService(OpenAILLMService):
             f"{self}: Generating chat from context (mock) {adapter.get_messages_for_logging(context)}"
         )
 
-        params_from_context: OpenAILLMInvocationParams = adapter.get_llm_invocation_params(
+        params_from_context: OpenAILLMInvocationParams = await adapter.get_llm_invocation_params(
             context,
             system_instruction=assert_given(self._settings.system_instruction),
             convert_developer_to_user=not self.supports_developer_role,

@@ -8,7 +8,7 @@
 
 import asyncio
 import json
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from urllib.parse import parse_qs
 
 import pytest
@@ -271,6 +271,33 @@ async def test_flux_disconnect_discards_configure_state_from_old_connection():
     assert service._configure_in_flight is False
     assert service._configure_sent_at is None
     assert service._configure_pending_fields is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("disconnecting", [False, True])
+async def test_flux_closed_connection_finishes_partial_turn_unless_stopping(disconnecting):
+    service = DograhFluxSTTService(api_key="test-key")
+    service._websocket = MagicMock()
+    service._websocket.__aiter__.return_value = []
+    service._disconnecting = disconnecting
+    service._user_is_speaking = True
+    service._turn_transcript = "I would like"
+    service.push_frame = AsyncMock()
+    service.broadcast_frame = AsyncMock()
+    service.emit_stt_usage_metrics = AsyncMock()
+
+    await service._receive_messages()
+
+    if disconnecting:
+        service.push_frame.assert_not_awaited()
+        service.broadcast_frame.assert_not_awaited()
+    else:
+        frame = service.push_frame.await_args.args[0]
+        assert isinstance(frame, TranscriptionFrame)
+        assert frame.text == "I would like"
+        assert frame.finalized is False
+        service.broadcast_frame.assert_awaited_once_with(ProposedUserStoppedSpeakingFrame)
+        assert not service._user_is_speaking
 
 
 @pytest.mark.asyncio

@@ -29,6 +29,8 @@ from loguru import logger
 from pydantic import BaseModel
 from websockets.protocol import State
 
+from pipecat.adapters.tts.base_expression_adapter import BaseExpressionAdapter
+from pipecat.adapters.tts.services.minimax_adapter import MiniMaxExpressionAdapter
 from pipecat.frames.frames import (
     ErrorFrame,
     Frame,
@@ -125,7 +127,8 @@ class MiniMaxTTSSettings(TTSSettings):
         volume: Speech volume (range: 0 to 10).
         pitch: Pitch adjustment (range: -12 to 12).
         emotion: Emotional tone (options: "happy", "sad", "angry", "fearful",
-            "disgusted", "surprised", "calm", "fluent").
+            "disgusted", "surprised", "calm", "fluent", "whisper"). "fluent" and
+            "whisper" need a speech-2.6 model.
         text_normalization: Enable text normalization (Chinese/English).
         latex_read: Enable LaTeX formula reading.
         language_boost: Language boost string for multilingual support.
@@ -338,7 +341,8 @@ class MiniMaxHttpTTSService(TTSService):
             volume: Speech volume (range: 0 to 10).
             pitch: Pitch adjustment (range: -12 to 12).
             emotion: Emotional tone (options: "happy", "sad", "angry", "fearful",
-                "disgusted", "surprised", "calm", "fluent").
+                "disgusted", "surprised", "calm", "fluent", "whisper"). "fluent" and
+                "whisper" need a speech-2.6 model.
             text_normalization: Enable text normalization (Chinese/English).
             latex_read: Enable LaTeX formula reading.
             exclude_aggregated_audio: Whether to exclude aggregated audio in final chunk.
@@ -454,8 +458,10 @@ class MiniMaxHttpTTSService(TTSService):
                         "fearful",
                         "disgusted",
                         "surprised",
+                        "calm",
                         "neutral",
                         "fluent",
+                        "whisper",
                     ]
                     if params.emotion in supported_emotions:
                         default_settings.emotion = params.emotion
@@ -492,6 +498,19 @@ class MiniMaxHttpTTSService(TTSService):
         self._audio_format = "pcm"
         self._audio_channel = 1
         self._audio_sample_rate = 0  # Set in start()
+
+        self._speech_28_expression_adapter = MiniMaxExpressionAdapter()
+
+    def get_expression_adapter(self) -> BaseExpressionAdapter:
+        """The adapter for the model: speech-2.8 models perform expression, others none.
+
+        Returns:
+            The expression adapter for the current model.
+        """
+        model = self._settings.model
+        if isinstance(model, str) and model.startswith("speech-2.8"):
+            return self._speech_28_expression_adapter
+        return super().get_expression_adapter()
 
     def can_generate_metrics(self) -> bool:
         """Check if this service can generate processing metrics.
@@ -533,6 +552,9 @@ class MiniMaxHttpTTSService(TTSService):
         }
         if self._settings.emotion is not None:
             voice_setting["emotion"] = self._settings.emotion
+        # In expressive conversation, the request's delivery chooses its emotion and
+        # its speed.
+        voice_setting.update(self.expression_settings)
         if self._settings.text_normalization is not None:
             voice_setting["text_normalization"] = self._settings.text_normalization
         if self._settings.latex_read is not None:

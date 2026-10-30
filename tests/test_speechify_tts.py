@@ -197,11 +197,14 @@ class TestSSEParsing:
 
 
 class TestOutputFormat:
-    """Speechify audio uses its reliable native PCM rate."""
+    """The pinned Speechify API supports every documented PCM rate."""
 
-    @pytest.mark.parametrize("sample_rate", [8000, 16000, 22050, 24000, 32000, 44100, 48000])
-    def test_native_24khz_is_used_for_every_downstream_rate(self, sample_rate):
-        assert _output_format_from_sample_rate(sample_rate) == ("pcm_24000", 24000)
+    @pytest.mark.parametrize("sample_rate", [8000, 16000, 22050, 24000, 44100, 48000])
+    def test_documented_sample_rates_are_preserved(self, sample_rate):
+        assert _output_format_from_sample_rate(sample_rate) == (f"pcm_{sample_rate}", sample_rate)
+
+    def test_unsupported_rate_uses_native_24khz(self):
+        assert _output_format_from_sample_rate(32000) == ("pcm_24000", 24000)
 
 
 class TestLanguageMapping:

@@ -316,27 +316,32 @@ class DograhFluxSTTService(DeepgramFluxSTTBase, WebsocketService):
         base. The Dograh proxy injects its own control messages with a
         lowercase ``"error"`` type for billing/quota conditions, handled here.
         """
-        async for message in self._get_websocket():
-            if not isinstance(message, str):
-                logger.warning(f"Received non-string message: {type(message)}")
-                continue
+        try:
+            async for message in self._get_websocket():
+                if not isinstance(message, str):
+                    logger.warning(f"Received non-string message: {type(message)}")
+                    continue
 
-            try:
-                data = json.loads(message)
-            except json.JSONDecodeError as e:
-                logger.error(f"Failed to decode JSON message: {e}")
-                continue
+                try:
+                    data = json.loads(message)
+                except json.JSONDecodeError as e:
+                    logger.error(f"Failed to decode JSON message: {e}")
+                    continue
 
-            if data.get("type") == "error":
-                await self._handle_proxy_error(data)
-                continue
+                if data.get("type") == "error":
+                    await self._handle_proxy_error(data)
+                    continue
 
-            try:
-                await self._handle_message(data)
-            except Exception as e:
-                await self.push_error(error_msg=f"Unknown error occurred: {e}", exception=e)
-                # Surfaced + stopped by _receive_task_handler (reconnect disabled).
-                raise
+                try:
+                    await self._handle_message(data)
+                except Exception as e:
+                    await self.push_error(error_msg=f"Unknown error occurred: {e}", exception=e)
+                    # Surfaced + stopped by _receive_task_handler (reconnect disabled).
+                    raise
+        finally:
+            # A replacement connection cannot finish the previous user turn.
+            if not self._disconnecting:
+                await self._end_turn_cut_short()
 
     async def _handle_proxy_error(self, data: dict):
         """Handle a Dograh proxy control error (e.g. quota exceeded)."""
