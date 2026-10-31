@@ -30,10 +30,6 @@ class BaseTextFilter(ABC):
     Subclasses must implement all abstract methods to define specific filtering
     behavior, settings management, and interruption handling logic.
 
-    Set ``filter_before_aggregation`` for sanitizers that buffer lexical or
-    structured fragments. TTS feeds those through ``filter_stream``, flushes
-    them at response end, and resets them on response start or interruption.
-    Independent utterances use ``filter`` without consuming the response buffer.
     .. deprecated:: 1.14.0
         Use a :data:`~pipecat.utils.text.transforms.TextTransform` instead: an async
         ``(text, text_type) -> text`` callable registered with ``text_transforms`` on
@@ -41,16 +37,6 @@ class BaseTextFilter(ABC):
         :class:`~pipecat.processors.aggregators.llm_text_processor.LLMTextProcessor`
         to rewrite what everything downstream sees. Will be removed in 2.0.0.
     """
-
-    filter_before_aggregation: bool = False
-
-    async def filter_stream(self, text: str) -> str:
-        """Filter a response chunk when filtering before text aggregation."""
-        return await self.filter(text)
-
-    async def flush(self) -> str:
-        """Release pending pre-aggregation text at the end of a response."""
-        return ""
 
     async def update_settings(self, settings: Mapping[str, Any]):
         """Update the filter's configuration settings.

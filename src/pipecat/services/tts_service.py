@@ -382,7 +382,6 @@ class TTSService(AIService):
                 stacklevel=2,
             )
         self._text_filters: Sequence[BaseTextFilter] = text_filters or []
-        self._receiving_llm_response = False
         self._transport_destination: str | None = transport_destination
 
         # Ordered sequence of every AggregatedTextFrame slot that passes through
@@ -1383,11 +1382,6 @@ class TTSService(AIService):
 
     async def _handle_llm_response_start(self, frame: LLMFullResponseStartFrame):
         """Start a turn whose sentences share one context ID."""
-        for filter in self._text_filters:
-            if filter.filter_before_aggregation:
-                await filter.handle_interruption()
-                await filter.reset_interruption()
-        self._receiving_llm_response = True
         self._turn_context_id = self.create_context_id()
         await self.on_turn_context_created(self._turn_context_id)
         # Queue behind the audio contexts so this frame is emitted only
@@ -1401,25 +1395,12 @@ class TTSService(AIService):
         self, frame: LLMFullResponseEndFrame | EndFrame, direction: FrameDirection
     ):
         """Speak the turn's remaining text and complete the turn."""
-        self._receiving_llm_response = False
-        tail = ""
-        try:
-            for filter in self._text_filters:
-                if filter.filter_before_aggregation:
-                    tail = await filter.filter_stream(tail) + await filter.flush()
-        except Exception as e:
-            await self._report_text_filter_error(e)
-            tail = ""
-        if tail:
-            await self._handle_text(TextFrame(tail), text_is_sanitized=True)
         # Flush any remaining text (including text waiting for lookahead)
         remaining = await self._text_aggregator.flush()
         # Stop the aggregation metric (no-op if already stopped on first sentence).
         await self.stop_text_aggregation_metrics()
         if remaining:
-            await self._handle_aggregated_text(
-                self._aggregated_text_frame(remaining), text_is_sanitized=True
-            )
+            await self._handle_aggregated_text(self._aggregated_text_frame(remaining))
         if self._expression_formatter:
             self._expression_formatter.reset()
 
@@ -1505,10 +1486,10 @@ class TTSService(AIService):
         if self._expression_formatter and frame.text_type in _EXPRESSIVE_TEXT_TYPES:
             # Text of its own, apart from any response it is spoken in the middle of.
             self._expression_formatter.restate_delivery()
-            await self._handle_aggregated_text(text_frame, speak_context_id, whole=True)
+            await self._speak_expression(text_frame, speak_context_id, whole=True)
             self._expression_formatter.restate_delivery()
         else:
-            await self._handle_aggregated_text(text_frame, speak_context_id, whole=True)
+            await self._handle_aggregated_text(text_frame, speak_context_id)
         # Force-promote the utterance's pending sentence into a real slot (streaming
         # mode only; a no-op otherwise). A TTSSpeakFrame is a self-contained sentence
         # with no following token to confirm its boundary, so without this it would
@@ -1547,7 +1528,6 @@ class TTSService(AIService):
 
     async def _handle_interruption(self, frame: InterruptionFrame, direction: FrameDirection):
         """Reset the turn and drop interruptible audio contexts."""
-        self._receiving_llm_response = False
         self._sent_non_whitespace_in_context = False
         self._streamed_text = ""
         self._text_aggregation_metrics_started = False
@@ -1679,32 +1659,13 @@ class TTSService(AIService):
         """Whether the service is streaming tokens directly without sentence aggregation."""
         return self._text_aggregation_mode == TextAggregationMode.TOKEN
 
-    async def _report_text_filter_error(self, exception: Exception):
-        """Report application filtering failures without speaking unfiltered text."""
-        await self.push_error(
-            error_msg=f"Error filtering text for TTS: {exception}",
-            exception=exception,
-            category=ErrorCategory.APPLICATION,
-        )
-
-    async def _handle_text(self, frame: TextFrame, *, text_is_sanitized: bool = False):
-        """Sanitize streamed text before sentence boundaries are detected."""
-        text = frame.text
-        try:
-            if not text_is_sanitized:
-                for filter in self._text_filters:
-                    if filter.filter_before_aggregation:
-                        text = await filter.filter_stream(text)
-        except Exception as e:
-            await self._report_text_filter_error(e)
-            return
-        async for aggregate in self._text_aggregator.aggregate(text):
+    async def _handle_text(self, frame: TextFrame):
+        """Aggregate LLM text and speak each aggregation."""
+        async for aggregate in self._text_aggregator.aggregate(frame.text):
             if aggregate.type != TextType.TOKEN:
                 # Stop the aggregation metric on the first sentence only.
                 await self.stop_text_aggregation_metrics()
-            await self._handle_aggregated_text(
-                self._aggregated_text_frame(aggregate), text_is_sanitized=True
-            )
+            await self._handle_aggregated_text(self._aggregated_text_frame(aggregate))
 
     def _aggregated_text_frame(self, aggregation: Aggregation) -> AggregatedTextFrame:
         """Build the frame for an aggregation, keeping a pattern's delimiters in its raw text."""
@@ -1714,43 +1675,14 @@ class TTSService(AIService):
         return AggregatedTextFrame(aggregation.text, aggregation.type, raw_text=raw_text)
 
     async def _handle_aggregated_text(
-        self,
-        src_frame: AggregatedTextFrame,
-        context_id: str | None = None,
-        *,
-        text_is_sanitized: bool = False,
-        whole: bool = False,
+        self, src_frame: AggregatedTextFrame, context_id: str | None = None
     ):
-        """Filter speech and context together, then synthesize or pass skipped text on."""
-        try:
-            if src_frame.text_type not in self._skip_text_types:
-                text = src_frame.text
-                for filter in self._text_filters:
-                    if filter.filter_before_aggregation:
-                        if text_is_sanitized:
-                            continue
-                        if self._receiving_llm_response and not whole:
-                            text = await filter.filter_stream(text)
-                            src_frame.raw_text = text
-                        else:
-                            await filter.reset_interruption()
-                            text = await filter.filter(text)
-                            if src_frame.raw_text:
-                                src_frame.raw_text = await filter.filter(src_frame.raw_text)
-                    else:
-                        await filter.reset_interruption()
-                        text = await filter.filter(text)
-                if text != src_frame.text:
-                    src_frame.text = text
-                    src_frame.raw_text = text
-        except Exception as e:
-            await self._report_text_filter_error(e)
-            return
+        """Speak aggregated text in ``context_id`` or a new context, or push it on if skipped."""
         context_id = context_id or self.create_context_id()
         if src_frame.text_type in self._skip_text_types:
             await self._push_skipped_text(src_frame, context_id)
         elif self._expression_formatter and src_frame.text_type in _EXPRESSIVE_TEXT_TYPES:
-            await self._speak_expression(src_frame, context_id, whole=whole)
+            await self._speak_expression(src_frame, context_id)
         elif (text := self._trim_text(src_frame.text)) is not None:
             await self._speak_text(src_frame, text, context_id)
 
@@ -1879,8 +1811,9 @@ class TTSService(AIService):
     async def _transform_text(self, text: str, text_type: str) -> str | None:
         """Turn text to speak into the text sent to the TTS.
 
-        Pronunciation transforms affect synthesis only. Text filters run before
-        this step so removed content is also excluded from the context.
+        Filters and transforms only affect the text sent to the TTS, for
+        TTS-specific purposes (e.g. inserting tags for spelling or emotion, or
+        replacing an @ with "at"). The context keeps the text as it arrived.
 
         Returns:
             The text to synthesize, or None if nothing is left to say or a
@@ -1888,6 +1821,9 @@ class TTSService(AIService):
         """
         transformed_text = text
         try:
+            for filter in self._text_filters:
+                await filter.reset_interruption()
+                transformed_text = await filter.filter(transformed_text)
             for transform_type, transform in self._text_transforms:
                 if transform_type in (text_type, "*") and (
                     not isinstance(transform, PronunciationTransform)
