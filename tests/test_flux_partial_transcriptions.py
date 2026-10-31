@@ -33,7 +33,7 @@ async def test_start_and_updates_emit_partials_before_the_single_final(service_t
     service.emit_stt_usage_metrics = AsyncMock()
 
     await service._handle_start_of_turn("Hello")
-    await service._handle_update("Hello there")
+    await service._handle_update("Hello there", {"words": []})
     await service._handle_end_of_turn("Hello there.", {"words": []})
 
     assert [type(frame) for frame in frames] == [
@@ -59,5 +59,5 @@ async def test_empty_updates_do_not_create_transcription_frames():
     service.broadcast_frame = AsyncMock()
     service._call_event_handler = AsyncMock()
     await service._handle_start_of_turn("")
-    await service._handle_update("")
+    await service._handle_update("", {"words": []})
     service.push_frame.assert_not_awaited()

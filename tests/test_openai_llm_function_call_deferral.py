@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from pipecat.frames.frames import BotStoppedSpeakingFrame, EagerEndOfTurnCancelFrame
+from pipecat.frames.frames import BotStoppedSpeakingFrame, UserTurnResponseCancelFrame
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.llm_service import FunctionCallFromLLM
@@ -46,7 +46,7 @@ async def test_speculative_transition_is_cancelled_without_waiting_for_playback(
         text_generated=True,
     )
 
-    service.broadcast_frame.assert_awaited_once_with(EagerEndOfTurnCancelFrame)
+    service.broadcast_frame.assert_awaited_once_with(UserTurnResponseCancelFrame)
     assert service._pending_node_transition_function_calls == []
     await service.process_frame(BotStoppedSpeakingFrame(), FrameDirection.UPSTREAM)
     handler.assert_not_awaited()

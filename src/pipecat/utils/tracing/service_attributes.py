@@ -14,7 +14,7 @@ where applicable and Pipecat-specific conventions for additional context.
 import json
 from typing import TYPE_CHECKING, Any
 
-from pipecat.adapters.schemas.tools_schema import AdapterType, ToolsSchema
+from pipecat.adapters.llm.schemas.tools_schema import AdapterType, ToolsSchema
 
 # Import for type checking only
 if TYPE_CHECKING:

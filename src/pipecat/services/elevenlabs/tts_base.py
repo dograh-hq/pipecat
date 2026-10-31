@@ -154,102 +154,21 @@ ELEVENLABS_V3_LANGUAGES: frozenset[str] = frozenset(
     }
 )
 
-#: Languages supported by Eleven v4 and v4 Turbo.
-#: https://elevenlabs.io/docs/overview/models#eleven-v4
-ELEVENLABS_V4_LANGUAGES: frozenset[str] = frozenset(
+#: Languages the Eleven v4 models accept as a ``language_code``. A superset of
+#: :data:`ELEVENLABS_V3_LANGUAGES`. This is the set the API accepts, which
+#: differs from the list ElevenLabs publishes for the models.
+ELEVENLABS_V4_LANGUAGES: frozenset[str] = ELEVENLABS_V3_LANGUAGES | frozenset(
     {
-        "af",
-        "am",
-        "ar",
-        "as",
         "ast",
-        "az",
-        "be",
-        "bg",
-        "bn",
-        "bs",
-        "ca",
-        "ceb",
-        "ckb",
-        "cs",
-        "cy",
-        "da",
-        "de",
-        "el",
-        "en",
-        "es",
-        "et",
-        "fa",
-        "ff",
-        "fi",
-        "fil",
-        "fr",
-        "gl",
-        "gu",
-        "ha",
-        "he",
-        "hi",
-        "hr",
-        "hu",
-        "hy",
-        "id",
-        "is",
-        "it",
-        "ja",
-        "jv",
-        "ka",
-        "kam",
-        "kk",
-        "kn",
-        "ko",
-        "ky",
-        "lb",
-        "lg",
-        "ln",
-        "lo",
-        "lt",
-        "lv",
         "mi",
-        "mk",
-        "ml",
         "mn",
-        "mr",
-        "ms",
         "mt",
         "my",
-        "nb",
-        "ne",
-        "nl",
-        "no",
         "oc",
         "or",
-        "pa",
-        "pl",
-        "ps",
-        "pt",
-        "ro",
-        "ru",
-        "sd",
-        "sk",
-        "sl",
-        "sn",
-        "so",
-        "sr",
-        "sv",
-        "sw",
-        "ta",
-        "te",
         "tg",
-        "th",
-        "tr",
-        "uk",
-        "ur",
         "uz",
-        "vi",
-        "wo",
         "yue",
-        "zh",
-        "zu",
     }
 )
 
@@ -319,7 +238,6 @@ def language_to_elevenlabs_language(language: Language) -> str:
     """
     LANGUAGE_MAP = {
         Language.AF: "af",
-        Language.AM: "am",
         Language.AR: "ar",
         Language.AS: "as",
         Language.AST: "ast",
@@ -330,8 +248,6 @@ def language_to_elevenlabs_language(language: Language) -> str:
         Language.BS: "bs",
         Language.CA: "ca",
         Language.CEB: "ceb",
-        Language.CKB: "ckb",
-        Language.CMN: "zh",
         Language.CS: "cs",
         Language.CY: "cy",
         Language.DA: "da",
@@ -341,7 +257,6 @@ def language_to_elevenlabs_language(language: Language) -> str:
         Language.ES: "es",
         Language.ET: "et",
         Language.FA: "fa",
-        Language.FF: "ff",
         Language.FI: "fi",
         Language.FIL: "fil",
         Language.FR: "fr",
@@ -365,9 +280,7 @@ def language_to_elevenlabs_language(language: Language) -> str:
         Language.KO: "ko",
         Language.KY: "ky",
         Language.LB: "lb",
-        Language.LG: "lg",
         Language.LN: "ln",
-        Language.LO: "lo",
         Language.LT: "lt",
         Language.LV: "lv",
         Language.MI: "mi",
@@ -378,7 +291,6 @@ def language_to_elevenlabs_language(language: Language) -> str:
         Language.MS: "ms",
         Language.MT: "mt",
         Language.MY: "my",
-        Language.NB: "nb",
         Language.NE: "ne",
         Language.NL: "nl",
         Language.NO: "no",
@@ -394,7 +306,6 @@ def language_to_elevenlabs_language(language: Language) -> str:
         Language.SD: "sd",
         Language.SK: "sk",
         Language.SL: "sl",
-        Language.SN: "sn",
         Language.SO: "so",
         Language.SR: "sr",
         Language.SV: "sv",
@@ -408,10 +319,8 @@ def language_to_elevenlabs_language(language: Language) -> str:
         Language.UR: "ur",
         Language.UZ: "uz",
         Language.VI: "vi",
-        Language.WO: "wo",
         Language.YUE: "yue",
         Language.ZH: "zh",
-        Language.ZU: "zu",
     }
 
     return resolve_language(language, LANGUAGE_MAP, use_base_code=True)
@@ -448,9 +357,9 @@ def output_format_from_sample_rate(sample_rate: int) -> str:
 
 
 def _is_chinese_or_japanese_language(language: str) -> bool:
-    """Check if the given language is Chinese or Japanese."""
+    """Check if the given language is Chinese (including Cantonese) or Japanese."""
     base_lang = language.split("-")[0].lower()
-    return base_lang in {"zh", "ja"}
+    return base_lang in {"zh", "yue", "ja"}
 
 
 def _word_timestamps_include_inter_frame_spaces(language: str | None) -> bool:
@@ -496,6 +405,11 @@ def _select_alignment(
     return msg.get(alignment_key) or msg.get(normalized_key)
 
 
+def _ends_in_audio_tag(word: str) -> bool:
+    """Whether a word ends inside a bracketed audio tag, as one cut off between chunks does."""
+    return word.rfind("[") > word.rfind("]")
+
+
 def _strip_utterance_leading_spaces(
     alignment: Mapping[str, Any], keys: tuple[str, str, str], should_strip: bool
 ) -> Mapping[str, Any]:
@@ -536,6 +450,8 @@ def calculate_word_times(
     cumulative_time: float,
     partial_word: str = "",
     partial_word_start_time: float = 0.0,
+    *,
+    audio_tags: bool = False,
 ) -> tuple[list[tuple[str, float]], str, float]:
     """Calculate word timestamps from character alignment information.
 
@@ -544,6 +460,10 @@ def calculate_word_times(
         cumulative_time: Base time offset for this chunk.
         partial_word: Partial word carried over from previous chunk.
         partial_word_start_time: Start time of the partial word.
+        audio_tags: Whether a bracketed audio tag, such as ``[short pause]``,
+            is one word, spaces and all. Eleven v3 and v4 return the tags they
+            perform in the alignment, and a tag reported whole matches the text
+            it was sent in.
 
     Returns:
         Tuple of (word_times, new_partial_word, new_partial_word_start_time):
@@ -565,9 +485,12 @@ def calculate_word_times(
     word_start_times = []
     current_word = partial_word  # Start with any partial word from previous chunk
     word_start_time = partial_word_start_time if partial_word else None
+    in_tag = audio_tags and _ends_in_audio_tag(current_word)
 
     for i, char in enumerate(chars):
-        if char == " ":
+        if audio_tags and char in "[]":
+            in_tag = char == "["
+        if char == " " and not in_tag:
             # End of current word
             if current_word:  # Only add non-empty words
                 words.append(current_word)
@@ -656,7 +579,6 @@ class ElevenLabsTTSBase(WebsocketTTSService):
         self._partial_word_start_time = 0.0
 
         self._receive_task = None
-        self._keepalive_task = None
 
     def can_generate_metrics(self) -> bool:
         """Check if this service can generate processing metrics.
@@ -773,8 +695,8 @@ class ElevenLabsTTSBase(WebsocketTTSService):
         if self._websocket and not self._receive_task:
             self._receive_task = self.create_task(self._receive_task_handler(self._report_error))
 
-        if self._websocket and not self._keepalive_task:
-            self._keepalive_task = self.create_task(self._keepalive_task_handler())
+        if self._websocket:
+            self._create_keepalive_task(interval=10)
 
     async def _disconnect(self):
         await super()._disconnect()
@@ -783,9 +705,7 @@ class ElevenLabsTTSBase(WebsocketTTSService):
             await self.cancel_task(self._receive_task)
             self._receive_task = None
 
-        if self._keepalive_task:
-            await self.cancel_task(self._keepalive_task)
-            self._keepalive_task = None
+        await self._cancel_keepalive_task()
 
         await self._disconnect_websocket()
 
@@ -841,7 +761,6 @@ class ElevenLabsTTSBase(WebsocketTTSService):
         except Exception as e:
             await self.push_error(error_msg=f"Unknown error occurred: {e}", exception=e)
         finally:
-            await self.remove_active_audio_context()
             self._websocket = None
             self._clear_connection_state()
             await self._call_event_handler("on_disconnected")
@@ -870,17 +789,6 @@ class ElevenLabsTTSBase(WebsocketTTSService):
         """Reset alignment state after all audio for the context has played."""
         self._reset_alignment_state(context_id)
         await super().on_audio_context_completed(context_id)
-
-    async def _keepalive_task_handler(self):
-        """Send periodic keepalive messages to maintain WebSocket connection."""
-        KEEPALIVE_SLEEP = 10
-        while True:
-            await asyncio.sleep(KEEPALIVE_SLEEP)
-            try:
-                await self._send_keepalive()
-            except websockets.ConnectionClosed as e:
-                logger.warning(f"{self} keepalive error: {e}")
-                break
 
     @traced_tts
     async def run_tts(self, text: str, context_id: str) -> AsyncGenerator[Frame | None, None]:

@@ -24,7 +24,10 @@ def _make_service(
 ) -> _TestGeminiLiveLLMService:
     service = _TestGeminiLiveLLMService(
         api_key="test-key",
-        system_instruction=system_instruction,
+        settings=GeminiLiveLLMService.Settings(
+            model="gemini-2.5-flash-native-audio-preview-12-2025",
+            system_instruction=system_instruction,
+        ),
         inference_on_context_initialization=inference_on_context_initialization,
     )
     service.start_ttfb_metrics = AsyncMock()
