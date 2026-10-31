@@ -183,9 +183,11 @@ class DeepgramFluxTTSService(DeepgramFluxTTSBase, WebsocketService):
             self._websocket = websocket
 
             # `response` is populated after the handshake completes (which it
-            # has, since the connect call already returned).
-            response_headers = websocket.response.headers if websocket.response else {}
-            headers = {k: v for k, v in response_headers.items() if k.startswith("dg-")}
+            # has, since the connect call already returned). `raw_items`, because
+            # the mapping view raises on a repeated header, such as the pair of
+            # Set-Cookie a load balancer adds.
+            response_headers = websocket.response.headers.raw_items() if websocket.response else []
+            headers = {k: v for k, v in response_headers if k.lower().startswith("dg-")}
             logger.debug(f'{self}: Websocket connection initialized: {{"headers": {headers}}}')
 
             await self._call_event_handler("on_connected")
