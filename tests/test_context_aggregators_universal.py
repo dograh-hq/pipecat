@@ -14,6 +14,7 @@ from loguru import logger
 
 from pipecat.adapters.llm.schemas.function_schema import FunctionSchema
 from pipecat.adapters.llm.schemas.tools_schema import AdapterType, ToolsSchema
+from pipecat.expressive.perception import PerceptionSignal, format_perception
 from pipecat.frames.frames import (
     AggregatedTextFrame,
     BotStartedSpeakingFrame,
@@ -68,6 +69,7 @@ from pipecat.frames.frames import (
     VADUserStoppedSpeakingFrame,
 )
 from pipecat.pipeline.pipeline import Pipeline
+from pipecat.pipeline.worker import PipelineParams
 from pipecat.processors.aggregators import async_tool_messages
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import (
@@ -3601,6 +3603,37 @@ class TestRealtimeServiceModeAggregator(unittest.IsolatedAsyncioTestCase):
         )
         roles_contents = [(m["role"], m["content"]) for m in context.get_messages()]
         self.assertEqual(roles_contents, [("user", "building number 35")])
+
+    async def test_transcription_arriving_while_muted_keeps_its_perception(self):
+        _, pair = self._build_pair(
+            realtime_service_mode=True,
+            user_params=LLMUserAggregatorParams(user_mute_strategies=[AlwaysUserMuteStrategy()]),
+        )
+        user, assistant = pair
+        context = user.context
+        perception = [PerceptionSignal("tone", labels=[("neutral", 0.81), ("positive", 0.12)])]
+
+        frames_to_send = [
+            BotStartedSpeakingFrame(),
+            SleepFrame(),
+            TranscriptionFrame(
+                text="building number 35", user_id="", timestamp="now", perception=perception
+            ),
+            SleepFrame(),
+            BotStoppedSpeakingFrame(),
+            SleepFrame(),
+        ]
+        await run_test(
+            Pipeline([user, assistant]),
+            frames_to_send=frames_to_send,
+            pipeline_params=PipelineParams(enable_expressive_conversation=True),
+        )
+
+        roles_contents = [(m["role"], m["content"]) for m in context.get_messages()]
+        self.assertEqual(
+            roles_contents,
+            [("user", f"{format_perception(perception)} building number 35")],
+        )
 
     async def test_user_turn_stopped_in_realtime_mode_has_none_content(self):
         # When VAD turn frames fire in realtime mode, the user-turn-stop

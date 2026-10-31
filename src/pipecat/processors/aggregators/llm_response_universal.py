@@ -930,6 +930,7 @@ class LLMUserAggregator(LLMContextAggregator):
             # user may be muted. Keep the text for the context; turn-taking
             # stays muted.
             if self._realtime_service_mode and isinstance(frame, TranscriptionFrame):
+                self._handle_perception(frame.perception)
                 await self._handle_transcription(frame)
             return
 
