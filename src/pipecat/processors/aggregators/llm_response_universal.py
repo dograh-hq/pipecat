@@ -152,7 +152,9 @@ class LLMUserAggregatorParams:
         user_turn_strategies: User turn start and stop strategies.
         user_turn_strategies_params: How the user turn strategies combine with
             the ones a service recommends, and how they decide.
-        user_mute_strategies: List of user mute strategies.
+        user_mute_strategies: List of user mute strategies. In realtime service
+            mode, a transcription that arrives while the user is muted is still
+            added to the context, without reaching the user turn strategies.
         should_interrupt: Optional synchronous policy allowing interruption at
             turn start. Returning False preserves turn detection and transcripts.
         user_turn_stop_timeout: Seconds without user activity before an open user
@@ -923,6 +925,13 @@ class LLMUserAggregator(LLMContextAggregator):
         await super().process_frame(frame, direction)
 
         if await self._maybe_mute_frame(frame):
+            # A realtime service transcribes audio it has already heard, and
+            # often delivers the transcript after its reply starts, when the
+            # user may be muted. Keep the text for the context; turn-taking
+            # stays muted.
+            if self._realtime_service_mode and isinstance(frame, TranscriptionFrame):
+                self._handle_perception(frame.perception)
+                await self._handle_transcription(frame)
             return
 
         if isinstance(frame, StartFrame):

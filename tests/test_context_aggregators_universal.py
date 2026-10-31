@@ -14,6 +14,7 @@ from loguru import logger
 
 from pipecat.adapters.llm.schemas.function_schema import FunctionSchema
 from pipecat.adapters.llm.schemas.tools_schema import AdapterType, ToolsSchema
+from pipecat.expressive.perception import PerceptionSignal, format_perception
 from pipecat.frames.frames import (
     AggregatedTextFrame,
     BotStartedSpeakingFrame,
@@ -68,6 +69,7 @@ from pipecat.frames.frames import (
     VADUserStoppedSpeakingFrame,
 )
 from pipecat.pipeline.pipeline import Pipeline
+from pipecat.pipeline.worker import PipelineParams
 from pipecat.processors.aggregators import async_tool_messages
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import (
@@ -87,12 +89,14 @@ from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.tests.utils import SleepFrame, run_test
 from pipecat.turns.empty_user_turn import DEFAULT_EMPTY_USER_TURN_INTERRUPTED_PROMPT
 from pipecat.turns.user_mute import (
+    AlwaysUserMuteStrategy,
     FirstSpeechUserMuteStrategy,
     FunctionCallUserMuteStrategy,
     MuteUntilFirstBotCompleteUserMuteStrategy,
 )
 from pipecat.turns.user_start import (
     ExternalUserTurnStartStrategy,
+    MinWordsUserTurnStartStrategy,
     TranscriptionUserTurnStartStrategy,
     VADUserTurnStartStrategy,
 )
@@ -1475,6 +1479,28 @@ class TestLLMUserAggregator(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(any(isinstance(f, UserBackchannelFrame) for f in received_down))
         self.assertEqual(messages, [])
+
+    async def test_transcription_is_suppressed_while_the_user_is_muted(self):
+        context = LLMContext()
+        user_aggregator = LLMUserAggregator(
+            context,
+            params=LLMUserAggregatorParams(user_mute_strategies=[AlwaysUserMuteStrategy()]),
+        )
+
+        await run_test(
+            user_aggregator,
+            frames_to_send=[
+                BotStartedSpeakingFrame(),
+                SleepFrame(),
+                TranscriptionFrame(text="building number 35", user_id="", timestamp="now"),
+                SleepFrame(),
+                BotStoppedSpeakingFrame(),
+                SleepFrame(),
+            ],
+            expected_down_frames=None,
+        )
+
+        self.assertEqual(context.get_messages(), [])
 
 
 class TestLLMAssistantAggregator(unittest.IsolatedAsyncioTestCase):
@@ -3492,6 +3518,122 @@ class TestRealtimeServiceModeAggregator(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(roles_contents, [("user", "Hi!"), ("assistant", "Hello")])
         self.assertEqual(len(assistant_messages), 1)
         self.assertTrue(assistant_messages[0].interrupted)
+
+    async def test_transcription_arriving_while_muted_is_kept(self):
+        # The service's transcript lands after its reply has started and the
+        # bot speaking has muted the user.
+        _, pair = self._build_pair(
+            realtime_service_mode=True,
+            user_params=LLMUserAggregatorParams(user_mute_strategies=[AlwaysUserMuteStrategy()]),
+        )
+        user, assistant = pair
+        context = user.context
+
+        mute_started = []
+        user_msg_added: list[UserTurnMessageAddedMessage] = []
+
+        @user.event_handler("on_user_mute_started")
+        async def _on_mute(_a):
+            mute_started.append(True)
+
+        @user.event_handler("on_user_turn_message_added")
+        async def _on_um(_a, msg):
+            user_msg_added.append(msg)
+
+        frames_to_send = [
+            LLMFullResponseStartFrame(),
+            LLMTextFrame("Thanks, noted."),
+            SleepFrame(),
+            BotStartedSpeakingFrame(),
+            SleepFrame(),
+            TranscriptionFrame(text="building number 35", user_id="", timestamp="now"),
+            SleepFrame(),
+            LLMFullResponseEndFrame(),
+            BotStoppedSpeakingFrame(),
+            SleepFrame(),
+        ]
+        await run_test(
+            Pipeline([user, assistant]),
+            frames_to_send=frames_to_send,
+        )
+
+        self.assertEqual(mute_started, [True])
+        roles_contents = [(m["role"], m["content"]) for m in context.get_messages()]
+        self.assertEqual(
+            roles_contents,
+            [("user", "building number 35"), ("assistant", "Thanks, noted.")],
+        )
+        self.assertEqual([m.content for m in user_msg_added], ["building number 35"])
+
+    async def test_transcription_arriving_while_muted_does_not_start_a_user_turn(self):
+        _, pair = self._build_pair(
+            realtime_service_mode=True,
+            user_params=LLMUserAggregatorParams(
+                user_turn_strategies=UserTurnStrategies(
+                    start=[MinWordsUserTurnStartStrategy(min_words=1)],
+                ),
+                user_mute_strategies=[AlwaysUserMuteStrategy()],
+            ),
+        )
+        user, assistant = pair
+        context = user.context
+
+        turns_started = []
+
+        @user.event_handler("on_user_turn_started")
+        async def _on_start(_a, _s):
+            turns_started.append(True)
+
+        frames_to_send = [
+            BotStartedSpeakingFrame(),
+            SleepFrame(),
+            TranscriptionFrame(text="building number 35", user_id="", timestamp="now"),
+            SleepFrame(),
+            BotStoppedSpeakingFrame(),
+            SleepFrame(),
+        ]
+        received_down, received_up = await run_test(
+            Pipeline([user, assistant]),
+            frames_to_send=frames_to_send,
+        )
+
+        self.assertEqual(turns_started, [])
+        self.assertFalse(
+            any(isinstance(f, InterruptionFrame) for f in [*received_down, *received_up])
+        )
+        roles_contents = [(m["role"], m["content"]) for m in context.get_messages()]
+        self.assertEqual(roles_contents, [("user", "building number 35")])
+
+    async def test_transcription_arriving_while_muted_keeps_its_perception(self):
+        _, pair = self._build_pair(
+            realtime_service_mode=True,
+            user_params=LLMUserAggregatorParams(user_mute_strategies=[AlwaysUserMuteStrategy()]),
+        )
+        user, assistant = pair
+        context = user.context
+        perception = [PerceptionSignal("tone", labels=[("neutral", 0.81), ("positive", 0.12)])]
+
+        frames_to_send = [
+            BotStartedSpeakingFrame(),
+            SleepFrame(),
+            TranscriptionFrame(
+                text="building number 35", user_id="", timestamp="now", perception=perception
+            ),
+            SleepFrame(),
+            BotStoppedSpeakingFrame(),
+            SleepFrame(),
+        ]
+        await run_test(
+            Pipeline([user, assistant]),
+            frames_to_send=frames_to_send,
+            pipeline_params=PipelineParams(enable_expressive_conversation=True),
+        )
+
+        roles_contents = [(m["role"], m["content"]) for m in context.get_messages()]
+        self.assertEqual(
+            roles_contents,
+            [("user", f"{format_perception(perception)} building number 35")],
+        )
 
     async def test_user_turn_stopped_in_realtime_mode_has_none_content(self):
         # When VAD turn frames fire in realtime mode, the user-turn-stop
