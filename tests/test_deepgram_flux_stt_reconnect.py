@@ -49,6 +49,9 @@ class _FakeFlux:
     resume_turn: bool = False
     # How many connections, from the first, never get Connected; None for all.
     unconfirmed: int | None = 0
+    # Answer the upgrade with a header repeated, as a load balancer's
+    # stickiness cookies are.
+    repeat_header: bool = False
     handshakes: int = 0
     audio_per_connection: list[int] = field(default_factory=list)
     requests: list = field(default_factory=list)
@@ -61,6 +64,12 @@ class _FakeFlux:
         )
         if rejected:
             return connection.respond(HTTPStatus.SERVICE_UNAVAILABLE, "unavailable\n")
+        return None
+
+    async def process_response(self, connection, request, response):
+        if self.repeat_header:
+            response.headers["Set-Cookie"] = "AWSALB=a; Path=/"
+            response.headers["Set-Cookie"] = "AWSALBCORS=a; Path=/; SameSite=None; Secure"
         return None
 
     async def handle(self, websocket):
@@ -102,7 +111,13 @@ def transport(request):
 
 
 async def _run(server: _FakeFlux, seconds: float, configure=None, *, transport):
-    async with serve(server.handle, "127.0.0.1", 0, process_request=server.process_request) as s:
+    async with serve(
+        server.handle,
+        "127.0.0.1",
+        0,
+        process_request=server.process_request,
+        process_response=server.process_response,
+    ) as s:
         url = f"ws://127.0.0.1:{s.sockets[0].getsockname()[1]}"
         service = (
             DograhFluxSTTService(api_key="test-key", base_url=url, correlation_id="call-123")
@@ -135,6 +150,17 @@ async def test_a_failed_first_connect_is_retried_in_the_background(transport):
     service, _ = await _run(server, transport=transport, seconds=0.5)
 
     assert server.handshakes == 2
+    assert server.audio_per_connection[0] > 0
+    assert service.is_usable
+
+
+@pytest.mark.asyncio
+async def test_a_handshake_with_a_repeated_header_connects(transport):
+    server = _FakeFlux(repeat_header=True)
+
+    service, _ = await _run(server, transport=transport, seconds=0.5)
+
+    assert server.handshakes == 1
     assert server.audio_per_connection[0] > 0
     assert service.is_usable
 
