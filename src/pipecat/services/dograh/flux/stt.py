@@ -6,29 +6,18 @@
 
 """Dograh Flux STT service: Deepgram Flux turn detection proxied via the Dograh MPS."""
 
-import json
-import time
-from collections.abc import AsyncGenerator
 from urllib.parse import urlencode
 
 from loguru import logger
-from websockets.protocol import State
 
-from pipecat.frames.frames import (
-    ErrorFrame,
-    Frame,
-    StartFrame,
-)
-from pipecat.services.deepgram.flux.stt_base import (
-    DeepgramFluxSTTBase,
-    DeepgramFluxSTTSettings,
-)
+from pipecat.frames.frames import StartFrame
+from pipecat.services.deepgram.flux.stt import DeepgramFluxSTTService
+from pipecat.services.deepgram.flux.stt_base import DeepgramFluxSTTSettings
 from pipecat.services.dograh.mps_billing import (
     MPS_BILLING_VERSION_KEY,
     MPS_BILLING_VERSION_V2,
     get_correlation_id,
 )
-from pipecat.services.websocket_service import WebsocketService
 
 __all__ = [
     "DograhFluxSTTService",
@@ -36,16 +25,13 @@ __all__ = [
 ]
 
 
-class DograhFluxSTTService(DeepgramFluxSTTBase, WebsocketService):
+class DograhFluxSTTService(DeepgramFluxSTTService):
     """Dograh Flux speech-to-text service.
 
-    Provides Deepgram Flux turn detection through the Dograh managed model
-    services (MPS) proxy. All Flux protocol handling (turn detection, metrics,
-    settings) is inherited from ``DeepgramFluxSTTBase``; this class only
-    implements the transport: a WebSocket to the Dograh MPS Flux endpoint with
-    Bearer auth and MPS billing/correlation carried in the query string. The
-    proxy forwards native Flux messages, so the inherited message handling
-    applies unchanged.
+    Uses the upstream Flux connection lifecycle, including background reconnects,
+    connection confirmation and partial-turn completion. The MPS endpoint uses
+    Bearer authentication, carries billing/correlation in the query string and
+    adds proxy errors to the native Flux protocol.
 
     Event handlers available (in addition to base events):
 
@@ -122,9 +108,10 @@ class DograhFluxSTTService(DeepgramFluxSTTBase, WebsocketService):
         if settings is not None:
             default_settings.apply_update(settings)
 
-        DeepgramFluxSTTBase.__init__(
-            self,
-            encoding=flux_encoding,
+        super().__init__(
+            api_key=api_key,
+            url=f"{base_url}{ws_path}",
+            flux_encoding=flux_encoding,
             mip_opt_out=mip_opt_out,
             tag=tag,
             should_interrupt=should_interrupt,
@@ -133,23 +120,8 @@ class DograhFluxSTTService(DeepgramFluxSTTBase, WebsocketService):
             sample_rate=sample_rate,
             **kwargs,
         )
-        # reconnect_on_error stays False: like Deepgram Flux, the connection is
-        # only considered ready once the server confirms it, and send_with_retry
-        # handles reconnection on send.
-        WebsocketService.__init__(self, reconnect_on_error=False)
-
-        self._api_key = api_key
-        self._base_url = base_url
-        self._ws_path = ws_path
         self._correlation_id = correlation_id
-        self._websocket_url: str | None = None
-        self._receive_task = None
         self._start_metadata = None
-
-    @property
-    def supports_ttfs(self) -> bool:
-        """TTFS doesn't apply: Flux defines turn boundaries directly."""
-        return False
 
     # ------------------------------------------------------------------
     # MPS billing
@@ -161,191 +133,43 @@ class DograhFluxSTTService(DeepgramFluxSTTBase, WebsocketService):
             start_metadata=self._start_metadata,
         )
 
-    def _build_dograh_query_string(self) -> str:
+    def _build_query_string(self) -> str:
         """Append MPS billing/correlation params to the inherited Flux query."""
-        query = self._build_query_string()
+        query = super()._build_query_string()
         correlation_id = self._get_correlation_id()
         if correlation_id:
             query += "&" + urlencode({"correlation_id": correlation_id})
             query += "&" + urlencode({MPS_BILLING_VERSION_KEY: MPS_BILLING_VERSION_V2})
         return query
 
-    # ------------------------------------------------------------------
-    # Transport interface implementation
-    # ------------------------------------------------------------------
-
-    async def _transport_send_audio(self, audio: bytes):
-        if self._websocket is None:  # caller gates on _transport_is_active()
-            return
-        await self._websocket.send(audio)
-
-    async def _transport_send_json(self, message: dict):
-        if self._websocket is None:  # caller gates on _transport_is_active()
-            return
-        await self._websocket.send(json.dumps(message))
-
-    def _transport_is_active(self) -> bool:
-        return self._websocket is not None and self._websocket.state is State.OPEN
-
-    # ------------------------------------------------------------------
-    # Lifecycle
-    # ------------------------------------------------------------------
-
     async def start(self, frame: StartFrame):
-        """Capture StartFrame metadata for correlation on later reconnects."""
+        """Capture metadata for correlation on later reconnects."""
         self._start_metadata = frame.metadata
         await super().start(frame)
 
-    # ------------------------------------------------------------------
-    # Connection management
-    # ------------------------------------------------------------------
-
-    async def _connect(self):
-        """Build the MPS Flux URL and open the WebSocket connection."""
-        await super()._connect()
-        self._websocket_url = f"{self._base_url}{self._ws_path}?{self._build_dograh_query_string()}"
-        await self._connect_websocket()
-
-    async def _disconnect(self):
-        """Disconnect from WebSocket and clean up tasks."""
-        await super()._disconnect()
-
-        try:
-            await self._disconnect_websocket()
-        except Exception as e:
-            await self.push_error(error_msg=f"Unknown error occurred: {e}", exception=e)
-        finally:
-            self._websocket = None
-
     async def _connect_websocket(self):
-        """Establish the WebSocket connection to the Dograh MPS Flux endpoint."""
-        try:
-            if self._websocket and self._websocket.state is State.OPEN:
-                return
+        """Apply current settings and billing metadata on every connection attempt."""
+        self._websocket_url = f"{self._url}?{self._build_query_string()}"
+        await super()._connect_websocket()
 
-            self._connection_established_event.clear()
-            self._user_is_speaking = False
-            assert self._websocket_url is not None
-            websocket = await self._websocket_connect(
-                self._websocket_url,
-                additional_headers={"Authorization": f"Bearer {self._api_key}"},
-            )
-            self._websocket = websocket
+    async def _websocket_connect(self, uri: str, **kwargs):
+        """Authenticate with the proxy while retaining the bounded socket transport."""
+        headers = dict(kwargs.pop("additional_headers", {}) or {})
+        headers["Authorization"] = f"Bearer {self._api_key}"
+        return await super()._websocket_connect(uri, additional_headers=headers, **kwargs)
 
-            if not self._receive_task:
-                self._receive_task = self.create_task(
-                    self._receive_task_handler(self._report_error)
-                )
-
-            if not self._watchdog_task:
-                self._watchdog_task = self.create_task(self._watchdog_task_handler())
-
-            logger.debug("WebSocket connected, waiting for server confirmation...")
-            await self._await_connection_established()
-            logger.debug("Connected to Dograh Flux WebSocket")
-            await self._call_event_handler("on_connected")
-        except Exception as e:
-            await self.push_error(error_msg=f"Unknown error occurred: {e}", exception=e)
-            self._websocket = None
-            await self._call_event_handler("on_connection_error", f"{e}")
-
-    async def _disconnect_websocket(self):
-        """Close the WebSocket connection and clean up state."""
-        try:
-            if self._receive_task:
-                await self.cancel_task(self._receive_task, timeout=2.0)
-                self._receive_task = None
-            if self._watchdog_task:
-                await self.cancel_task(self._watchdog_task, timeout=2.0)
-                self._watchdog_task = None
-                self._last_stt_time = None
-
-            self._connection_established_event.clear()
-            # A Configure sent on the old connection can no longer be
-            # acknowledged. Discard both the in-flight marker and any pending
-            # coalesced fields; the reconnect applies current settings in its
-            # URL before accepting further updates.
-            self._reset_configure_state()
-            await self.stop_all_metrics()
-
-            if self._websocket:
-                await self._send_close_stream()
-                logger.debug("Disconnecting from Dograh Flux WebSocket")
-                await self._websocket.close()
-        except Exception as e:
-            await self.push_error(error_msg=f"Error closing websocket: {e}", exception=e)
-        finally:
-            self._websocket = None
-            await self._call_event_handler("on_disconnected")
-
-    # ------------------------------------------------------------------
-    # Audio sending and receiving
-    # ------------------------------------------------------------------
-
-    async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame | None, None]:
-        """Send audio data to the Dograh MPS for Flux transcription.
-
-        Args:
-            audio: Raw audio bytes in linear16 format.
-
-        Yields:
-            Frame: None (results are delivered via WebSocket callbacks).
-        """
-        if not self._websocket:
-            return
-
-        try:
-            self._last_stt_time = time.monotonic()
-            self._last_audio_chunk_duration = len(audio) / (self.sample_rate * 2)
-            await self.send_with_retry(audio, self._report_error)
-        except Exception as e:
-            yield ErrorFrame(error=f"Unknown error occurred: {e}")
-            return
-
-        yield None
-
-    def _get_websocket(self):
-        if self._websocket:
-            return self._websocket
-        raise Exception("Websocket not connected")
-
-    async def _receive_messages(self):
-        """Receive messages from the proxy and dispatch them.
-
-        Native Flux messages (capitalized ``type`` values) are handled by the
-        base. The Dograh proxy injects its own control messages with a
-        lowercase ``"error"`` type for billing/quota conditions, handled here.
-        """
-        try:
-            async for message in self._get_websocket():
-                if not isinstance(message, str):
-                    logger.warning(f"Received non-string message: {type(message)}")
-                    continue
-
-                try:
-                    data = json.loads(message)
-                except json.JSONDecodeError as e:
-                    logger.error(f"Failed to decode JSON message: {e}")
-                    continue
-
-                if data.get("type") == "error":
-                    await self._handle_proxy_error(data)
-                    continue
-
-                try:
-                    await self._handle_message(data)
-                except Exception as e:
-                    await self.push_error(error_msg=f"Unknown error occurred: {e}", exception=e)
-                    # Surfaced + stopped by _receive_task_handler (reconnect disabled).
-                    raise
-        finally:
-            # A replacement connection cannot finish the previous user turn.
-            if not self._disconnecting:
-                await self._end_turn_cut_short()
+    async def _handle_message(self, data: dict):
+        """Handle MPS errors alongside native Flux messages, including confirmation."""
+        if isinstance(data, dict) and data.get("type") == "error":
+            await self._handle_proxy_error(data)
+        else:
+            await super()._handle_message(data)
 
     async def _handle_proxy_error(self, data: dict):
         """Handle a Dograh proxy control error (e.g. quota exceeded)."""
-        error_msg = data.get("error") or data.get("message", "Unknown error")
+        code = data.get("error")
+        detail = data.get("message")
+        error_msg = ": ".join(str(part) for part in (code, detail) if part) or "Unknown error"
         is_quota_error = "quota" in error_msg.lower()
 
         if is_quota_error:
@@ -365,7 +189,3 @@ class DograhFluxSTTService(DeepgramFluxSTTBase, WebsocketService):
             return
 
         await self.push_error(error_msg=f"STT error: {error_msg}")
-
-    async def _report_error(self, error: ErrorFrame, force_treat_as_permanent: bool = False):
-        await self._call_event_handler("on_connection_error", error.error)
-        await self.push_error_frame(error, force_treat_as_permanent=force_treat_as_permanent)
