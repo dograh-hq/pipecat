@@ -153,7 +153,8 @@ class LLMUserAggregatorParams:
         user_turn_strategies_params: How the user turn strategies combine with
             the ones a service recommends, and how they decide.
         user_mute_strategies: List of user mute strategies. In realtime service
-            mode, transcriptions from the service are kept while muted.
+            mode, a transcription that arrives while the user is muted is still
+            added to the context, without reaching the user turn strategies.
         should_interrupt: Optional synchronous policy allowing interruption at
             turn start. Returning False preserves turn detection and transcripts.
         user_turn_stop_timeout: Seconds without user activity before an open user
@@ -924,6 +925,12 @@ class LLMUserAggregator(LLMContextAggregator):
         await super().process_frame(frame, direction)
 
         if await self._maybe_mute_frame(frame):
+            # A realtime service transcribes audio it has already heard, and
+            # often delivers the transcript after its reply starts, when the
+            # user may be muted. Keep the text for the context; turn-taking
+            # stays muted.
+            if self._realtime_service_mode and isinstance(frame, TranscriptionFrame):
+                await self._handle_transcription(frame)
             return
 
         if isinstance(frame, StartFrame):
@@ -1377,17 +1384,6 @@ class LLMUserAggregator(LLMContextAggregator):
                 UserBackchannelFrame,
             ),
         )
-
-        # A realtime service transcribes audio it has already heard, and often
-        # delivers the transcript after its reply starts, by which time the bot
-        # is speaking and the user may be muted. Dropping it would leave the
-        # context without speech the model answered.
-        if (
-            should_mute_frame
-            and self._realtime_service_mode
-            and isinstance(frame, (InterimTranscriptionFrame, TranscriptionFrame))
-        ):
-            should_mute_frame = False
 
         if should_mute_frame:
             logger.trace(f"{frame.name} suppressed - user currently muted")

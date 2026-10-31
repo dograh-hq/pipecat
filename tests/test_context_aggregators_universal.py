@@ -94,6 +94,7 @@ from pipecat.turns.user_mute import (
 )
 from pipecat.turns.user_start import (
     ExternalUserTurnStartStrategy,
+    MinWordsUserTurnStartStrategy,
     TranscriptionUserTurnStartStrategy,
     VADUserTurnStartStrategy,
 )
@@ -3561,6 +3562,45 @@ class TestRealtimeServiceModeAggregator(unittest.IsolatedAsyncioTestCase):
             [("user", "building number 35"), ("assistant", "Thanks, noted.")],
         )
         self.assertEqual([m.content for m in user_msg_added], ["building number 35"])
+
+    async def test_transcription_arriving_while_muted_does_not_start_a_user_turn(self):
+        _, pair = self._build_pair(
+            realtime_service_mode=True,
+            user_params=LLMUserAggregatorParams(
+                user_turn_strategies=UserTurnStrategies(
+                    start=[MinWordsUserTurnStartStrategy(min_words=1)],
+                ),
+                user_mute_strategies=[AlwaysUserMuteStrategy()],
+            ),
+        )
+        user, assistant = pair
+        context = user.context
+
+        turns_started = []
+
+        @user.event_handler("on_user_turn_started")
+        async def _on_start(_a, _s):
+            turns_started.append(True)
+
+        frames_to_send = [
+            BotStartedSpeakingFrame(),
+            SleepFrame(),
+            TranscriptionFrame(text="building number 35", user_id="", timestamp="now"),
+            SleepFrame(),
+            BotStoppedSpeakingFrame(),
+            SleepFrame(),
+        ]
+        received_down, received_up = await run_test(
+            Pipeline([user, assistant]),
+            frames_to_send=frames_to_send,
+        )
+
+        self.assertEqual(turns_started, [])
+        self.assertFalse(
+            any(isinstance(f, InterruptionFrame) for f in [*received_down, *received_up])
+        )
+        roles_contents = [(m["role"], m["content"]) for m in context.get_messages()]
+        self.assertEqual(roles_contents, [("user", "building number 35")])
 
     async def test_user_turn_stopped_in_realtime_mode_has_none_content(self):
         # When VAD turn frames fire in realtime mode, the user-turn-stop
