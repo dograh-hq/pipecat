@@ -62,7 +62,8 @@ class ExternalUserTurnStopStrategy(BaseUserTurnStopStrategy):
         Args:
             timeout: How long to wait after a final transcription for more of
                 them, so a turn whose transcription arrives late or in pieces
-                is decided once the text has settled.
+                is decided once the text has settled. There's no wait after a
+                finalized transcription, which is the last of them.
             wait_for_transcript: When True (default), turn-stop signaling
                 waits for transcript text to arrive after the external
                 stop signal. When False, the strategy signals turn-stop as

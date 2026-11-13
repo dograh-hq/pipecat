@@ -70,7 +70,10 @@ from pipecat.processors.aggregators.llm_context import (
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessorSetup
 from pipecat.services.google.frames import LLMSearchOrigin, LLMSearchResponseFrame, LLMSearchResult
-from pipecat.services.google.utils import update_google_client_http_options
+from pipecat.services.google.utils import (
+    gemini_api_http_options,
+    update_google_client_http_options,
+)
 from pipecat.services.llm_service import FunctionCallFromLLM, LLMService
 from pipecat.services.settings import LLMSettings
 from pipecat.transcriptions.language import Language, resolve_language
@@ -349,17 +352,13 @@ class InputParams(BaseModel):
             set, the service applies the lowest level the model accepts.
         enable_affective_dialog: Enable affective dialog, which allows Gemini
             to adapt to expression and tone. Defaults to None.
-            Note that these settings may require specifying a model that
-            supports them, e.g. "gemini-3.8-live".
-            Also note that this setting may require specifying an API version that
-            supports it, e.g. HttpOptions(api_version="v1alpha").
+            Only the 2.5 Flash Live models act on it; the 3.8 Live models
+            dropped the feature and ignore the field.
         proactivity: Proactivity settings, which allows Gemini to proactively
             decide how to behave, such as whether to avoid responding to
             content that is not relevant. Defaults to None.
-            Note that these settings may require specifying a model that
-            supports them, e.g. "gemini-3.8-live".
-            Also note that this setting may require specifying an API version that
-            supports it, e.g. HttpOptions(api_version="v1alpha").
+            The 3.8 Live models have proactive audio on at all times and
+            reject a setup that sets ``proactive_audio`` to False.
         extra: Additional parameters. Defaults to empty dict.
     """
 
@@ -400,8 +399,12 @@ class GeminiLiveLLMSettings(LLMSettings):
         thinking: Thinking configuration. Live thinking models require a
             ``thinking_level``; when none is set, the service applies the
             lowest level the model accepts.
-        enable_affective_dialog: Whether to enable affective dialog.
-        proactivity: Proactivity configuration.
+        enable_affective_dialog: Whether to enable affective dialog. Only the
+            2.5 Flash Live models act on it; the 3.8 Live models dropped the
+            feature and ignore the field.
+        proactivity: Proactivity configuration. The 3.8 Live models have
+            proactive audio on at all times and reject a setup that sets
+            ``proactive_audio`` to False.
     """
 
     voice: str | NotGiven = field(default_factory=lambda: NOT_GIVEN)
@@ -767,7 +770,8 @@ class GeminiLiveLLMService(LLMService[GeminiLiveLLMAdapter]):
 
         self._last_sent_time = 0
 
-        self._system_instruction_from_init = self._settings.system_instruction
+        # The system instruction the current session was configured with.
+        self._sent_system_instruction: str | None = None
         # Accept a plain list of standard tools as a convenience; normalize it to a
         # ToolsSchema so the rest of the service has a single form to handle.
         # Provider-native tool lists (dicts) pass through unchanged.
@@ -866,7 +870,9 @@ class GeminiLiveLLMService(LLMService[GeminiLiveLLMAdapter]):
 
     def create_client(self):
         """Create the Gemini API client instance. Subclasses can override this."""
-        self._client = Client(api_key=self._api_key, http_options=self._http_options)
+        self._client = Client(
+            api_key=self._api_key, http_options=gemini_api_http_options(self._http_options)
+        )
 
     @property
     def file_api(self) -> GeminiFileAPI:
@@ -1085,7 +1091,11 @@ class GeminiLiveLLMService(LLMService[GeminiLiveLLMAdapter]):
         if run_llm is None:
             run_llm = frame.run_llm if frame.run_llm is not None else True
         tool_name = self._tool_call_id_to_name.get(frame.tool_call_id, "tool_call_result")
-        result = json.dumps(frame.result, ensure_ascii=False) if frame.result else "COMPLETED"
+        result = (
+            json.dumps(frame.result, ensure_ascii=False)
+            if frame.result is not None
+            else "COMPLETED"
+        )
         await self._tool_result(
             frame.tool_call_id,
             tool_name,
@@ -1213,17 +1223,16 @@ class GeminiLiveLLMService(LLMService[GeminiLiveLLMAdapter]):
             # We got our initial context
             self._context = context
 
-            # Reconnect if context changes the effective system instruction
-            # or tools compared to the initial connection (which used the
-            # init-provided values). Note that the determination of "effective"
-            # system instruction is delegated to the adapter, which still
-            # chooses the init-provided value if there is one.
+            # Reconnect if the effective system instruction differs from the
+            # one the session was configured with, or the context brings tools
+            # of its own. The adapter determines the effective instruction,
+            # preferring the service's own over a context system message.
             adapter = self.get_llm_adapter()
             params = await adapter.get_llm_invocation_params(
-                self._context, system_instruction=assert_given(self._system_instruction_from_init)
+                self._context, system_instruction=assert_given(self._settings.system_instruction)
             )
             system_instruction = params["system_instruction"]
-            system_instruction_changed = system_instruction != self._system_instruction_from_init
+            system_instruction_changed = system_instruction != self._sent_system_instruction
             # The context bringing tools of its own warrants a reconnect, without
             # diffing them against the init-provided ones.
             context_has_tools = is_given(self._context.tools)
@@ -1240,20 +1249,19 @@ class GeminiLiveLLMService(LLMService[GeminiLiveLLMAdapter]):
 
             # Create initial response if needed, based on conversation history
             # in context.
-            # (If the context has no messages but we do have a system
-            # instruction — meaning it was provided at init time — doctor our
-            # context now so that we'll have something to send to the service
-            # to trigger a response).
+            # (If the context has no messages but the user gave the service a
+            # system instruction, doctor our context now so that we'll have
+            # something to send to the service to trigger a response).
             messages = params["messages"]
             if not messages and self._inference_on_context_initialization:
-                if self._system_instruction_from_init:
+                if self._base_system_instruction:
                     logger.debug(
                         "No messages found in initial context; seeding with system instruction to trigger bot response."
                     )
                     self._context.add_message(
                         {
                             "role": "developer",
-                            "content": assert_given(self._system_instruction_from_init),
+                            "content": self._base_system_instruction,
                         }
                     )
                 else:
@@ -1601,6 +1609,7 @@ class GeminiLiveLLMService(LLMService[GeminiLiveLLMAdapter]):
                 system_instruction = assert_given(self._settings.system_instruction)
                 # No context yet: the init-provided tools; built-in tools ride along.
                 tools = adapter.from_standard_tools(self._tools_from_init)
+            self._sent_system_instruction = system_instruction
             if system_instruction:
                 # Trim very long system instructions in the debug log so call
                 # transcripts in log aggregators stay readable.
@@ -1645,22 +1654,54 @@ class GeminiLiveLLMService(LLMService[GeminiLiveLLMAdapter]):
                             await self._handle_server_message(message)
                     except Exception as e:
                         if not self._disconnecting:
-                            should_reconnect = await self._handle_connection_error(e)
-                            if should_reconnect:
-                                await self._reconnect()
-                                return  # Exit this connection handler, _reconnect will start a new one
-                        break
+                            await self._handle_connection_lost(e)
+                        # Exit this connection handler; a reconnect starts a new one.
+                        return
         except Exception as e:
-            # Connect-time failures (e.g. websocket 1008 "project denied
-            # access") never enter the receive loop above, so they would
-            # otherwise escape this task and be silently caught by the
-            # task manager. Route them through the same error path so an
-            # ErrorFrame is emitted to the pipeline.
-            if self._disconnecting:
-                return
-            should_reconnect = await self._handle_connection_error(e)
-            if should_reconnect:
-                await self._reconnect()
+            # The session failed to open (for example the server rejected the
+            # setup) or failed outside the receive loop above. Report it the same
+            # way as a dropped connection instead of only logging it from the
+            # task manager.
+            if not self._disconnecting:
+                await self._handle_connection_lost(e)
+
+    async def _handle_connection_lost(self, error: Exception):
+        """Handle a session that failed to open or dropped.
+
+        Ends any bot reply the failure cut off, then reconnects or gives up.
+
+        Args:
+            error: The exception that ended the session.
+        """
+        if await self._end_cut_off_bot_turn():
+            # The reply was holding back an EndFrame, which is now released:
+            # the pipeline is ending, so there's no point reconnecting.
+            logger.info(f"Connection lost while the pipeline is ending, not reconnecting: {error}")
+            return
+        if await self._handle_connection_error(error):
+            await self._reconnect()
+
+    async def _end_cut_off_bot_turn(self) -> bool:
+        """End a bot reply that a lost connection cut off.
+
+        The server will never send turn_complete for that reply, so close it
+        here the way turn_complete would. Otherwise ``_bot_is_responding``
+        stays set, downstream processors never see the reply end, and an
+        EndFrame is deferred until the deferral timeout runs out.
+
+        Returns:
+            True if a deferred EndFrame was released.
+        """
+        if not self._bot_is_responding:
+            return False
+
+        end_frame_deferred = self._end_frame_pending_bot_turn_finished is not None
+        if self._settings.modalities == GeminiModalities.AUDIO:
+            await self.push_frame(TTSStoppedFrame())
+        await self.push_frame(LLMFullResponseEndFrame())
+        # Last, so a deferred EndFrame it releases follows the frames above.
+        await self._set_bot_is_responding(False)
+        return end_frame_deferred
 
     async def _handle_server_message(self, message: LiveServerMessage):
         """Dispatch a single message from the Live API receive stream."""
@@ -1837,7 +1878,9 @@ class GeminiLiveLLMService(LLMService[GeminiLiveLLMAdapter]):
                 f"Gemini Live connection failed after {MAX_CONSECUTIVE_FAILURES} "
                 f"consecutive attempts: {error}"
             )
-            await self.push_error(error_msg=error_msg, exception=error)
+            await self.push_error(
+                error_msg=error_msg, exception=error, force_treat_as_permanent=True
+            )
             return False
         else:
             logger.info(
@@ -2694,4 +2737,6 @@ class GeminiLiveLLMService(LLMService[GeminiLiveLLMAdapter]):
         # state management, and that exponential backoff for retries can have
         # cost/stability implications for a service cluster, let's just treat a
         # send-side error as fatal.
-        await self.push_error(error_msg=f"Send error: {error}")
+        await self.push_error(
+            error_msg=f"Send error: {error}", exception=error, force_treat_as_permanent=True
+        )
