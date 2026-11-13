@@ -39,7 +39,8 @@ class SpeachesSTTService(OpenAISTTService):
             **kwargs: Additional arguments passed to parent.
         """
         super().__init__(
-            api_key=api_key,
+            # Speaches takes any key; never let the OpenAI client fall back to OPENAI_API_KEY.
+            api_key=api_key or "none",
             base_url=base_url,
             settings=settings,
             **kwargs,

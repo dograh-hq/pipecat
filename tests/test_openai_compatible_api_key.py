@@ -36,6 +36,8 @@ from pipecat.services.qwen.llm import QwenLLMService
 from pipecat.services.sambanova.llm import SambaNovaLLMService
 from pipecat.services.sarvam.llm import SarvamLLMService
 from pipecat.services.smallest.llm import SmallestLLMService
+from pipecat.services.speaches.llm import SpeachesLLMService
+from pipecat.services.speaches.stt import SpeachesSTTService
 from pipecat.services.together.llm import TogetherLLMService
 from pipecat.services.whisper.base_stt import BaseWhisperSTTService
 from pipecat.services.xai.llm import GrokLLMService
@@ -71,6 +73,9 @@ KEY_OPTIONAL_SERVICES = {
     OLLamaLLMService,
     OpenAILLMService,
     OpenAISTTService,
+    # Dograh fork: self-hosted Speaches takes any key and substitutes "none".
+    SpeachesLLMService,
+    SpeachesSTTService,
 }
 
 
@@ -139,3 +144,9 @@ def test_nvidia_local_nim_without_key_does_not_use_openai_key():
 def test_nvidia_local_nim_without_any_key_constructs(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY")
     NvidiaLLMService(base_url="http://localhost:8000/v1")
+
+
+@pytest.mark.parametrize("service_cls", [SpeachesLLMService, SpeachesSTTService])
+@pytest.mark.parametrize("api_key", [None, ""])
+def test_keyless_speaches_never_sends_the_openai_key(service_cls, api_key):
+    assert service_cls(api_key=api_key)._client.api_key == "none"

@@ -62,6 +62,10 @@ from pipecat.utils.time import nanoseconds_to_seconds
 
 BOT_VAD_STOP_SECS = 0.35
 
+# The default of TransportParams.bot_vad_stop_secs, which replaces this constant
+# here. Kept because upstream modules such as the Tavus transport import it.
+BOT_VAD_STOP_FALLBACK_SECS = 3
+
 
 class BaseOutputTransport(FrameProcessor):
     """Base class for output transport implementations.
@@ -70,6 +74,11 @@ class BaseOutputTransport(FrameProcessor):
     timing coordination, and media streaming. Supports multiple output destinations
     and provides interruption handling for real-time communication.
     """
+
+    # Whether ``write_audio_frame`` returning False means the write failed, so that
+    # enough of them in a row cancel the worker. A transport that returns False to
+    # keep a written frame from being pushed downstream sets this to False.
+    unwritten_audio_is_failure = True
 
     def __init__(self, params: TransportParams, **kwargs):
         """Initialize the base output transport.
@@ -1073,7 +1082,11 @@ class BaseOutputTransport(FrameProcessor):
                     push_downstream = False
 
                 # Handle write failures
-                if not push_downstream and isinstance(frame, OutputAudioRawFrame):
+                if (
+                    not push_downstream
+                    and isinstance(frame, OutputAudioRawFrame)
+                    and self._transport.unwritten_audio_is_failure
+                ):
                     # A bounded-write timeout already reports a permanent error
                     # and marks the transport unusable. From that point the
                     # worker's ProcessorUnusablePolicy owns disposition; drain

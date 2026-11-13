@@ -199,6 +199,9 @@ class EvalClientOutputTransport(WebsocketClientOutputTransport):
     the silence they need to end a turn. Runs only when audio output is on.
     """
 
+    # write_audio_frame returns False for every frame it queues for the send task.
+    unwritten_audio_is_failure = False
+
     def __init__(self, *args, recorder: "EvalClientRecorder | None" = None, **kwargs):
         """Initialize the transport and its (lazily started) send stream."""
         super().__init__(*args, **kwargs)
