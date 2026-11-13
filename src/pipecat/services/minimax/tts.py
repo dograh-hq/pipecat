@@ -855,7 +855,47 @@ def _subtitle_words(subtitle: Mapping[str, Any]) -> list[tuple[str, float, float
     return words
 
 
-@dataclass
+def _speech_key(text: str) -> str:
+    """Text as spoken: whitespace between pieces is a separator, not speech."""
+    return " ".join(text.split())
+
+
+@dataclass(frozen=True)
+class MiniMaxSentenceAudio:
+    """The complete synthesis of one text, as a speech cache stores and replays it.
+
+    Parameters:
+        audio: 16-bit mono PCM at the service's sample rate.
+        words: The words spoken, each with its start and end in seconds from the
+            first sample of ``audio``.
+    """
+
+    audio: bytes
+    words: tuple[tuple[str, float, float], ...] = ()
+
+
+@dataclass(eq=False)
+class _SentText:
+    """A text sent to MiniMax whose audio has not yet been matched to it."""
+
+    text: str
+    # The speech cache's claim on this text's audio, if it asked for it.
+    token: Any = None
+    done: bool = False
+
+
+@dataclass(eq=False)
+class _Sentence:
+    """One of MiniMax's sentences, from sentence_start until its audio is complete."""
+
+    audio: bytearray = field(default_factory=bytearray)
+    audio_bytes: int = 0
+    subtitle: Mapping[str, Any] | None = None
+    # Whether its audio is kept for the speech cache, not only counted.
+    keep_audio: bool = False
+
+
+@dataclass(eq=False)
 class _Synthesis:
     """One audio context as MiniMax sees it: texts sent on the shared session, then one flush."""
 
@@ -865,6 +905,29 @@ class _Synthesis:
     flushed: bool = False
     stale: bool = False
     pcm_carry: bytes = b""
+    # Some of its text went to MiniMax. A reply played entirely from the speech
+    # cache never does, and ends without a flush.
+    remote: bool = False
+    # A reply that never went to MiniMax and has ended.
+    finished: bool = False
+    # Matching MiniMax's sentences to the texts sent, kept only while the speech
+    # cache is on: texts not yet matched, the sentence being received, and the
+    # sentences heard since the last match.
+    attributable: bool = True
+    pending: deque[_SentText] = field(default_factory=deque)
+    sentence: _Sentence | None = None
+    heard_text: str = ""
+    heard_bytes: int = 0
+    heard_audio: bytearray = field(default_factory=bytearray)
+    heard_words: list[tuple[str, float, float]] = field(default_factory=list)
+    heard_kept: bool = True
+
+    def reset_heard(self):
+        self.heard_text = ""
+        self.heard_bytes = 0
+        self.heard_audio = bytearray()
+        self.heard_words = []
+        self.heard_kept = True
 
 
 class MiniMaxTTSService(WebsocketTTSService):
@@ -892,6 +955,21 @@ class MiniMaxTTSService(WebsocketTTSService):
     offset by the audio already received for its context, and a word is reported
     once ``word_min_played_secs`` (or half of it, for short words) has played, so
     an interrupted reply's transcript holds only words the caller could hear.
+
+    A subclass can serve repeated texts from a speech cache by setting
+    ``_sentence_cache_enabled`` and overriding the ``_cached_sentence``,
+    ``_reserve_sentence_capture``, ``_sentence_captured`` and
+    ``_sentence_capture_dropped`` hooks. The service decides when a cached text can
+    play and which audio belongs to which text:
+
+    * A cached text plays at once only when nothing sent earlier in the same
+      reply is still being synthesized; otherwise it goes to MiniMax, which keeps
+      the reply in order. A reply played entirely from the cache never touches
+      the session and ends without a flush.
+    * MiniMax segments the text stream itself. A text's audio is known once the
+      subtitle texts of the sentences heard add up to exactly that text. When
+      they cover several texts at once, or don't match at all (MiniMax normalized
+      the text, say), nothing more in that reply is captured or replayed.
 
     Platform documentation:
     https://platform.minimax.io/docs/api-reference/speech-t2a-websocket-bidi
@@ -932,7 +1010,9 @@ class MiniMaxTTSService(WebsocketTTSService):
             language_boost=None,
             emotion=None,
             text_normalization=None,
+            text_normalization_mode=None,
             latex_read=None,
+            pronunciation_dict=None,
         )
         if settings is not None:
             default_settings.apply_update(settings)
@@ -956,6 +1036,8 @@ class MiniMaxTTSService(WebsocketTTSService):
         self._url = url
         self._word_min_played_secs = word_min_played_secs
         self._receive_task = None
+        # The reply run_tts is adding to, whether or not any of it went to MiniMax.
+        self._current: _Synthesis | None = None
         self._reset_stream_state()
 
     def can_generate_metrics(self) -> bool:
@@ -1010,11 +1092,72 @@ class MiniMaxTTSService(WebsocketTTSService):
             "subtitle_enable": True,
             "subtitle_type": "word",
         }
-        if self._settings.text_normalization:
-            message["text_normalization_mode"] = "basic"
+        # MiniMax treats "quality" as "basic" over WebSocket.
+        text_normalization_mode = assert_given(self._settings.text_normalization_mode)
+        if text_normalization_mode is None and self._settings.text_normalization:
+            text_normalization_mode = "basic"
+        if text_normalization_mode is not None:
+            message["text_normalization_mode"] = text_normalization_mode
         if self._settings.language_boost is not None:
             message["language_boost"] = self._settings.language_boost
+        pronunciation_dict = assert_given(self._settings.pronunciation_dict)
+        if pronunciation_dict:
+            message["pronunciation_dict"] = {"tone": list(pronunciation_dict)}
         return message
+
+    #
+    # Speech cache hooks. The defaults cache nothing.
+    #
+
+    # Whether the hooks below are called. Matching MiniMax's sentences to texts
+    # is skipped while it is off.
+    _sentence_cache_enabled = False
+
+    # A text whose audio grows past this is not kept for the cache.
+    _sentence_capture_max_bytes = 4 * 1024 * 1024
+
+    async def _cached_sentence(self, text: str) -> MiniMaxSentenceAudio | None:
+        """Return audio to play for ``text`` instead of synthesizing it, if cached.
+
+        Args:
+            text: The text about to be spoken.
+
+        Returns:
+            The cached synthesis, or None to synthesize the text.
+        """
+        return None
+
+    async def _reserve_sentence_capture(self, text: str) -> Any:
+        """Ask for ``text``'s complete synthesis once it has been received.
+
+        Args:
+            text: A text just sent to MiniMax.
+
+        Returns:
+            A token passed back to ``_sentence_captured`` or
+            ``_sentence_capture_dropped``, or None to not capture it.
+        """
+        return None
+
+    async def _sentence_captured(self, text: str, token: Any, sentence: MiniMaxSentenceAudio):
+        """Receive the complete synthesis of a text reserved for capture.
+
+        Args:
+            text: The text as sent.
+            token: The token ``_reserve_sentence_capture`` returned.
+            sentence: Its audio and word timestamps.
+        """
+
+    async def _sentence_capture_dropped(self, text: str, token: Any):
+        """Learn that a text reserved for capture will not be delivered.
+
+        Called when the reply is interrupted or fails, or when its audio could
+        not be matched to the text.
+
+        Args:
+            text: The text as sent.
+            token: The token ``_reserve_sentence_capture`` returned.
+        """
 
     async def setup(self, setup: FrameProcessorSetup):
         """Set up the service and open the session, so the first reply does not pay for it.
@@ -1046,6 +1189,7 @@ class MiniMaxTTSService(WebsocketTTSService):
             if self._websocket and self._websocket.state is State.OPEN:
                 return
             logger.debug(f"{self}: connecting to MiniMax")
+            await self._abandon_remote()
             self._reset_stream_state()
             websocket = await self._websocket_connect(
                 self._url, additional_headers={"Authorization": f"Bearer {self._api_key}"}
@@ -1093,6 +1237,7 @@ class MiniMaxTTSService(WebsocketTTSService):
         except Exception as e:
             await self.push_error_frame(ErrorFrame(error=f"{self} error: {e}", exception=e))
         finally:
+            await self._abandon_remote()
             self._reset_stream_state()
             self._websocket = None
             await self._call_event_handler("on_disconnected")
@@ -1136,6 +1281,10 @@ class MiniMaxTTSService(WebsocketTTSService):
                 except Exception as e:
                     logger.error(f"{self} error sending task_flush: {e}")
                 return
+        current = self._current
+        if current is not None and current.context_id == context_id and not current.remote:
+            # Played entirely from the cache: MiniMax has nothing to flush.
+            await self._end_local(current)
 
     async def _cancel_outstanding(self):
         """Cancel whatever MiniMax is still producing, and start dropping it.
@@ -1157,10 +1306,15 @@ class MiniMaxTTSService(WebsocketTTSService):
         self._awaiting_sentence_start = True
         for synthesis in self._syntheses:
             synthesis.stale = True
+            await self._abandon(synthesis)
         self._syntheses.clear()
 
     async def _handle_interruption(self, frame: InterruptionFrame, direction: FrameDirection):
         await self._cancel_outstanding()
+        current, self._current = self._current, None
+        if current is not None:
+            current.stale = True
+            await self._abandon(current)
         await super()._handle_interruption(frame, direction)
 
     async def _finish(self, context_id: str):
@@ -1168,9 +1322,158 @@ class MiniMaxTTSService(WebsocketTTSService):
             await self.append_to_audio_context(context_id, TTSStoppedFrame(context_id=context_id))
             await self.remove_audio_context(context_id)
 
+    async def _end_local(self, synthesis: _Synthesis):
+        """End a reply that never went to MiniMax, so no task_flushed will end it."""
+        if synthesis.finished or synthesis.stale:
+            return
+        synthesis.finished = True
+        await self._finish(synthesis.context_id)
+
+    #
+    # Speech cache bookkeeping
+    #
+
+    async def _drop_capture(self, sent: _SentText):
+        sent.done = True
+        token, sent.token = sent.token, None
+        if token is not None:
+            await self._sentence_capture_dropped(sent.text, token)
+
+    async def _abandon(self, synthesis: _Synthesis):
+        """Stop matching a reply's audio to its texts and release what it reserved."""
+        synthesis.attributable = False
+        pending, synthesis.pending = list(synthesis.pending), deque()
+        synthesis.sentence = None
+        synthesis.reset_heard()
+        for sent in pending:
+            await self._drop_capture(sent)
+
+    async def _abandon_remote(self):
+        """Abandon every reply whose audio the session still owed, before the session goes."""
+        owed = {id(s): s for s in [*self._syntheses, *self._flushes]}
+        if self._current is not None and self._current.remote:
+            owed[id(self._current)] = self._current
+        for synthesis in owed.values():
+            await self._abandon(synthesis)
+
+    async def _reserve_capture(self, sent: _SentText):
+        try:
+            token = await self._reserve_sentence_capture(sent.text)
+        except Exception as e:
+            logger.error(f"{self}: speech cache reservation failed: {e}")
+            return
+        sent.token = token
+        if sent.done:
+            # Matched, dropped or abandoned while the reservation was in flight.
+            await self._drop_capture(sent)
+
+    async def _play_cached(self, synthesis: _Synthesis, cached: MiniMaxSentenceAudio):
+        """Play a cached text where MiniMax's audio for it would have gone."""
+        offset = synthesis.audio_bytes / 2 / self.sample_rate
+        step = max(2, self.chunk_size // 2 * 2)
+        for start in range(0, len(cached.audio), step):
+            await self.append_to_audio_context(
+                synthesis.context_id,
+                TTSAudioRawFrame(
+                    audio=cached.audio[start : start + step],
+                    sample_rate=self.sample_rate,
+                    num_channels=1,
+                    context_id=synthesis.context_id,
+                ),
+            )
+        synthesis.audio_bytes += len(cached.audio)
+        word_times = [
+            (word, offset + start + min(self._word_min_played_secs, (end - start) / 2))
+            for word, start, end in cached.words
+        ]
+        if word_times:
+            await self.add_word_timestamps(word_times, synthesis.context_id)
+
+    def _start_sentence(self, synthesis: _Synthesis):
+        if not (self._sentence_cache_enabled and synthesis.attributable and synthesis.pending):
+            return
+        head = synthesis.pending[0]
+        synthesis.sentence = _Sentence(keep_audio=head.token is not None and synthesis.heard_kept)
+
+    async def _complete_sentence(self, synthesis: _Synthesis):
+        """Match a finished sentence, and those heard before it, to the texts sent."""
+        sentence, synthesis.sentence = synthesis.sentence, None
+        if sentence is None or not synthesis.attributable or not synthesis.pending:
+            return
+        spoken = _speech_key(str((sentence.subtitle or {}).get("text") or ""))
+        if not spoken:
+            await self._lose_attribution(synthesis, "a sentence arrived without its subtitle")
+            return
+        # Subtitle times start at the sentence's first sample.
+        offset = synthesis.heard_bytes / 2 / self.sample_rate
+        synthesis.heard_words.extend(
+            (word, offset + start, offset + end)
+            for word, start, end in _subtitle_words(sentence.subtitle or {})
+        )
+        synthesis.heard_text = f"{synthesis.heard_text} {spoken}".strip()
+        synthesis.heard_bytes += sentence.audio_bytes
+        synthesis.heard_kept = synthesis.heard_kept and sentence.keep_audio
+        if synthesis.heard_kept:
+            synthesis.heard_audio.extend(sentence.audio)
+            if len(synthesis.heard_audio) > self._sentence_capture_max_bytes:
+                synthesis.heard_kept = False
+                synthesis.heard_audio = bytearray()
+
+        expected = ""
+        for count, sent in enumerate(synthesis.pending, start=1):
+            expected = f"{expected} {_speech_key(sent.text)}".strip()
+            if expected == synthesis.heard_text:
+                matched = [synthesis.pending.popleft() for _ in range(count)]
+                first = matched[0]
+                if count == 1 and synthesis.heard_kept and first.token is not None:
+                    token, first.token = first.token, None
+                    first.done = True
+                    await self._sentence_captured(
+                        first.text,
+                        token,
+                        MiniMaxSentenceAudio(
+                            audio=bytes(synthesis.heard_audio),
+                            words=tuple(synthesis.heard_words),
+                        ),
+                    )
+                # Texts MiniMax spoke as one sentence share audio that can't be split.
+                for sent_text in matched:
+                    await self._drop_capture(sent_text)
+                synthesis.reset_heard()
+                return
+            if len(expected) >= len(synthesis.heard_text):
+                break
+        everything = " ".join(_speech_key(sent.text) for sent in synthesis.pending)
+        if not everything.startswith(synthesis.heard_text):
+            await self._lose_attribution(
+                synthesis, f"MiniMax spoke [{synthesis.heard_text}] for [{everything}]"
+            )
+
+    async def _lose_attribution(self, synthesis: _Synthesis, reason: str):
+        logger.debug(f"{self}: {reason}; the rest of this reply skips the speech cache")
+        await self._abandon(synthesis)
+
+    async def _sentence_event(self, coro):
+        """Run speech cache bookkeeping without letting it disturb playback."""
+        try:
+            await coro
+        except Exception as e:
+            logger.error(f"{self}: speech cache bookkeeping failed: {e}")
+
+    def _head_sentence_open(self) -> bool:
+        return bool(self._syntheses) and self._syntheses[0].sentence is not None
+
+    #
+    # Receiving
+    #
+
+    def _is_stale(self, message: dict) -> bool:
+        trace = message.get("trace_id")
+        return self._dropping_audio or trace in self._stale_traces
+
     async def _on_audio(self, message: dict, data: dict):
         trace = message.get("trace_id")
-        if self._dropping_audio or trace in self._stale_traces:
+        if self._is_stale(message):
             if trace:
                 self._stale_traces.add(trace)
             self._dropped_bytes += len(data["audio"]) // 2
@@ -1194,6 +1497,13 @@ class MiniMaxTTSService(WebsocketTTSService):
             )
         synthesis.audio_bytes += usable
         subtitle = data.get("subtitle")
+        sentence = synthesis.sentence
+        if sentence is not None:
+            sentence.audio_bytes += usable
+            if sentence.keep_audio:
+                sentence.audio.extend(pcm[:usable])
+            if subtitle:
+                sentence.subtitle = subtitle
         if subtitle:
             # Times restart at 0 for every sentence; place them within the reply.
             offset = synthesis.sentence_offset_secs
@@ -1216,6 +1526,7 @@ class MiniMaxTTSService(WebsocketTTSService):
                 await self.set_usable(False)
             # MiniMax closes the session after this; end every reply it was serving,
             # once each (a flushed reply sits in both queues).
+            await self._sentence_event(self._abandon_remote())
             pending = {id(s): s for s in [*self._syntheses, *self._flushes] if not s.stale}
             for synthesis in pending.values():
                 await self._finish(synthesis.context_id)
@@ -1242,15 +1553,29 @@ class MiniMaxTTSService(WebsocketTTSService):
                 self._awaiting_sentence_start = False
                 if self._syntheses:
                     synthesis = self._syntheses[0]
+                    if synthesis.sentence is not None:
+                        await self._sentence_event(self._complete_sentence(synthesis))
                     synthesis.sentence_offset_secs = synthesis.audio_bytes / 2 / self.sample_rate
+                    self._start_sentence(synthesis)
+        elif event == "sentence_end":
+            if not self._is_stale(message) and self._head_sentence_open():
+                await self._sentence_event(self._complete_sentence(self._syntheses[0]))
         elif event == "task_flushed":
             synthesis = self._flushes.popleft() if self._flushes else None
             if synthesis is not None and not synthesis.stale:
+                if synthesis.sentence is not None:
+                    await self._sentence_event(self._complete_sentence(synthesis))
+                # Texts still unmatched now never will be.
+                await self._sentence_event(self._abandon(synthesis))
                 if synthesis in self._syntheses:
                     self._syntheses.remove(synthesis)
                 await self._finish(synthesis.context_id)
-        elif event == "task_continued" and data.get("audio"):
-            await self._on_audio(message, data)
+        elif event == "task_continued":
+            if data.get("audio"):
+                await self._on_audio(message, data)
+            if message.get("is_final") and not self._is_stale(message):
+                if self._head_sentence_open():
+                    await self._sentence_event(self._complete_sentence(self._syntheses[0]))
 
     async def _receive_messages(self):
         async for raw in self._get_websocket():
@@ -1265,9 +1590,49 @@ class MiniMaxTTSService(WebsocketTTSService):
                 # A malformed event loses its own audio or words, not the session.
                 logger.error(f"{self}: error handling MiniMax event {message!r:.200}: {e}")
 
+    #
+    # Sending
+    #
+
+    async def _synthesis_for(self, context_id: str) -> _Synthesis:
+        """The reply ``context_id`` adds to, ending a previous reply that never ended."""
+        current = self._current
+        if current is not None and current.context_id == context_id and not current.stale:
+            if not current.finished:
+                return current
+        elif current is not None and current.remote:
+            # This reply may never reach MiniMax, so flush the last one now rather
+            # than when this one's first text is sent.
+            if (
+                not current.flushed
+                and current in self._syntheses
+                and self._websocket
+                and self._websocket.state is State.OPEN
+            ):
+                await self._send_flush(current)
+        elif current is not None:
+            await self._end_local(current)
+        self._current = _Synthesis(context_id=context_id)
+        return self._current
+
+    async def _cached_audio_for(self, synthesis: _Synthesis, text: str):
+        if not (self._sentence_cache_enabled and synthesis.attributable and not synthesis.pending):
+            return None
+        try:
+            cached = await self._cached_sentence(text)
+        except Exception as e:
+            logger.error(f"{self}: speech cache lookup failed: {e}")
+            return None
+        if cached is None or not cached.audio or len(cached.audio) % 2:
+            return None
+        return cached
+
     @traced_tts
     async def run_tts(self, text: str, context_id: str) -> AsyncGenerator[Frame | None, None]:
         """Send text for synthesis; audio arrives on the receive task.
+
+        A text the speech cache holds plays from the cache instead, when it can
+        without reordering the reply.
 
         Args:
             text: The text to synthesize into speech.
@@ -1276,21 +1641,38 @@ class MiniMaxTTSService(WebsocketTTSService):
         Yields:
             Frame: None, or an ErrorFrame if the text could not be sent.
         """
+        synthesis = None
         try:
+            synthesis = await self._synthesis_for(context_id)
+            cached = await self._cached_audio_for(synthesis, text)
+            if cached is not None:
+                await self._play_cached(synthesis, cached)
+                yield None
+                return
             if not self._websocket or self._websocket.state is not State.OPEN:
                 await self._connect()
-            if not self._syntheses or self._syntheses[-1].context_id != context_id:
+            if synthesis not in self._syntheses:
                 # A reply that never flushed would run into this one on MiniMax's side.
                 if self._syntheses and not self._syntheses[-1].flushed:
                     await self._send_flush(self._syntheses[-1])
-                self._syntheses.append(_Synthesis(context_id=context_id))
+                synthesis.remote = True
+                self._syntheses.append(synthesis)
+            sent = _SentText(text)
+            track = self._sentence_cache_enabled and synthesis.attributable
+            if track:
+                synthesis.pending.append(sent)
             await self._get_websocket().send(json.dumps({"event": "task_continue", "text": text}))
             await self.start_tts_usage_metrics(text)
+            if track:
+                await self._reserve_capture(sent)
             yield None
         except Exception as e:
             yield ErrorFrame(error=f"MiniMax TTS error: {e}", exception=e)
             # No audio will come for this reply, so end it here.
-            for synthesis in [s for s in self._syntheses if s.context_id == context_id]:
+            for stale in [s for s in self._syntheses if s.context_id == context_id]:
+                stale.stale = True
+                self._syntheses.remove(stale)
+            if synthesis is not None:
                 synthesis.stale = True
-                self._syntheses.remove(synthesis)
+                await self._sentence_event(self._abandon(synthesis))
             await self._finish(context_id)

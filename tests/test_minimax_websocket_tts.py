@@ -28,7 +28,12 @@ from pipecat.frames.frames import (
     TTSStoppedFrame,
     TTSTextFrame,
 )
-from pipecat.services.minimax.tts import MiniMaxTTSService, _subtitle_words
+from pipecat.services.minimax.tts import (
+    MiniMaxSentenceAudio,
+    MiniMaxTTSService,
+    _speech_key,
+    _subtitle_words,
+)
 from pipecat.tests.utils import run_test
 
 OK = {"status_code": 0, "status_msg": "success"}
@@ -89,10 +94,43 @@ class _FakeSocket:
         self.state = State.CLOSED
 
 
+class _CachingTTS(MiniMaxTTSService):
+    """A service with an in-memory speech cache, recording what the hooks were asked."""
+
+    _sentence_cache_enabled = True
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.cache: dict[str, MiniMaxSentenceAudio] = {}
+        self.lookups, self.reserved, self.captured, self.dropped = [], [], [], []
+
+    async def _cached_sentence(self, text):
+        self.lookups.append(text)
+        return self.cache.get(_speech_key(text))
+
+    async def _reserve_sentence_capture(self, text):
+        self.reserved.append(text)
+        return f"token:{_speech_key(text)}"
+
+    async def _sentence_captured(self, text, token, sentence):
+        self.captured.append((text, token, sentence))
+
+    async def _sentence_capture_dropped(self, text, token):
+        self.dropped.append((text, token))
+
+
 @pytest.fixture
 def tts(monkeypatch):
     """A service wired to a fake socket, recording what it hands to its audio contexts."""
-    service = MiniMaxTTSService(api_key="test-key", sample_rate=8000)
+    return _wired(MiniMaxTTSService(api_key="test-key", sample_rate=8000), monkeypatch)
+
+
+@pytest.fixture
+def caching_tts(monkeypatch):
+    return _wired(_CachingTTS(api_key="test-key", sample_rate=8000), monkeypatch)
+
+
+def _wired(service, monkeypatch):
     service._sample_rate = 8000
     service._websocket = _FakeSocket()
     service.audio, service.words, service.stopped, service.errors = [], [], [], []
@@ -470,3 +508,249 @@ async def test_a_spoken_reply_produces_audio_and_word_frames_end_to_end():
         "Filippo.",
     ]
     assert not [f for f in frames if isinstance(f, ErrorFrame)]
+
+
+@pytest.mark.parametrize(
+    "settings, mode",
+    [
+        ({}, None),
+        ({"text_normalization_mode": "basic"}, "basic"),
+        # MiniMax treats it as "basic" over WebSocket; that is its decision to make.
+        ({"text_normalization_mode": "quality"}, "quality"),
+        ({"text_normalization": True}, "basic"),
+        ({"text_normalization": True, "text_normalization_mode": "quality"}, "quality"),
+    ],
+)
+def test_task_start_sends_the_text_normalization_mode(settings, mode):
+    service = MiniMaxTTSService(api_key="test-key", settings=MiniMaxTTSService.Settings(**settings))
+
+    assert service._task_start_message().get("text_normalization_mode") == mode
+    assert "text_normalization" not in service._task_start_message()["voice_setting"]
+
+
+@pytest.mark.parametrize("tone", [None, [], ["Dograh/(ˈdoʊɡrɑː)", "SRL/esse erre elle"]])
+def test_task_start_sends_the_pronunciation_dict_only_when_set(tone):
+    service = MiniMaxTTSService(
+        api_key="test-key", settings=MiniMaxTTSService.Settings(pronunciation_dict=tone)
+    )
+
+    message = service._task_start_message()
+    if tone:
+        assert message["pronunciation_dict"] == {"tone": tone}
+    else:
+        assert "pronunciation_dict" not in message
+
+
+def _cached(n_bytes: int, *words: tuple[str, float, float]) -> MiniMaxSentenceAudio:
+    return MiniMaxSentenceAudio(audio=b"\x01" * n_bytes, words=words)
+
+
+def _audio_bytes(service, context_id: str) -> int:
+    return sum(n for context, n in service.audio if context == context_id)
+
+
+@pytest.mark.asyncio
+async def test_without_a_speech_cache_nothing_is_tracked(tts):
+    await _say(tts, "Uno. ", "A", flush=False)
+    await _feed(
+        tts,
+        _event("sentence_start"),
+        _audio("t1", 4, subtitle=_subtitle("Uno.", [("Uno", 0, 3, 0, 100)])),
+    )
+
+    assert not tts._current.pending
+    assert tts._current.sentence is None
+
+
+@pytest.mark.asyncio
+async def test_a_cached_reply_plays_without_reaching_minimax(caching_tts):
+    caching_tts.cache["Buongiorno, sono Filippo di Acme."] = _cached(
+        16000, ("Buongiorno,", 0.033, 0.591), ("sono", 0.624, 1.017)
+    )
+
+    await _say(caching_tts, "Buongiorno, sono Filippo di Acme. ", "A")
+
+    assert _sent_events(caching_tts) == []
+    assert _audio_bytes(caching_tts, "A") == 16000
+    assert caching_tts.words == [("A", "Buongiorno,", 0.113), ("A", "sono", 0.704)]
+    assert caching_tts.stopped == ["A"]
+    assert caching_tts.reserved == []
+
+
+@pytest.mark.asyncio
+async def test_a_missed_text_is_captured_with_its_audio_and_words(caching_tts):
+    await _say(caching_tts, "Buongiorno, sono Filippo di Acme. ", "A")
+    await _feed(
+        caching_tts,
+        _event("sentence_start"), _audio("t1", 16000), _audio("t1", 16000, subtitle=BUONGIORNO),
+        _final("t1"), _event("sentence_end", "t1"), _event("task_flushed"),
+    )  # fmt: skip
+
+    assert _sent_events(caching_tts) == ["task_continue", "task_flush"]
+    [(text, token, sentence)] = caching_tts.captured
+    assert text == "Buongiorno, sono Filippo di Acme. "
+    assert token == "token:Buongiorno, sono Filippo di Acme."
+    assert sentence.audio == bytes.fromhex("01" * 32000)
+    assert sentence.words == tuple(_subtitle_words(BUONGIORNO))
+    assert caching_tts.dropped == []
+    assert caching_tts.stopped == ["A"]
+
+
+@pytest.mark.asyncio
+async def test_a_text_minimax_splits_into_sentences_is_captured_whole(caching_tts):
+    await _say(caching_tts, "Sì. Certo. ", "A")
+    await _feed(
+        caching_tts,
+        _event("sentence_start"), _audio("t1", 8000, subtitle=_subtitle("Sì.", [("Sì", 0, 2, 0, 300), (".", 2, 3, 300, 400)])),
+        _final("t1"),
+        _event("sentence_start"), _audio("t2", 4000, subtitle=_subtitle("Certo.", [("Certo", 0, 5, 50, 350), (".", 5, 6, 350, 400)])),
+        _final("t2"), _event("task_flushed"),
+    )  # fmt: skip
+
+    [(_, _, sentence)] = caching_tts.captured
+    assert len(sentence.audio) == 12000
+    # The second sentence starts after the first's 8000 bytes: 0.5 s at 8 kHz.
+    assert sentence.words == (("Sì.", 0.0, 0.4), ("Certo.", 0.55, 0.9))
+
+
+@pytest.mark.asyncio
+async def test_texts_minimax_speaks_as_one_sentence_are_not_captured(caching_tts):
+    await _say(caching_tts, "Sì, ", "A", flush=False)
+    await _say(caching_tts, "certo. ", "A", flush=False)
+    await _say(caching_tts, "Arrivederci. ", "A")
+    await _feed(
+        caching_tts,
+        _event("sentence_start"), _audio("t1", 8000, subtitle=_subtitle("Sì, certo.", [("Sì", 0, 2, 0, 300), ("certo", 4, 9, 400, 800)])),
+        _final("t1"),
+        _event("sentence_start"), _audio("t2", 4000, subtitle=_subtitle("Arrivederci.", [("Arrivederci", 0, 11, 0, 500)])),
+        _final("t2"), _event("task_flushed"),
+    )  # fmt: skip
+
+    assert [text for text, _ in caching_tts.dropped] == ["Sì, ", "certo. "]
+    # Back in step after the shared sentence, so the next text is captured.
+    assert [text for text, _, _ in caching_tts.captured] == ["Arrivederci. "]
+
+
+@pytest.mark.asyncio
+async def test_a_subtitle_that_does_not_match_stops_the_cache_for_the_reply(caching_tts):
+    caching_tts.cache["Arrivederci."] = _cached(4000, ("Arrivederci.", 0.0, 0.5))
+    await _say(caching_tts, "Alle 10:30. ", "A", flush=False)
+    await _feed(
+        caching_tts,
+        _event("sentence_start"), _audio("t1", 8000, subtitle=_subtitle("Alle dieci e trenta.", [("Alle", 0, 4, 0, 300)])),
+        _final("t1"),
+    )  # fmt: skip
+    await _say(caching_tts, "Arrivederci. ", "A")
+
+    assert [text for text, _ in caching_tts.dropped] == ["Alle 10:30. "]
+    assert caching_tts.captured == []
+    # The cached text went to MiniMax: the reply's audio can no longer be matched.
+    assert _sent_events(caching_tts) == ["task_continue", "task_continue", "task_flush"]
+    assert caching_tts.lookups == ["Alle 10:30. "]
+
+
+@pytest.mark.asyncio
+async def test_a_cached_text_waits_for_synthesis_still_under_way(caching_tts):
+    caching_tts.cache["Perfetto."] = _cached(2000, ("Perfetto.", 0.0, 0.2))
+    await _say(caching_tts, "Ho capito. ", "A", flush=False)
+    # The first text has no audio yet, so playing the cached one now would reorder the reply.
+    await _say(caching_tts, "Perfetto. ", "A", flush=False)
+
+    assert _sent_events(caching_tts) == ["task_continue", "task_continue"]
+
+    await _feed(
+        caching_tts,
+        _event("sentence_start"), _audio("t1", 4000, subtitle=_subtitle("Ho capito.", [("Ho", 0, 2, 0, 100), ("capito.", 3, 10, 100, 400)])),
+        _final("t1"),
+        _event("sentence_start"), _audio("t2", 2000, subtitle=_subtitle("Perfetto.", [("Perfetto.", 0, 9, 0, 200)])),
+        _final("t2"),
+    )  # fmt: skip
+    # Everything sent has been heard, so a cached text can play straight after it.
+    await _say(caching_tts, "Perfetto. ", "A")
+
+    assert _sent_events(caching_tts) == ["task_continue", "task_continue", "task_flush"]
+    assert caching_tts.audio == [("A", 4000), ("A", 2000), ("A", 2000)]
+    # The replay's words sit after the 6000 bytes already received: 0.375 s at 8 kHz.
+    assert caching_tts.words[-1] == ("A", "Perfetto.", 0.375 + 0.08)
+
+
+@pytest.mark.asyncio
+async def test_a_cached_reply_flushes_the_unflushed_reply_before_it(caching_tts):
+    caching_tts.cache["Arrivederci."] = _cached(4000, ("Arrivederci.", 0.0, 0.5))
+    await _say(caching_tts, "Uno. ", "A", flush=False)
+    await _say(caching_tts, "Arrivederci. ", "B")
+
+    assert _sent_events(caching_tts) == ["task_continue", "task_flush"]
+    assert caching_tts.stopped == ["B"]
+
+    await _feed(caching_tts, _event("sentence_start"), _audio("t1", 4), _event("task_flushed"))
+    assert caching_tts.stopped == ["B", "A"]
+
+
+@pytest.mark.asyncio
+async def test_cancelling_drops_every_reserved_capture(caching_tts):
+    await _say(caching_tts, "Uno. ", "A", flush=False)
+    await _say(caching_tts, "Due. ", "A")
+    await _feed(caching_tts, _event("sentence_start"), _audio("t1", 4))
+
+    await caching_tts._cancel_outstanding()
+
+    assert [text for text, _ in caching_tts.dropped] == ["Uno. ", "Due. "]
+    assert caching_tts.captured == []
+
+
+@pytest.mark.asyncio
+async def test_a_failed_task_drops_every_reserved_capture(caching_tts):
+    await _say(caching_tts, "Uno. ", "A")
+    await _feed(
+        caching_tts,
+        _event("task_failed", base_resp={"status_code": 1000, "status_msg": "unknown error"}),
+    )
+
+    assert [text for text, _ in caching_tts.dropped] == ["Uno. "]
+    assert caching_tts.stopped == ["A"]
+
+
+class _MemoryCacheTTS(_CachingTTS):
+    """Stores what it captures, so a later call replays it."""
+
+    def __init__(self, store: dict, **kwargs):
+        super().__init__(**kwargs)
+        self.cache = store
+
+    async def _sentence_captured(self, text, token, sentence):
+        await super()._sentence_captured(text, token, sentence)
+        self.cache[_speech_key(text)] = sentence
+
+
+@pytest.mark.asyncio
+async def test_a_reply_captured_on_one_call_replays_on_the_next_end_to_end():
+    store: dict = {}
+    results = []
+    async with websockets.serve(_fake_minimax, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        for _ in range(2):
+            tts = _MemoryCacheTTS(
+                store,
+                api_key="test-key",
+                url=f"ws://127.0.0.1:{port}",
+                sample_rate=8000,
+                pause_frame_processing=False,
+            )
+            down, up = await run_test(
+                tts, frames_to_send=[TTSSpeakFrame(text="Buongiorno, sono Filippo.")]
+            )
+            frames = list(down) + list(up)
+            results.append(
+                (
+                    sum(len(f.audio) for f in frames if isinstance(f, TTSAudioRawFrame)),
+                    [f.text for f in frames if isinstance(f, TTSTextFrame)],
+                    len(tts.captured),
+                    [f for f in frames if isinstance(f, ErrorFrame)],
+                )
+            )
+
+    assert list(store) == ["Buongiorno, sono Filippo."]
+    words = ["Buongiorno,", "sono", "Filippo."]
+    # The first call synthesizes and captures; the second replays the same audio and words.
+    assert results == [(16000, words, 1, []), (16000, words, 0, [])]
