@@ -23,6 +23,7 @@ from PIL import Image
 
 from pipecat.audio.dtmf.utils import load_dtmf_audio
 from pipecat.audio.mixers.base_audio_mixer import BaseAudioMixer
+from pipecat.audio.resamplers.base_audio_resampler import BaseAudioResampler
 from pipecat.audio.utils import create_stream_resampler, is_silence, scale_audio
 from pipecat.frames.frames import (
     AssistantImageRawFrame,
@@ -61,6 +62,10 @@ from pipecat.utils.time import nanoseconds_to_seconds
 
 BOT_VAD_STOP_SECS = 0.35
 
+# The default of TransportParams.bot_vad_stop_secs, which replaces this constant
+# here. Kept because upstream modules such as the Tavus transport import it.
+BOT_VAD_STOP_FALLBACK_SECS = 3
+
 
 class BaseOutputTransport(FrameProcessor):
     """Base class for output transport implementations.
@@ -69,6 +74,11 @@ class BaseOutputTransport(FrameProcessor):
     timing coordination, and media streaming. Supports multiple output destinations
     and provides interruption handling for real-time communication.
     """
+
+    # Whether ``write_audio_frame`` returning False means the write failed, so that
+    # enough of them in a row cancel the worker. A transport that returns False to
+    # keep a written frame from being pushed downstream sets this to False.
+    unwritten_audio_is_failure = True
 
     def __init__(self, params: TransportParams, **kwargs):
         """Initialize the base output transport.
@@ -139,6 +149,9 @@ class BaseOutputTransport(FrameProcessor):
         """
         await super().setup(setup)
         self._sample_rate = self._params.audio_out_sample_rate or setup.audio_out_sample_rate
+        if self._params.audio_out_enabled:
+            source = "transport params" if self._params.audio_out_sample_rate else "pipeline"
+            logger.debug(f"{self}: output audio sample rate {self._sample_rate} Hz (from {source})")
 
         # We will write 10ms*CHUNKS of audio at a time (where CHUNKS is the
         # `audio_out_10ms_chunks` parameter). If we receive long audio frames we
@@ -464,13 +477,9 @@ class BaseOutputTransport(FrameProcessor):
             self._audio_runs: deque[tuple[bytearray, bool]] = deque()
             self._audio_buffer_cls: type[OutputAudioRawFrame] = OutputAudioRawFrame
 
-            # This will be used to resample incoming audio to the output sample
-            # rate. Speech boundaries are signalled explicitly (see
-            # `_enqueue_flushed_audio_buffer` and `_bot_stopped_speaking`), so
-            # the resampler must not discard its filter tail on its own: it runs
-            # ahead of playback and would otherwise treat the pause between two
-            # TTS chunks as the end of the stream.
-            self._resampler = create_stream_resampler(clear_after_secs=None)
+            # Resamples incoming audio to the output sample rate, created when
+            # audio first arrives at another rate.
+            self._resampler: BaseAudioResampler | None = None
 
             # The user can provide a single mixer, to be used by the default
             # destination, or a destination/mixer mapping.
@@ -655,9 +664,9 @@ class BaseOutputTransport(FrameProcessor):
 
             # We might need to resample if incoming audio doesn't match the
             # transport sample rate.
-            resampled = await self._resampler.resample(
-                frame.audio, frame.sample_rate, self._sample_rate
-            )
+            resampled = frame.audio
+            if frame.sample_rate != self._sample_rate:
+                resampled = await self._resample(frame)
 
             cls = type(frame)
             self._audio_buffer_cls = cls
@@ -781,7 +790,7 @@ class BaseOutputTransport(FrameProcessor):
             """
             # The resampler holds the tail of the audio it was fed, which
             # belongs at the end of this speech run, with the last run's flag.
-            tail = await self._resampler.flush()
+            tail = await self._resampler.flush() if self._resampler else b""
             last_uninterruptible = self._audio_runs[-1][1] if self._audio_runs else False
             self._buffer_audio(tail, uninterruptible=last_uninterruptible)
 
@@ -798,6 +807,17 @@ class BaseOutputTransport(FrameProcessor):
                 audio, uninterruptible = self._take_audio_chunk()
                 padding = bytes(self._audio_chunk_size - len(audio))
                 await self._enqueue_audio_chunk(audio + padding, uninterruptible)
+
+        async def _resample(self, frame: OutputAudioRawFrame) -> bytes:
+            """Resample the frame's audio to the output sample rate."""
+            if not self._resampler:
+                destination = f" [{self._destination}]" if self._destination else ""
+                logger.debug(
+                    f"{self._transport}{destination}: resampling output audio from "
+                    f"{frame.sample_rate} Hz to {self._sample_rate} Hz"
+                )
+                self._resampler = create_stream_resampler()
+            return await self._resampler.resample(frame.audio, frame.sample_rate, self._sample_rate)
 
         @property
         def _buffered_audio_bytes(self) -> int:
@@ -857,7 +877,8 @@ class BaseOutputTransport(FrameProcessor):
             # same goes for the audio still inside the resampler, which would
             # otherwise be prepended to whatever the bot says next.
             self._clear_audio_buffer()
-            await self._resampler.reset()
+            if self._resampler:
+                await self._resampler.reset()
 
             logger.debug(
                 f"Bot{f' [{self._destination}]' if self._destination else ''} stopped speaking"
@@ -1061,7 +1082,11 @@ class BaseOutputTransport(FrameProcessor):
                     push_downstream = False
 
                 # Handle write failures
-                if not push_downstream and isinstance(frame, OutputAudioRawFrame):
+                if (
+                    not push_downstream
+                    and isinstance(frame, OutputAudioRawFrame)
+                    and self._transport.unwritten_audio_is_failure
+                ):
                     # A bounded-write timeout already reports a permanent error
                     # and marks the transport unusable. From that point the
                     # worker's ProcessorUnusablePolicy owns disposition; drain

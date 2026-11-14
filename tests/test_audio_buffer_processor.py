@@ -11,6 +11,7 @@ import warnings
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from pipecat.audio.utils import create_stream_resampler
 from pipecat.clocks.system_clock import SystemClock
 from pipecat.frames.frames import (
     AudioBufferStartRecordingFrame,
@@ -21,6 +22,8 @@ from pipecat.frames.frames import (
     InputAudioRawFrame,
     OutputAudioRawFrame,
     StartFrame,
+    UserMuteStartedFrame,
+    UserMuteStoppedFrame,
     UserStartedSpeakingFrame,
     UserStoppedSpeakingFrame,
 )
@@ -32,13 +35,13 @@ from pipecat.utils.asyncio.task_manager import TaskManager
 
 
 class _PassthroughResampler:
-    async def reset(self):
-        pass
-
     async def resample(
         self, audio: bytes, in_rate: int, out_rate: int
     ) -> bytes:  # pragma: no cover - trivial
         return audio
+
+    async def reset(self):  # pragma: no cover - trivial
+        pass
 
 
 async def _make_processor(
@@ -796,6 +799,59 @@ class TestBotSilenceGapInsertion(unittest.IsolatedAsyncioTestCase):
         await p.cleanup()
 
 
+class TestResamplingAcrossPauses(unittest.IsolatedAsyncioTestCase):
+    """Audio resumed after a pause doesn't start with audio from before it.
+
+    The 24 kHz audio is resampled to the processor's 16 kHz, and the
+    resampler's filter holds the last few milliseconds it was given.
+    """
+
+    async def asyncSetUp(self):
+        self.processor = await _make_processor()
+        self.processor._input_resampler = create_stream_resampler()
+        self.processor._output_resampler = create_stream_resampler()
+
+    async def asyncTearDown(self):
+        await self.processor.cleanup()
+
+    async def _send(self, frame):
+        await self.processor.process_frame(frame, FrameDirection.DOWNSTREAM)
+
+    async def _send_user_audio(self, sample: int, ms: int):
+        for _ in range(ms // 20):
+            audio = struct.pack("<480h", *([sample] * 480))
+            await self._send(InputAudioRawFrame(audio=audio, sample_rate=24000, num_channels=1))
+
+    async def _send_bot_reply(self, sample: int, ms: int):
+        await self._send(BotStartedSpeakingFrame())
+        for _ in range(ms // 20):
+            audio = struct.pack("<480h", *([sample] * 480))
+            await self._send(OutputAudioRawFrame(audio=audio, sample_rate=24000, num_channels=1))
+        await self._send(BotStoppedSpeakingFrame())
+
+    async def test_bot_reply_doesnt_start_with_the_end_of_the_previous_one(self):
+        await self._send_bot_reply(1000, ms=100)
+        await self._send_user_audio(0, ms=200)
+        await self._send_bot_reply(0, ms=100)
+
+        _, bot = await _capture_track_audio(self.processor)
+
+        # 100 ms at 16 kHz, 16-bit.
+        self.assertEqual(bot[3200:], bytes(len(bot) - 3200))
+
+    async def test_unmuted_user_audio_doesnt_start_with_audio_from_before_the_mute(self):
+        await self._send_user_audio(1000, ms=100)
+        await self._send(UserMuteStartedFrame())
+        await self._send_bot_reply(0, ms=200)
+        await self._send(UserMuteStoppedFrame())
+        await self._send_user_audio(0, ms=100)
+
+        user, _ = await _capture_track_audio(self.processor)
+
+        # 100 ms at 16 kHz, 16-bit.
+        self.assertEqual(user[3200:], bytes(len(user) - 3200))
+
+
 class TestRecordingControlFrames(unittest.IsolatedAsyncioTestCase):
     """Tests for frame-driven recording control.
 
@@ -1332,6 +1388,43 @@ class TestUnmixedBotTrack(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(chunks[-1], (b"\x01\x00" * 160, b"\x00\x00" * 160))
         finally:
             await processor.cleanup()
+
+    async def test_a_reply_starting_over_ambience_keeps_both_tracks_continuous(self):
+        # An output mixer keeps 24 kHz audio flowing between replies. The
+        # resamplers taking it to 16 kHz each hold a few milliseconds, which a
+        # reset when the reply starts would drop from one track only.
+        processor = await _make_processor(use_unmixed_audio_for_bot_track=True)
+        processor._output_resampler = create_stream_resampler()
+        processor._unmixed_output_resampler = create_stream_resampler()
+        merged = []
+
+        @processor.event_handler("on_audio_data")
+        async def on_audio(_, audio, rate, channels):
+            merged.append(audio)
+
+        frames, sent_mixed, sent_clean = [], b"", b""
+        for mixed_sample, clean_sample in [(3000, 0)] * 10 + [(5000, 2000)] * 10:
+            frame = OutputAudioRawFrame(struct.pack("<h", mixed_sample) * 480, 24000, 1)
+            frame.unmixed_audio = struct.pack("<h", clean_sample) * 480
+            frames.append(frame)
+            sent_mixed += frame.audio
+            sent_clean += frame.unmixed_audio
+        frames.insert(10, BotStartedSpeakingFrame())
+
+        try:
+            for frame in frames:
+                await processor.process_frame(frame, FrameDirection.DOWNSTREAM)
+            _, bot = await _capture_track_audio(processor)
+        finally:
+            await processor.cleanup()
+
+        expected_mixed = await create_stream_resampler().resample(sent_mixed, 24000, 16000)
+        expected_clean = await create_stream_resampler().resample(sent_clean, 24000, 16000)
+        stereo = b"".join(merged)
+        mixed = b"".join(stereo[i + 2 : i + 4] for i in range(0, len(stereo), 4))
+        self.assertEqual(len(mixed), len(bot))
+        self.assertEqual(mixed[: len(expected_mixed)], expected_mixed)
+        self.assertEqual(bot[: len(expected_clean)], expected_clean)
 
 
 if __name__ == "__main__":

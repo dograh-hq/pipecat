@@ -27,6 +27,8 @@ class HuggingFaceLLMSettings(BaseOpenAILLMService.Settings):
 class HuggingFaceLLMService(OpenAILLMService):
     """OpenAI-compatible LLM service for Hugging Face Inference Providers."""
 
+    _requires_api_key = True
+
     Settings = HuggingFaceLLMSettings
     _settings: Settings
     supports_developer_role = False

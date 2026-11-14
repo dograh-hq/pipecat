@@ -69,6 +69,8 @@ class MiniMaxLLMService(OpenAILLMService):
     accessible to observers and logging without sending it to TTS.
     """
 
+    _requires_api_key = True
+
     Settings = MiniMaxLLMSettings
     _settings: Settings
 

@@ -34,6 +34,8 @@ class DograhLLMService(OpenAILLMService):
     (OpenAI, Groq, Google, etc.) is determined by the Dograh backend configuration.
     """
 
+    _requires_api_key = True
+
     # The Dograh unified endpoint routes to multiple providers, not all of which
     # accept the "developer" message role. Disable it so the adapter converts
     # "developer" messages to "user" messages before sending.

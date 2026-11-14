@@ -146,19 +146,14 @@ class RawAudioTrack(AudioStreamTrack):
 
         return future
 
-    def mark_pending_futures_done(self):
-        """Mark all pending futures as done in _chunk_queue.
+    def stop(self):
+        """Stop the track, and end the writes waiting on audio it will never send."""
+        for _chunk, future in self._chunk_queue:
+            if future is not None and not future.done():
+                future.set_result(False)
 
-        This should be called when the connection closes to unblock
-        any callers waiting on add_audio_bytes futures.
-        """
-        logger.debug(
-            f"RawAudioTrack.mark_pending_futures_done: marking futures as done, queue size: {len(self._chunk_queue)}"
-        )
-        for _, future in self._chunk_queue:
-            if future and not future.done():
-                future.set_result(True)
         self._chunk_queue.clear()
+        super().stop()
 
     async def recv(self):
         """Return the next audio frame for WebRTC transmission.
@@ -618,18 +613,18 @@ class SmallWebRTCClient:
         self._audio_input_track = None
         self._video_input_track = None
         self._screen_video_track = None
+        if self._audio_output_track:
+            self._audio_output_track.stop()
         self._audio_output_track = None
         self._video_output_track = None
 
     async def _handle_client_closed(self):
         """Handle client connection closure."""
-        # Set pending futures before clearing the track to unblock write_audio_frame
-        if self._audio_output_track:
-            self._audio_output_track.mark_pending_futures_done()
-
         self._audio_input_track = None
         self._video_input_track = None
         self._screen_video_track = None
+        if self._audio_output_track:
+            self._audio_output_track.stop()
         self._audio_output_track = None
         self._video_output_track = None
 
