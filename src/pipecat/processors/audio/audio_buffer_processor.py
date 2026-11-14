@@ -152,10 +152,8 @@ class AudioBufferProcessor(FrameProcessor):
         self._recording = False
 
         self._input_resampler = create_stream_resampler()
-        self._output_resampler = create_stream_resampler(
-            clear_after_secs=None if use_unmixed_audio_for_bot_track else 0.2
-        )
-        self._unmixed_output_resampler = create_stream_resampler(clear_after_secs=None)
+        self._output_resampler = create_stream_resampler()
+        self._unmixed_output_resampler = create_stream_resampler()
         self._last_output_resample_time: float | None = None
         self._last_user_buffer_update_time: float | None = None
         self._last_bot_buffer_update_time: float | None = None
@@ -254,6 +252,7 @@ class AudioBufferProcessor(FrameProcessor):
         self._reset_recording()
         await self._input_resampler.reset()
         await self._output_resampler.reset()
+        await self._unmixed_output_resampler.reset()
         await self._call_event_handler("on_recording_started")
 
     async def stop_recording(self):
@@ -314,7 +313,12 @@ class AudioBufferProcessor(FrameProcessor):
             self._bot_speaking = True
             # No bot audio arrives between replies, so each reply starts the
             # resampler clean instead of with the end of the previous one.
-            await self._output_resampler.reset()
+            # With the unmixed bot track, _resample_output_audio already resets
+            # both resamplers together after a gap in output audio. Resetting
+            # one here would put the tracks out of step, and an output mixer
+            # keeps audio flowing between replies, where a reset cuts a hole.
+            if not self._use_unmixed_audio_for_bot_track:
+                await self._output_resampler.reset()
         elif isinstance(frame, BotStoppedSpeakingFrame):
             self._bot_speaking = False
         elif isinstance(frame, UserMuteStoppedFrame):

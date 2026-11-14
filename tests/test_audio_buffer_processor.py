@@ -1389,6 +1389,43 @@ class TestUnmixedBotTrack(unittest.IsolatedAsyncioTestCase):
         finally:
             await processor.cleanup()
 
+    async def test_a_reply_starting_over_ambience_keeps_both_tracks_continuous(self):
+        # An output mixer keeps 24 kHz audio flowing between replies. The
+        # resamplers taking it to 16 kHz each hold a few milliseconds, which a
+        # reset when the reply starts would drop from one track only.
+        processor = await _make_processor(use_unmixed_audio_for_bot_track=True)
+        processor._output_resampler = create_stream_resampler()
+        processor._unmixed_output_resampler = create_stream_resampler()
+        merged = []
+
+        @processor.event_handler("on_audio_data")
+        async def on_audio(_, audio, rate, channels):
+            merged.append(audio)
+
+        frames, sent_mixed, sent_clean = [], b"", b""
+        for mixed_sample, clean_sample in [(3000, 0)] * 10 + [(5000, 2000)] * 10:
+            frame = OutputAudioRawFrame(struct.pack("<h", mixed_sample) * 480, 24000, 1)
+            frame.unmixed_audio = struct.pack("<h", clean_sample) * 480
+            frames.append(frame)
+            sent_mixed += frame.audio
+            sent_clean += frame.unmixed_audio
+        frames.insert(10, BotStartedSpeakingFrame())
+
+        try:
+            for frame in frames:
+                await processor.process_frame(frame, FrameDirection.DOWNSTREAM)
+            _, bot = await _capture_track_audio(processor)
+        finally:
+            await processor.cleanup()
+
+        expected_mixed = await create_stream_resampler().resample(sent_mixed, 24000, 16000)
+        expected_clean = await create_stream_resampler().resample(sent_clean, 24000, 16000)
+        stereo = b"".join(merged)
+        mixed = b"".join(stereo[i + 2 : i + 4] for i in range(0, len(stereo), 4))
+        self.assertEqual(len(mixed), len(bot))
+        self.assertEqual(mixed[: len(expected_mixed)], expected_mixed)
+        self.assertEqual(bot[: len(expected_clean)], expected_clean)
+
 
 if __name__ == "__main__":
     unittest.main()
